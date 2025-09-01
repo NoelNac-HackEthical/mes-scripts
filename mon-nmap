@@ -1,0 +1,171 @@
+#!/bin/bash
+
+VERSION="mon_scan_2 v2025-08-30-udp-silent"
+if [[ "$1" == "--version" ]]; then echo "$VERSION"; exit 0; fi
+
+# === Couleurs ===
+RED='\033[1;31m'
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[1;36m'
+BLUE='\033[1;34m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# === Argument optionnel : --udp-all ===
+if [[ "$1" == "--udp-all" ]]; then
+    FULL_UDP=true
+    shift
+else
+    FULL_UDP=false
+fi
+
+# === Vérification IP ===
+if [ "$#" -ne 1 ]; then
+    echo -e "${RED}❌ Usage: ${BOLD}$0 [--udp-all] <IP_CIBLE>${NC}"
+    exit 1
+fi
+
+IP=$1
+DOSSIER="nmap_$IP"
+mkdir -p "$DOSSIER"
+
+# === Démarrage chronomètre ===
+START_TIME=$SECONDS
+
+echo -e "${BLUE}🔍 Initialisation du scan Nmap sur ${BOLD}$IP${NC}"
+
+# === Étape 1 ===
+echo -e "${YELLOW}[1] Scan de tous les ports TCP (1-65535)...${NC}"
+nmap -p- --min-rate 10000 -T4 --max-retries 3 -oN "$DOSSIER/1-port_scan.txt" $IP > /dev/null 2>&1
+
+# Ne garder que les vrais "tcp open" (strict, exclut closed/filtered)
+PORTS=$(grep -E '^[[:space:]]*[0-9]+/tcp[[:space:]]+open([[:space:]]|$)' "$DOSSIER/1-port_scan.txt" \
+        | cut -d '/' -f1 | tr '\n' ',' | sed 's/,$//')
+
+if [ -z "$PORTS" ]; then
+    echo -e "${RED}❌ Aucun port TCP ouvert détecté.${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}✔ Ports TCP détectés : ${BOLD}$PORTS${NC}"
+
+# === Étape 2 ===
+echo -e "${YELLOW}[2] Scan de version sur les ports TCP détectés...${NC}"
+nmap -sC -sV -p"$PORTS" --max-retries 3 -T4 -oN "$DOSSIER/2-service_scan.txt" $IP > /dev/null 2>&1
+
+# === Étape 3 ===
+echo -e "${YELLOW}[3] Scan agressif avec détection OS...${NC}"
+nmap -A -T4 -p"$PORTS" --max-retries 3 -oN "$DOSSIER/3-aggressive_scan.txt" $IP > /dev/null 2>&1
+
+# === Étape 4 (UDP) ===
+if [ "$FULL_UDP" = true ]; then
+    echo -e "${YELLOW}[4] Scan UDP complet (-p-)...${NC}"
+    nmap -sU -p- -T4 --max-retries 3 --scan-delay 5ms --host-timeout 20m -oN "$DOSSIER/4-udp_scan.txt" $IP
+else
+    echo -e "${YELLOW}[4] Scan UDP rapide (top 20 ports)...${NC}"
+    nmap -sU --top-ports 20 -T4 --max-retries 2 --host-timeout 10m -oN "$DOSSIER/4-udp_scan.txt" $IP > /dev/null 2>&1
+fi
+echo -e "${GREEN}✔ Scan UDP terminé.${NC}"
+
+echo -e "${GREEN}${BOLD}✔ Tous les scans sont terminés !${NC}"
+
+# === Résumé TCP enrichi ===
+echo -e "\n${CYAN}${BOLD}📄 RÉSUMÉ DES SERVICES TCP DÉTECTÉS :${NC}\n"
+
+TCP_FILE="$DOSSIER/2-service_scan.txt"
+i=1
+inside_block=false
+
+while IFS= read -r line; do
+    if [[ "$line" =~ ^[0-9]+/tcp[[:space:]]+open([[:space:]]|$) ]]; then
+        printf "  [#%d] " "$i"
+        echo -e "$line"
+        i=$((i+1))
+        inside_block=true
+    elif [[ "$inside_block" == true && "$line" =~ ^[\|_] ]]; then
+        line=${line#|_}
+        line=${line#|}
+        echo -e "      → ${line}"
+    else
+        inside_block=false
+    fi
+done < "$TCP_FILE"
+
+# === UDP à l’écran : afficher UNIQUEMENT s'il existe au moins un 'udp open' strict ===
+UDP_OPEN_ONLY="$(grep -E '^[[:space:]]*[0-9]+/udp[[:space:]]+open([[:space:]]|$)' "$DOSSIER/4-udp_scan.txt" || true)"
+
+if [ -n "$UDP_OPEN_ONLY" ]; then
+    echo -e "\n${CYAN}${BOLD}📄 RÉSUMÉ DES SERVICES UDP DÉTECTÉS :${NC}\n"
+    echo "$UDP_OPEN_ONLY" | nl -w2 -s'. ' | while read -r line; do
+        NUM=$(echo "$line" | cut -d'.' -f1)
+        printf "  [#%s] %s\n" "$NUM" "$(echo "$line" | cut -d' ' -f2-)"
+    done
+fi
+
+# === Détection OS ===
+OS=$(grep -i "OS details:" "$DOSSIER/3-aggressive_scan.txt" | sed 's/OS details: //')
+if [ -n "$OS" ]; then
+    echo -e "\n${BLUE}${BOLD}🖥️  Détection du système d’exploitation :${NC} $OS"
+else
+    echo -e "\n${BLUE}🖥️  OS non identifié par Nmap.${NC}"
+fi
+
+# === RÉSUMÉ LISIBLE (summary.txt) ===========================================
+TARGET_FQDN="$(basename "$DOSSIER" | sed 's/^nmap_//')"
+SUMMARY="$DOSSIER/summary.txt"
+
+{
+  echo "==== Résumé $TARGET_FQDN ($(date '+%F %T')) ===="
+  echo
+
+  # 1) Port scan (TCP open strict)
+  if [[ -f "$DOSSIER/1-port_scan.txt" ]]; then
+    echo "[1-port_scan] TCP open :"
+    awk '/^[0-9]+\/tcp/ && $2=="open" {print $0}' "$DOSSIER/1-port_scan.txt"
+    echo
+  fi
+
+  # 2) Service scan (TCP open strict)
+  if [[ -f "$DOSSIER/2-service_scan.txt" ]]; then
+    echo "[2-service_scan] Services & versions (TCP open) :"
+    awk '/^[0-9]+\/tcp/ && $2=="open" {print $0}' "$DOSSIER/2-service_scan.txt"
+    echo
+  fi
+
+  # 3) Aggressive scan (open strict + OS)
+  if [[ -f "$DOSSIER/3-aggressive_scan.txt" ]]; then
+    echo "[3-aggressive_scan] Détails (open) :"
+    awk '/^[0-9]+\/(tcp|udp)/ && $2=="open" {print $0}' "$DOSSIER/3-aggressive_scan.txt"
+    OS_LINE_SUM="$(grep -i 'OS details:' "$DOSSIER/3-aggressive_scan.txt" | head -n1 | sed 's/OS details: //')"
+    [[ -n "$OS_LINE_SUM" ]] && { echo; echo "OS: $OS_LINE_SUM"; }
+    echo
+  fi
+
+  # 4) UDP : écrire uniquement s’il existe des 'udp open' stricts
+  if [[ -n "$UDP_OPEN_ONLY" ]]; then
+    echo "[4-udp_scan] UDP ouverts :"
+    echo "$UDP_OPEN_ONLY"
+    echo
+  fi
+
+  # CSV utiles
+  TCP_CSV="$(awk '/^([0-9]+)\/tcp/ && $2=="open" {split($1,a,"/"); print a[1]}' "$DOSSIER/2-service_scan.txt" | paste -sd, - 2>/dev/null || true)"
+  [[ -n "${TCP_CSV:-}" ]] && { echo "TCP open (CSV) : $TCP_CSV"; echo; }
+
+  if [[ -n "$UDP_OPEN_ONLY" ]]; then
+    UDP_CSV="$(echo "$UDP_OPEN_ONLY" | cut -d'/' -f1 | paste -sd, - 2>/dev/null || true)"
+    [[ -n "${UDP_CSV:-}" ]] && { echo "UDP open (CSV) : $UDP_CSV"; echo; }
+  fi
+
+} > "$SUMMARY"
+
+# === Fin : durée & chemins ===
+ELAPSED=$((SECONDS - START_TIME))
+MINS=$((ELAPSED / 60))
+SECS=$((ELAPSED % 60))
+
+echo -e "\n${CYAN}🧾  Résumé rapide :${NC} ${BOLD}$SUMMARY${NC}"
+[[ -n "$OS" ]] && echo -e "${BLUE}🖥️  OS détecté :${NC} $OS"
+echo -e "\n${BLUE}📁 Résultats complets : ${BOLD}$DOSSIER/${NC}"
+echo -e "${GREEN}⏱️  Durée totale du scan : ${BOLD}${MINS}m ${SECS}s${NC}"
