@@ -207,9 +207,9 @@ fi
     elif [[ "$inside_block" == true && "$line" =~ ^[\|_] ]]; then
       line=${line#|_}; line=${line#|}
       if [[ "$line" =~ ([0-9A-Fa-f]{2}:){4,}[0-9A-Fa-f]{2} ]]; then
-        echo "   → \`$line\`"
+        echo "   → \`$line\`  "
       else
-        echo "   → $line"
+        echo "   → $line  "
       fi
     else
       inside_block=false
@@ -217,6 +217,7 @@ fi
   done < "$F2"
   echo
   echo "---"
+
   echo
   echo "#### Vue synthétique"
   echo "- **TCP ouverts :** \`${TCP_CSV:-}\`"
