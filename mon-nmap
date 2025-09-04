@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-VERSION="mon-nmap v2025.09.04-md-r6"
+VERSION="mon-nmap v2025.09.04-md-r7"
 if [[ "${1:-}" == "--version" ]]; then echo "$VERSION"; exit 0; fi
 if [[ "${1:-}" == "--help" ]]; then
   cat <<EOF
@@ -80,7 +80,7 @@ TCP_CSV="$(printf '%s\n' "$TCP_OPEN_FROM_F2" | cut -d'/' -f1 | paste -sd, - 2>/d
 UDP_CSV=""
 [[ -n "$UDP_OPEN_ONLY" ]] && UDP_CSV="$(printf '%s\n' "$UDP_OPEN_ONLY" | cut -d'/' -f1 | paste -sd, - 2>/dev/null || true)"
 
-# Affichage terminal
+# Affichage terminal (inchangé)
 echo -e "\n${CYAN}${BOLD}📄 RÉSUMÉ DES SERVICES TCP DÉTECTÉS :${NC}\n"
 i=1; inside_block=false
 while IFS= read -r line; do
@@ -108,7 +108,7 @@ else
   echo -e "\n${BLUE}🖥️  OS non identifié par Nmap.${NC}"
 fi
 
-# summary.txt (texte)
+# summary.txt (brut, inchangé)
 {
   echo "==== Résumé $IP ($(date '+%F %T')) ===="
   echo
@@ -144,50 +144,102 @@ fi
   [[ -n "$UDP_CSV" ]] && { echo "UDP open (CSV) : $UDP_CSV"; echo; }
 } > "$FSUM_TXT"
 
-# summary.md (Hugo) — adapté à ta structure : "## Énumération" (dans Hugo) puis "### Scan initial"
+# summary.md (Hugo) — épuré (info non redondante)
 {
   echo "### Scan initial"
   echo
-  echo "#### TCP full port scan"
-  echo '```text'
-  [[ -n "$TCP_OPEN_LINES" ]] && echo "$TCP_OPEN_LINES"
-  echo '```'
-  echo
-  echo "#### Aggressive scan (-A)"
-  echo '```text'
-  inside_block=false
+
+  # ---- Services détectés (TCP) épurés ----
+  echo "#### Services détectés"
+  # On parcourt F2 et on synthétise par port: ligne principale + détails utiles condensés
+  i=1
+  in_block=false
+  have_sshhk=0; ssh_types=""
+  http_title=""; server_hdr=""; ssl_cn=""
+  current_main=""
+
+  flush_item() {
+    # imprime l'item courant si présent
+    if [[ -n "${current_main:-}" ]]; then
+      echo "$i. **$current_main**"
+      # détails non redondants (avec retour-ligne Markdown '  ')
+      [[ -n "$http_title" ]] && echo "   → http-title: $http_title  "
+      [[ -n "$server_hdr" ]] && echo "   → http-server-header: $server_hdr  "
+      [[ -n "$ssl_cn"    ]] && echo "   → ssl-cert CN: $ssl_cn  "
+      if [[ $have_sshhk -eq 1 ]]; then
+        # affiche uniquement les types de clés détectés
+        # normalise espaces + virgules
+        ssh_types_clean="$(echo "$ssh_types" | tr '[:lower:]' '[:upper:]' | sed 's/ \{1,\}/ /g; s/^, *//; s/, *,/, /g')"
+        echo "   → ssh-hostkey: $ssh_types_clean  "
+      fi
+      echo
+      i=$((i+1))
+    fi
+    # reset
+    current_main=""
+    in_block=false
+    have_sshhk=0; ssh_types=""
+    http_title=""; server_hdr=""; ssl_cn=""
+  }
+
   while IFS= read -r line; do
     if [[ "$line" =~ ^[0-9]+/tcp[[:space:]]+open([[:space:]]|$) ]]; then
-      printf "%s\n" "$line"
-      inside_block=true
-    elif [[ "$inside_block" == true && "$line" =~ ^[\|_] ]]; then
-      line=${line#|_}; line=${line#|}
-      # protège les empreintes hex (évite des conversions en emojis)
-      if [[ "$line" =~ ([0-9A-Fa-f]{2}:){4,}[0-9A-Fa-f]{2} ]]; then
-        printf "      → \`%s\`\n" "$line"
-      else
-        printf "      → %s\n" "$line"
+      # nouveau port → flush précédent
+      flush_item
+      current_main="$line"
+      in_block=true
+      continue
+    fi
+    if $in_block && [[ "$line" =~ ^[\|_] ]]; then
+      sub="${line#|_}"; sub="${sub#|}"; sub="${sub#" "}"
+      # Garder uniquement certains sous-détails
+      if [[ "$sub" =~ ^ssh-hostkey: ]]; then
+        have_sshhk=1
+        # on ne stocke pas toute la suite ici; on détectera les types sur les lignes suivantes
+      elif [[ $have_sshhk -eq 1 ]]; then
+        # lignes des clés: "... (RSA)" / "(ECDSA)" / "(ED25519)"
+        if [[ "$sub" =~ \(RSA\) ]]; then ssh_types="$ssh_types, RSA"; fi
+        if [[ "$sub" =~ \(ECDSA\) ]]; then ssh_types="$ssh_types, ECDSA"; fi
+        if [[ "$sub" =~ \(ED25519\) ]]; then ssh_types="$ssh_types, ED25519"; fi
+      elif [[ "$sub" =~ ^http-title: ]]; then
+        http_title="$(echo "$sub" | sed 's/^http-title:[[:space:]]*//')"
+      elif [[ "$sub" =~ ^http-server-header: ]]; then
+        server_hdr="$(echo "$sub" | sed 's/^http-server-header:[[:space:]]*//')"
+      elif [[ "$sub" =~ ^ssl-cert: ]]; then
+        # essaie d'extraire CN/commonName depuis la même ligne si présent
+        if [[ "$sub" =~ commonName=([^/[:space:]]+) ]]; then
+          ssl_cn="${BASH_REMATCH[1]}"
+        elif [[ "$sub" =~ CN=([^/[:space:]]+) ]]; then
+          ssl_cn="${BASH_REMATCH[1]}"
+        fi
+      elif [[ "$sub" =~ ^Subject: ]]; then
+        # cas où Subject est sur une ligne séparée
+        if [[ "$sub" =~ commonName=([^/[:space:]]+) ]]; then
+          ssl_cn="${BASH_REMATCH[1]}"
+        elif [[ "$sub" =~ CN=([^/[:space:]]+) ]]; then
+          ssl_cn="${BASH_REMATCH[1]}"
+        fi
       fi
     else
-      inside_block=false
+      in_block=false
     fi
   done < "$F2"
-  echo '```'
-  echo
+  # flush dernier item
+  flush_item
+
+  # ---- OS détecté ----
+  echo "#### OS détecté"
   if [[ -n "$OS_LINE" ]]; then
-    echo "**OS détecté :**  "
     echo "\`$OS_LINE\`"
-    echo
   else
-    echo "**OS détecté :**  "
     echo "\`Non identifié\`"
-    echo
   fi
+  echo
+
+  # ---- UDP (résumé concis) ----
   echo "#### UDP"
-  if [[ -n "$UDP_OPEN_ONLY" ]]; then
-    echo '```text'
-    echo "$UDP_OPEN_ONLY"
-    echo '```'
+  if [[ -n "$UDP_CSV" ]]; then
+    echo "- Ports ouverts (CSV) : \`$UDP_CSV\`"
   else
     if $FULL_UDP; then
       echo "*(aucun port \`open\` strict détecté ; scan complet \`-p-\`)*"
@@ -196,29 +248,7 @@ fi
     fi
   fi
   echo
-  echo "---"
-  echo
-  echo "#### Résumé des services détectés (TCP)"
-  i=1; inside_block=false
-  while IFS= read -r line; do
-    if [[ "$line" =~ ^[0-9]+/tcp[[:space:]]+open([[:space:]]|$) ]]; then
-      echo "$i. **$line**"
-      i=$((i+1)); inside_block=true
-    elif [[ "$inside_block" == true && "$line" =~ ^[\|_] ]]; then
-      line=${line#|_}; line=${line#|}
-      if [[ "$line" =~ ([0-9A-Fa-f]{2}:){4,}[0-9A-Fa-f]{2} ]]; then
-        echo "   → \`$line\`  "
-      else
-        echo "   → $line  "
-      fi
-    else
-      inside_block=false
-    fi
-  done < "$F2"
-  echo
-  echo "---"
 
-  echo
   echo "#### Vue synthétique"
   echo "- **TCP ouverts :** \`${TCP_CSV:-}\`"
   if [[ -n "$UDP_CSV" ]]; then
