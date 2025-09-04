@@ -1,14 +1,13 @@
 #!/bin/bash
-# mon-nmap — Scan Nmap “agressif” uniquement (sC+sV+OS+traceroute)
-# - Étapes: [1] TCP ports -> [3] Aggressive (-A) -> [4] UDP (optionnel)
-# - Affichage OS : une seule fois au terminal (pas de doublon dans summary.txt)
-# - UDP à l’écran : affiché seulement s’il existe au moins un vrai "udp open"
-# - Summary : jamais d’open|filtered
+# mon-nmap — Scan Nmap agressif uniquement (sC+sV+OS+traceroute)
+# Étapes : [1] TCP full -> [2] Aggressive (-A) -> [3] UDP (optionnel)
+# - OS affiché au terminal et réintégré dans le summary (une seule fois)
+# - UDP : affiché/écrit seulement si 'udp ... open' strict (jamais open|filtered)
 
 set -euo pipefail
 
 # === Version / Aide ==========================================================
-VERSION="mon-nmap v2025.09.04-aggr-only"
+VERSION="mon-nmap v2025.09.04-aggr-only-r1"
 if [[ "${1:-}" == "--version" ]]; then
   echo "$VERSION"
   exit 0
@@ -48,14 +47,14 @@ IP=$1
 DOSSIER="nmap_$IP"
 mkdir -p "$DOSSIER"
 F1="$DOSSIER/1-port_scan.txt"
-F3="$DOSSIER/3-aggressive_scan.txt"
-F4="$DOSSIER/4-udp_scan.txt"
+F2="$DOSSIER/2-aggressive_scan.txt"
+F3="$DOSSIER/3-udp_scan.txt"
 FSUM="$DOSSIER/summary.txt"
 
 START_TIME=$SECONDS
 echo -e "${BLUE}🔍 Initialisation du scan Nmap sur ${BOLD}$IP${NC}"
 
-# === [1] Full TCP port scan ==================================================
+# === [1] TCP full port scan ==================================================
 echo -e "${YELLOW}[1] Scan de tous les ports TCP (1-65535)...${NC}"
 nmap -p- --min-rate 10000 -T4 --max-retries 3 -oN "$F1" "$IP" > /dev/null 2>&1
 
@@ -68,17 +67,16 @@ if [ -z "$PORTS" ]; then
 fi
 echo -e "${GREEN}✔ Ports TCP détectés : ${BOLD}$PORTS${NC}"
 
-# === [3] Scan agressif (inclut sC + sV + OS + traceroute) ===================
-echo -e "${YELLOW}[3] Scan agressif avec détection OS (-A)...${NC}"
-nmap -A -T4 -p"$PORTS" --max-retries 3 -oN "$F3" "$IP" > /dev/null 2>&1
+# === [2] Scan agressif (inclut sC + sV + OS + traceroute) ===================
+echo -e "${YELLOW}[2] Scan agressif avec détection OS (-A)...${NC}"
+nmap -A -T4 -p"$PORTS" --max-retries 3 -oN "$F2" "$IP" > /dev/null 2>&1
 
-# === [4] UDP (rapide par défaut) ============================================
+# === [3] UDP (rapide par défaut) ============================================
+echo -e "${YELLOW}[3] Scan UDP ${FULL_UDP:+complet (-p-) }${FULL_UDP:-rapide (top 20 ports)}...${NC}"
 if $FULL_UDP; then
-  echo -e "${YELLOW}[4] Scan UDP complet (-p-)...${NC}"
-  nmap -sU -p- -T4 --max-retries 3 --scan-delay 5ms --host-timeout 20m -oN "$F4" "$IP"
+  nmap -sU -p- -T4 --max-retries 3 --scan-delay 5ms --host-timeout 20m -oN "$F3" "$IP"
 else
-  echo -e "${YELLOW}[4] Scan UDP rapide (top 20 ports)...${NC}"
-  nmap -sU --top-ports 20 -T4 --max-retries 2 --host-timeout 10m -oN "$F4" "$IP" > /dev/null 2>&1
+  nmap -sU --top-ports 20 -T4 --max-retries 2 --host-timeout 10m -oN "$F3" "$IP" > /dev/null 2>&1
 fi
 echo -e "${GREEN}✔ Scan UDP terminé.${NC}"
 
@@ -99,10 +97,10 @@ while IFS= read -r line; do
   else
     inside_block=false
   fi
-done < "$F3"
+done < "$F2"
 
 # === UDP à l’écran : seulement s'il existe au moins un vrai "udp open" ======
-UDP_OPEN_ONLY="$(LC_ALL=C grep -E '^[[:space:]]*[0-9]+/udp[[:space:]]+open([[:space:]]|$)' "$F4" || true)"
+UDP_OPEN_ONLY="$(LC_ALL=C grep -E '^[[:space:]]*[0-9]+/udp[[:space:]]+open([[:space:]]|$)' "$F3" || true)"
 if [[ -n "$UDP_OPEN_ONLY" ]]; then
   echo -e "\n${CYAN}${BOLD}📄 RÉSUMÉ DES SERVICES UDP DÉTECTÉS :${NC}\n"
   echo "$UDP_OPEN_ONLY" | nl -w2 -s'. ' | while read -r line; do
@@ -111,43 +109,46 @@ if [[ -n "$UDP_OPEN_ONLY" ]]; then
   done
 fi
 
-# === Détection OS (affichée une seule fois au terminal) =====================
-OS_LINE="$(grep -i 'OS details:' "$F3" | head -n1 | sed 's/OS details:[[:space:]]*//I')"
+# === Détection OS (affichée au terminal) ====================================
+OS_LINE="$(grep -i 'OS details:' "$F2" | head -n1 | sed 's/OS details:[[:space:]]*//I')"
 if [[ -n "$OS_LINE" ]]; then
   echo -e "\n${BLUE}${BOLD}🖥️  Détection du système d’exploitation :${NC} $OS_LINE"
 else
   echo -e "\n${BLUE}🖥️  OS non identifié par Nmap.${NC}"
 fi
 
-# === SUMMARY (sans doublon d’OS) =============================================
+# === SUMMARY (numérotation alignée + OS inclus) ==============================
 {
   echo "==== Résumé $IP ($(date '+%F %T')) ===="
   echo
 
-  # 1) Ports TCP ouverts (depuis le full port scan)
+  # [1] Ports TCP ouverts (depuis le full port scan)
   if [[ -s "$F1" ]]; then
     echo "[1-port_scan] TCP open :"
     LC_ALL=C grep -E '^[[:space:]]*[0-9]+/tcp[[:space:]]+open([[:space:]]|$)' "$F1"
     echo
   fi
 
-  # 3) Détails depuis l’aggressif (open strict)
-  if [[ -s "$F3" ]]; then
-    echo "[3-aggressive_scan] Détails (open) :"
-    LC_ALL=C grep -E '^[[:space:]]*[0-9]+/(tcp|udp)[[:space:]]+open([[:space:]]|$)' "$F3"
+  # [2] Détails depuis l’aggressif (open strict) + OS
+  if [[ -s "$F2" ]]; then
+    echo "[2-aggressive_scan] Détails (open) :"
+    LC_ALL=C grep -E '^[[:space:]]*[0-9]+/(tcp|udp)[[:space:]]+open([[:space:]]|$)' "$F2"
     echo
-    # ⚠️ Pas de "OS: ..." ici pour éviter le double affichage
+    if [[ -n "$OS_LINE" ]]; then
+      echo "OS: $OS_LINE"
+      echo
+    fi
   fi
 
-  # 4) UDP ouverts (uniquement si "open" strict)
+  # [3] UDP ouverts (uniquement si 'open' strict)
   if [[ -n "$UDP_OPEN_ONLY" ]]; then
-    echo "[4-udp_scan] UDP ouverts :"
+    echo "[3-udp_scan] UDP ouverts :"
     echo "$UDP_OPEN_ONLY"
     echo
   fi
 
-  # CSV utiles
-  TCP_CSV="$(LC_ALL=C grep -E '^[[:space:]]*[0-9]+/tcp[[:space:]]+open([[:space:]]|$)' "$F3" | cut -d'/' -f1 | paste -sd, - 2>/dev/null || true)"
+  # CSV utiles (open strict)
+  TCP_CSV="$(LC_ALL=C grep -E '^[[:space:]]*[0-9]+/tcp[[:space:]]+open([[:space:]]|$)' "$F2" | cut -d'/' -f1 | paste -sd, - 2>/dev/null || true)"
   [[ -n "${TCP_CSV:-}" ]] && { echo "TCP open (CSV) : $TCP_CSV"; echo; }
 
   if [[ -n "$UDP_OPEN_ONLY" ]]; then
