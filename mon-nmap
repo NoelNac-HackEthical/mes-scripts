@@ -1,12 +1,12 @@
 #!/bin/bash
-# mon-nmap — scan agressif (-A) + sorties summary.txt & summary.md (Hugo-ready)
+# mon-nmap — scan agressif (-A) + summary.txt et summary.md (Hugo, sans emojis)
 # Étapes : [1] TCP full -> [2] Aggressive (-A) -> [3] UDP (optionnel)
-# Règles : UDP "open|filtered" ignoré (affiché/écrit seulement si "udp ... open" strict)
+# Règles : UDP "open|filtered" ignoré (on ne garde que 'udp ... open' strict)
 
 set -euo pipefail
 
 # ===== Version / Aide =========================================================
-VERSION="mon-nmap v2025.09.04-md-r3"
+VERSION="mon-nmap v2025.09.04-md-r5"
 if [[ "${1:-}" == "--version" ]]; then echo "$VERSION"; exit 0; fi
 if [[ "${1:-}" == "--help" ]]; then
   cat <<EOF
@@ -73,6 +73,7 @@ else
   nmap -sU --top-ports 20 -T4 --max-retries 2 --host-timeout 10m -oN "$F3" "$IP" > /dev/null 2>&1
 fi
 echo -e "${GREEN}✔ Scan UDP terminé.${NC}"
+
 echo -e "${GREEN}${BOLD}✔ Tous les scans sont terminés !${NC}"
 
 # ===== Extraction OS + UDP strict =============================================
@@ -150,9 +151,9 @@ fi
   [[ -n "$UDP_CSV" ]] && { echo "UDP open (CSV) : $UDP_CSV"; echo; }
 } > "$FSUM_TXT"
 
-# ===== summary.md (Markdown pour Hugo) =======================================
+# ===== summary.md (Markdown pour Hugo, sans emoji) ============================
 {
-  echo "## 🔎 Scan initial"
+  echo "## Scan initial"
   echo
   echo "### TCP full port scan"
   echo '```text'
@@ -161,14 +162,19 @@ fi
   echo
   echo "### Aggressive scan (-A)"
   echo '```text'
-  # Recréer le bloc avec "→" comme à l'écran
   inside_block=false
   while IFS= read -r line; do
     if [[ "$line" =~ ^[0-9]+/tcp[[:space:]]+open([[:space:]]|$) ]]; then
       printf "%s\n" "$line"
       inside_block=true
     elif [[ "$inside_block" == true && "$line" =~ ^[\|_] ]]; then
-      line=${line#|_}; line=${line#|}; printf "      → %s\n" "$line"
+      line=${line#|_}; line=${line#|}
+      # on protège les empreintes hexadécimales (évite les emojis)
+      if [[ "$line" =~ ([0-9A-Fa-f]{2}:){4,}[0-9A-Fa-f]{2} ]]; then
+        printf "      → \`%s\`\n" "$line"
+      else
+        printf "      → %s\n" "$line"
+      fi
     else
       inside_block=false
     fi
@@ -193,24 +199,21 @@ fi
     if $FULL_UDP; then
       echo "*(aucun port \`open\` strict détecté ; scan complet \`-p-\`)*"
     else
-      echo "*(aucun port \`open\` strict détecté ; scan **top 20**)*"
+      echo "*(aucun port \`open\` strict détecté ; scan top 20)*"
     fi
   fi
   echo
   echo "---"
   echo
-  echo "### 📄 Résumé des services détectés (TCP)"
-  # Liste Markdown sans numéro dans les titres ; on neutralise les emojis
-  i=1; inside_block=false; first_line=""
+  echo "### Résumé des services détectés (TCP)"
+  i=1; inside_block=false
   while IFS= read -r line; do
     if [[ "$line" =~ ^[0-9]+/tcp[[:space:]]+open([[:space:]]|$) ]]; then
-      first_line="$line"
-      echo "$i. **$first_line**"
+      echo "$i. **$line**"
       i=$((i+1)); inside_block=true
     elif [[ "$inside_block" == true && "$line" =~ ^[\|_] ]]; then
       line=${line#|_}; line=${line#|}
-      # Si la sous-ligne ressemble à une empreinte hex / contient :xx:xx:xx ou :[a-z]{2}:
-      if [[ "$line" =~ ([0-9A-Fa-f]{2}:){4,}[0-9A-Fa-f]{2} ]] || [[ "$line" =~ :[a-z]{2}: ]]; then
+      if [[ "$line" =~ ([0-9A-Fa-f]{2}:){4,}[0-9A-Fa-f]{2} ]]; then
         echo "   → \`$line\`"
       else
         echo "   → $line"
@@ -222,7 +225,7 @@ fi
   echo
   echo "---"
   echo
-  echo "### 📊 Vue synthétique"
+  echo "### Vue synthétique"
   echo "- **TCP ouverts :** \`${TCP_CSV:-}\`"
   if [[ -n "$UDP_CSV" ]]; then
     echo "- **UDP ouverts :** \`${UDP_CSV}\`"
