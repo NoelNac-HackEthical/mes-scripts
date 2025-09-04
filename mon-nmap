@@ -1,13 +1,14 @@
 #!/bin/bash
 # mon-nmap — Scan Nmap agressif uniquement (sC+sV+OS+traceroute)
 # Étapes : [1] TCP full -> [2] Aggressive (-A) -> [3] UDP (optionnel)
-# - OS affiché au terminal et réintégré dans le summary (une seule fois)
+# - OS au terminal + dans summary (une seule fois)
 # - UDP : affiché/écrit seulement si 'udp ... open' strict (jamais open|filtered)
+# - summary.txt inclut un "Résumé des services détectés (TCP)" identique à l'écran
 
 set -euo pipefail
 
 # === Version / Aide ==========================================================
-VERSION="mon-nmap v2025.09.04-aggr-only-r1"
+VERSION="mon-nmap v2025.09.04-aggr-only-r2"
 if [[ "${1:-}" == "--version" ]]; then
   echo "$VERSION"
   exit 0
@@ -117,7 +118,7 @@ else
   echo -e "\n${BLUE}🖥️  OS non identifié par Nmap.${NC}"
 fi
 
-# === SUMMARY (numérotation alignée + OS inclus) ==============================
+# === SUMMARY (numérotation alignée + OS + Résumé services TCP) ===============
 {
   echo "==== Résumé $IP ($(date '+%F %T')) ===="
   echo
@@ -146,6 +147,23 @@ fi
     echo "$UDP_OPEN_ONLY"
     echo
   fi
+
+  # === Résumé lisible des services détectés (TCP) ============================
+  echo "Résumé des services détectés (TCP) :"
+  i=1; inside_block=false
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^[0-9]+/tcp[[:space:]]+open([[:space:]]|$) ]]; then
+      printf "  [#%d] %s\n" "$i" "$line"
+      i=$((i+1))
+      inside_block=true
+    elif [[ "$inside_block" == true && "$line" =~ ^[\|_] ]]; then
+      line=${line#|_}; line=${line#|}
+      printf "      → %s\n" "$line"
+    else
+      inside_block=false
+    fi
+  done < "$F2"
+  echo
 
   # CSV utiles (open strict)
   TCP_CSV="$(LC_ALL=C grep -E '^[[:space:]]*[0-9]+/tcp[[:space:]]+open([[:space:]]|$)' "$F2" | cut -d'/' -f1 | paste -sd, - 2>/dev/null || true)"
