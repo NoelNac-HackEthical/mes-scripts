@@ -1,18 +1,16 @@
 #!/bin/bash
 # mon-nmap — scan agressif (-A) + summary.txt et summary.md (Hugo, sans emojis)
 # Étapes : [1] TCP full -> [2] Aggressive (-A) -> [3] UDP (optionnel)
-# Règles : UDP "open|filtered" ignoré (on ne garde que 'udp ... open' strict)
+# Règles : on ignore 'open|filtered' (on ne garde que 'udp ... open' strict)
 
 set -euo pipefail
 
-# ===== Version / Aide =========================================================
-VERSION="mon-nmap v2025.09.04-md-r5"
+VERSION="mon-nmap v2025.09.04-md-r6"
 if [[ "${1:-}" == "--version" ]]; then echo "$VERSION"; exit 0; fi
 if [[ "${1:-}" == "--help" ]]; then
   cat <<EOF
 $VERSION
 Usage: $(basename "$0") [--udp-all] <IP_CIBLE>
-
 Options:
   --udp-all     Scan UDP complet (-p-) au lieu du top 20
   --version     Afficher la version
@@ -21,22 +19,22 @@ EOF
   exit 0
 fi
 
-# ===== Couleurs (terminal) ====================================================
+# Couleurs (terminal)
 RED='\033[1;31m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'
 CYAN='\033[1;36m'; BLUE='\033[1;34m'; BOLD='\033[1m'; NC='\033[0m'
 
-# ===== Option : --udp-all =====================================================
+# Option : --udp-all
 FULL_UDP=false
 if [[ "${1:-}" == "--udp-all" ]]; then FULL_UDP=true; shift; fi
 
-# ===== Argument : IP cible ====================================================
+# IP cible
 if [ "$#" -ne 1 ]; then
   echo -e "${RED}❌ Usage: ${BOLD}$(basename "$0") [--udp-all] <IP_CIBLE>${NC}"
   exit 1
 fi
 IP=$1
 
-# ===== Dossiers / fichiers ====================================================
+# Dossiers/fichiers
 DOSSIER="nmap_$IP"
 mkdir -p "$DOSSIER"
 F1="$DOSSIER/1-port_scan.txt"
@@ -48,10 +46,9 @@ FSUM_MD="$DOSSIER/summary.md"
 START_TIME=$SECONDS
 echo -e "${BLUE}🔍 Initialisation du scan Nmap sur ${BOLD}$IP${NC}"
 
-# ===== [1] TCP full port scan =================================================
+# [1] TCP full port scan
 echo -e "${YELLOW}[1] Scan de tous les ports TCP (1-65535)...${NC}"
 nmap -p- --min-rate 10000 -T4 --max-retries 3 -oN "$F1" "$IP" > /dev/null 2>&1
-
 TCP_OPEN_LINES="$(LC_ALL=C grep -E '^[[:space:]]*[0-9]+/tcp[[:space:]]+open([[:space:]]|$)' "$F1" || true)"
 PORTS="$(printf '%s\n' "$TCP_OPEN_LINES" | cut -d'/' -f1 | paste -sd, - 2>/dev/null || true)"
 if [[ -z "${PORTS:-}" ]]; then
@@ -60,11 +57,11 @@ if [[ -z "${PORTS:-}" ]]; then
 fi
 echo -e "${GREEN}✔ Ports TCP détectés : ${BOLD}$PORTS${NC}"
 
-# ===== [2] Scan agressif (-A) =================================================
+# [2] Aggressive (-A)
 echo -e "${YELLOW}[2] Scan agressif avec détection OS (-A)...${NC}"
 nmap -A -T4 -p"$PORTS" --max-retries 3 -oN "$F2" "$IP" > /dev/null 2>&1
 
-# ===== [3] UDP (texte écran clair) ===========================================
+# [3] UDP
 if $FULL_UDP; then
   echo -e "${YELLOW}[3] Scan UDP complet (-p-)...${NC}"
   nmap -sU -p- -T4 --max-retries 3 --scan-delay 5ms --host-timeout 20m -oN "$F3" "$IP"
@@ -73,20 +70,17 @@ else
   nmap -sU --top-ports 20 -T4 --max-retries 2 --host-timeout 10m -oN "$F3" "$IP" > /dev/null 2>&1
 fi
 echo -e "${GREEN}✔ Scan UDP terminé.${NC}"
-
 echo -e "${GREEN}${BOLD}✔ Tous les scans sont terminés !${NC}"
 
-# ===== Extraction OS + UDP strict =============================================
+# Extractions
 OS_LINE="$(grep -i 'OS details:' "$F2" | head -n1 | sed 's/OS details:[[:space:]]*//I')"
 UDP_OPEN_ONLY="$(LC_ALL=C grep -E '^[[:space:]]*[0-9]+/udp[[:space:]]+open([[:space:]]|$)' "$F3" || true)"
 TCP_OPEN_FROM_F2="$(LC_ALL=C grep -E '^[[:space:]]*[0-9]+/tcp[[:space:]]+open([[:space:]]|$)' "$F2" || true)"
 TCP_CSV="$(printf '%s\n' "$TCP_OPEN_FROM_F2" | cut -d'/' -f1 | paste -sd, - 2>/dev/null || true)"
 UDP_CSV=""
-if [[ -n "$UDP_OPEN_ONLY" ]]; then
-  UDP_CSV="$(printf '%s\n' "$UDP_OPEN_ONLY" | cut -d'/' -f1 | paste -sd, - 2>/dev/null || true)"
-fi
+[[ -n "$UDP_OPEN_ONLY" ]] && UDP_CSV="$(printf '%s\n' "$UDP_OPEN_ONLY" | cut -d'/' -f1 | paste -sd, - 2>/dev/null || true)"
 
-# ===== Affichage terminal : résumé TCP + UDP (si open) + OS ===================
+# Affichage terminal
 echo -e "\n${CYAN}${BOLD}📄 RÉSUMÉ DES SERVICES TCP DÉTECTÉS :${NC}\n"
 i=1; inside_block=false
 while IFS= read -r line; do
@@ -114,7 +108,7 @@ else
   echo -e "\n${BLUE}🖥️  OS non identifié par Nmap.${NC}"
 fi
 
-# ===== summary.txt (texte) ====================================================
+# summary.txt (texte)
 {
   echo "==== Résumé $IP ($(date '+%F %T')) ===="
   echo
@@ -133,7 +127,6 @@ fi
     echo "$UDP_OPEN_ONLY"
     echo
   fi
-  # Résumé lisible (TCP)
   echo "Résumé des services détectés (TCP) :"
   i=1; inside_block=false
   while IFS= read -r line; do
@@ -151,16 +144,16 @@ fi
   [[ -n "$UDP_CSV" ]] && { echo "UDP open (CSV) : $UDP_CSV"; echo; }
 } > "$FSUM_TXT"
 
-# ===== summary.md (Markdown pour Hugo, sans emoji) ============================
+# summary.md (Hugo) — adapté à ta structure : "## Énumération" (dans Hugo) puis "### Scan initial"
 {
-  echo "## Scan initial"
+  echo "### Scan initial"
   echo
-  echo "### TCP full port scan"
+  echo "#### TCP full port scan"
   echo '```text'
   [[ -n "$TCP_OPEN_LINES" ]] && echo "$TCP_OPEN_LINES"
   echo '```'
   echo
-  echo "### Aggressive scan (-A)"
+  echo "#### Aggressive scan (-A)"
   echo '```text'
   inside_block=false
   while IFS= read -r line; do
@@ -169,7 +162,7 @@ fi
       inside_block=true
     elif [[ "$inside_block" == true && "$line" =~ ^[\|_] ]]; then
       line=${line#|_}; line=${line#|}
-      # on protège les empreintes hexadécimales (évite les emojis)
+      # protège les empreintes hex (évite des conversions en emojis)
       if [[ "$line" =~ ([0-9A-Fa-f]{2}:){4,}[0-9A-Fa-f]{2} ]]; then
         printf "      → \`%s\`\n" "$line"
       else
@@ -190,7 +183,7 @@ fi
     echo "\`Non identifié\`"
     echo
   fi
-  echo "### UDP"
+  echo "#### UDP"
   if [[ -n "$UDP_OPEN_ONLY" ]]; then
     echo '```text'
     echo "$UDP_OPEN_ONLY"
@@ -205,7 +198,7 @@ fi
   echo
   echo "---"
   echo
-  echo "### Résumé des services détectés (TCP)"
+  echo "#### Résumé des services détectés (TCP)"
   i=1; inside_block=false
   while IFS= read -r line; do
     if [[ "$line" =~ ^[0-9]+/tcp[[:space:]]+open([[:space:]]|$) ]]; then
@@ -225,7 +218,7 @@ fi
   echo
   echo "---"
   echo
-  echo "### Vue synthétique"
+  echo "#### Vue synthétique"
   echo "- **TCP ouverts :** \`${TCP_CSV:-}\`"
   if [[ -n "$UDP_CSV" ]]; then
     echo "- **UDP ouverts :** \`${UDP_CSV}\`"
@@ -234,7 +227,7 @@ fi
   fi
 } > "$FSUM_MD"
 
-# ===== Fin ====================================================================
+# Fin
 ELAPSED=$((SECONDS - START_TIME)); MINS=$((ELAPSED/60)); SECS=$((ELAPSED%60))
 echo -e "\n${CYAN}🧾  Résumé texte :${NC} ${BOLD}$FSUM_TXT${NC}"
 echo -e "${CYAN}🧾  Résumé Markdown :${NC} ${BOLD}$FSUM_MD${NC}"
