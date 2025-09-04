@@ -6,7 +6,7 @@
 set -euo pipefail
 
 # ===== Version / Aide =========================================================
-VERSION="mon-nmap v2025.09.04-md"
+VERSION="mon-nmap v2025.09.04-md-r3"
 if [[ "${1:-}" == "--version" ]]; then echo "$VERSION"; exit 0; fi
 if [[ "${1:-}" == "--help" ]]; then
   cat <<EOF
@@ -64,11 +64,12 @@ echo -e "${GREEN}✔ Ports TCP détectés : ${BOLD}$PORTS${NC}"
 echo -e "${YELLOW}[2] Scan agressif avec détection OS (-A)...${NC}"
 nmap -A -T4 -p"$PORTS" --max-retries 3 -oN "$F2" "$IP" > /dev/null 2>&1
 
-# ===== [3] UDP (rapide par défaut) ============================================
-echo -e "${YELLOW}[3] Scan UDP ${FULL_UDP:+complet (-p-) }${FULL_UDP:-rapide (top 20 ports)}...${NC}"
+# ===== [3] UDP (texte écran clair) ===========================================
 if $FULL_UDP; then
+  echo -e "${YELLOW}[3] Scan UDP complet (-p-)...${NC}"
   nmap -sU -p- -T4 --max-retries 3 --scan-delay 5ms --host-timeout 20m -oN "$F3" "$IP"
 else
+  echo -e "${YELLOW}[3] Scan UDP top 20...${NC}"
   nmap -sU --top-ports 20 -T4 --max-retries 2 --host-timeout 10m -oN "$F3" "$IP" > /dev/null 2>&1
 fi
 echo -e "${GREEN}✔ Scan UDP terminé.${NC}"
@@ -117,7 +118,7 @@ fi
   echo "==== Résumé $IP ($(date '+%F %T')) ===="
   echo
   echo "[1-port_scan] TCP open :"
-  if [[ -n "$TCP_OPEN_LINES" ]]; then echo "$TCP_OPEN_LINES"; fi
+  [[ -n "$TCP_OPEN_LINES" ]] && echo "$TCP_OPEN_LINES"
   echo
   echo "[2-aggressive_scan] Détails (open) :"
   LC_ALL=C grep -E '^[[:space:]]*[0-9]+/(tcp|udp)[[:space:]]+open([[:space:]]|$)' "$F2" || true
@@ -153,15 +154,15 @@ fi
 {
   echo "## 🔎 Scan initial"
   echo
-  echo "### [1] TCP full port scan"
+  echo "### TCP full port scan"
   echo '```text'
   [[ -n "$TCP_OPEN_LINES" ]] && echo "$TCP_OPEN_LINES"
   echo '```'
   echo
-  echo "### [2] Aggressive scan (-A)"
+  echo "### Aggressive scan (-A)"
   echo '```text'
   # Recréer le bloc avec "→" comme à l'écran
-  i=1; inside_block=false
+  inside_block=false
   while IFS= read -r line; do
     if [[ "$line" =~ ^[0-9]+/tcp[[:space:]]+open([[:space:]]|$) ]]; then
       printf "%s\n" "$line"
@@ -183,19 +184,23 @@ fi
     echo "\`Non identifié\`"
     echo
   fi
-  echo "### [3] UDP"
+  echo "### UDP"
   if [[ -n "$UDP_OPEN_ONLY" ]]; then
     echo '```text'
     echo "$UDP_OPEN_ONLY"
     echo '```'
   else
-    echo "*(aucun port \`open\` strict détecté — ports \`open|filtered\` ignorés)*"
+    if $FULL_UDP; then
+      echo "*(aucun port \`open\` strict détecté ; scan complet \`-p-\`)*"
+    else
+      echo "*(aucun port \`open\` strict détecté ; scan **top 20**)*"
+    fi
   fi
   echo
   echo "---"
   echo
   echo "### 📄 Résumé des services détectés (TCP)"
-  # Liste numérotée Markdown
+  # Liste Markdown sans numéro dans les titres ; on neutralise les emojis
   i=1; inside_block=false; first_line=""
   while IFS= read -r line; do
     if [[ "$line" =~ ^[0-9]+/tcp[[:space:]]+open([[:space:]]|$) ]]; then
@@ -204,7 +209,12 @@ fi
       i=$((i+1)); inside_block=true
     elif [[ "$inside_block" == true && "$line" =~ ^[\|_] ]]; then
       line=${line#|_}; line=${line#|}
-      echo "   → $line"
+      # Si la sous-ligne ressemble à une empreinte hex / contient :xx:xx:xx ou :[a-z]{2}:
+      if [[ "$line" =~ ([0-9A-Fa-f]{2}:){4,}[0-9A-Fa-f]{2} ]] || [[ "$line" =~ :[a-z]{2}: ]]; then
+        echo "   → \`$line\`"
+      else
+        echo "   → $line"
+      fi
     else
       inside_block=false
     fi
