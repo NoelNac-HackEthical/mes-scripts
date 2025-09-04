@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+# mon-recoweb — Recon web rapide façon "mon-nmap"
+# ------------------------------------------------------------
+# Étapes :
+#  1) Détection HTTP/HTTPS (préférence pour HTTPS)
+#  2) WhatWeb (-a 3)       → techno & CMS
+#  3) FFUF (common|medium) → enum rapide, -mc all -k, filtrage auto -fs
+#  4) (optionnel) Feroxbuster --depth 2 si ffuf n'a rien trouvé
+#
+# Sorties : dossier ./mon-recoweb_<target>_<timestamp>/
+#   - nmap.txt (si ports fournis)
+#   - whatweb.txt
+#   - ffuf.csv  + summary_ffuf.txt  + stats_ffuf.txt
+#   - ferox.txt (si déclenché)
+#
+# Dépendances : whatweb, ffuf, curl, awk, sed
+# Optionnel : feroxbuster, nmap
+# ------------------------------------------------------------
+
+set -euo pipefail
+
+C_RST='\033[0m'; C_B='\033[1m'
+C_G='\033[32m'; C_Y='\033[33m'; C_C='\033[36m'; C_R='\033[31m'
+
+TARGET=""
+WORDLIST="/usr/share/wordlists/dirb/common.txt"
+EXTS=""
+THREADS=40
+RATE=""
+RUN_NMAP=false
+NMAP_PORTS="80,443"
+FORCE_HTTP=false
+FORCE_HTTPS=false
+FEROX_IF_EMPTY=false
+FEROX_DEPTH=2
+OUTDIR=""
+VERBOSE=false
+
+usage() {
+  cat <<EOF
+${C_B}Usage:${C_RST} mon-recoweb -t <IP|HOST|URL> [options]
+
+${C_B}Options principales:${C_RST}
+  -t <target>          IP/host, ou URL (avec ou sans schéma). Ex: 10.10.10.10 | site.htb | https://site.htb
+  -w <wordlist>        Wordlist (def: ${WORDLIST})
+  -x <exts>            Extensions (ex: php,txt,html)
+  -T <threads>         Threads ffuf (def: ${THREADS})
+  -p <rate>            Tempo ffuf (ex: 50ms) pour ménager la cible
+  -o <outdir>          Dossier de sortie (def: auto horodaté)
+  -v                   Verbose
+
+${C_B}Détection HTTP/HTTPS:${C_RST}
+  --http               Forcer HTTP
+  --https              Forcer HTTPS
+
+${C_B}Nmap (optionnel):${C_RST}
+  --nmap               Lance un nmap rapide (ports ${NMAP_PORTS})
+  --ports <list>       Ports nmap (def: ${NMAP_PORTS})
+
+${C_B}Feroxbuster (optionnel):${C_RST}
+  --ferox-if-empty     Lance feroxbuster si ffuf n'a rien trouvé
+  --depth <N>          Profondeur feroxbuster (def: ${FEROX_DEPTH})
+
+${C_B}Exemples:${C_RST}
+  mon-recoweb -t 10.10.10.10
+  mon-recoweb -t site.htb -x php,txt,html
+  mon-recoweb -t https://target -w /usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt -T 60
+  mon-recoweb -t target --ferox-if-empty --depth 2
+EOF
+}
+
+log() { echo -e "${C_C}[i]${C_RST} $*"; }
+ok()  { echo -e "${C_G}[✓]${C_RST} $*"; }
+warn(){ echo -e "${C_Y}[!]${C_RST} $*"; }
+err() { echo -e "${C_R}[✗]${C_RST} $*" >&2; }
+
+# Parse args
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -t) TARGET="$2"; shift 2 ;;
+    -w) WORDLIST="$2"; shift 2 ;;
+    -x) EXTS="$2"; shift 2 ;;
+    -T) THREADS="$2"; shift 2 ;;
+    -p) RATE="$2"; shift 2 ;;
+    -o) OUTDIR="$2"; shift 2 ;;
+    -v) VERBOSE=true; shift ;;
+    --http)  FORCE_HTTP=true; shift ;;
+    --https) FORCE_HTTPS=true; shift ;;
+    --nmap) RUN_NMAP=true; shift ;;
+    --ports) NMAP_PORTS="$2"; shift 2 ;;
+    --ferox-if-empty) FEROX_IF_EMPTY=true; shift ;;
+    --depth) FEROX_DEPTH="$2"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) err "Option inconnue: $1"; usage; exit 1 ;;
+  esac
+done
+
+[[ -z "${TARGET}" ]] && { err "Cible manquante (-t)."; usage; exit 1; }
+[[ ! -f "${WORDLIST}" ]] && { err "Wordlist introuvable: ${WORDLIST}"; exit 1; }
+
+# Dossier sortie
+TS="$(date +'%Y%m%d-%H%M%S')"
+SAFE_TGT="$(echo "${TARGET}" | sed 's#[/:]#_#g')"
+OUTDIR="${OUTDIR:-mon-recoweb_${SAFE_TGT}_${TS}}"
+mkdir -p "${OUTDIR}"
+ok "Dossier de travail: ${OUTDIR}"
+
+# Normalisation schéma
+base_host="${TARGET}"
+if [[ "${TARGET}" =~ ^https?:// ]]; then
+  BASE_URL="${TARGET%/}"
+  base_host="$(echo "${TARGET}" | sed -E 's#^https?://##' | cut -d/ -f1)"
+else
+  if ${FORCE_HTTP}; then
+    BASE_URL="http://${TARGET}"
+  elif ${FORCE_HTTPS}; then
+    BASE_URL="https://${TARGET}"
+  else
+    if curl -k -sI "https://${TARGET}" >/dev/null 2>&1; then
+      BASE_URL="https://${TARGET}"
+    else
+      BASE_URL="http://${TARGET}"
+    fi
+  fi
+fi
+ok "Base URL retenue : ${BASE_URL}"
+
+# (Optionnel) Nmap
+if ${RUN_NMAP}; then
+  if command -v nmap >/dev/null 2>&1; then
+    log "Nmap ports ${NMAP_PORTS} (http-title, server-header, enum)…"
+    nmap -p"${NMAP_PORTS}" --open --script http-title,http-server-header,http-enum -T4 "${base_host}" \
+      | tee "${OUTDIR}/nmap.txt"
+  else
+    warn "nmap introuvable, étape ignorée."
+  fi
+fi
+
+# WhatWeb
+if command -v whatweb >/dev/null 2>&1; then
+  log "WhatWeb (-a 3)…"
+  {
+    echo "### ${BASE_URL}"
+    whatweb -a 3 "${BASE_URL}" 2>/dev/null || true
+    if [[ "${BASE_URL}" =~ ^https:// ]]; then
+      whatweb -a 3 "http://${base_host}" 2>/dev/null || true
+    else
+      whatweb -a 3 "https://${base_host}" 2>/dev/null || true
+    fi
+  } | tee "${OUTDIR}/whatweb.txt"
+  ok "WhatWeb terminé."
+else
+  warn "whatweb introuvable, étape ignorée."
+fi
+
+# FFUF : filtrage auto par taille
+if ! command -v ffuf >/dev/null 2>&1; then
+  err "ffuf introuvable. Installe-le puis relance."; exit 1
+fi
+
+RANDPATH="__this_should_not_exist__$(tr -dc 'a-z0-9' </dev/urandom | head -c 10)"
+TESTURL="${BASE_URL}/${RANDPATH}"
+log "Sondage taille d'erreur (404/custom) avec curl : ${TESTURL}"
+SIZE_NOISE="$(curl -k -s -o /dev/null -w '%{size_download}\n' "${TESTURL}" || echo "0")"
+ok "Taille 'bruit' détectée : ${SIZE_NOISE} octets"
+
+FFUF_URL="${BASE_URL}/FUZZ"
+FFUF_CSV="${OUTDIR}/ffuf.csv"
+COMMON_OPTS=( -u "${FFUF_URL}" -w "${WORDLIST}" -mc all -k -t "${THREADS}" -of csv -o "${FFUF_CSV}" )
+[[ -n "${EXTS}" ]] && COMMON_OPTS+=( -x "${EXTS}" )
+[[ -n "${RATE}" ]] && COMMON_OPTS+=( -p "${RATE}" )
+[[ "${SIZE_NOISE}" != "0" ]] && COMMON_OPTS+=( -fs "${SIZE_NOISE}" )
+
+log "FFUF en cours… (wordlist: ${WORDLIST} ${EXTS:+| exts:${EXTS}} | threads:${THREADS} ${RATE:+| rate:${RATE}})"
+${VERBOSE} && echo "+ ffuf ${COMMON_OPTS[*]}"
+ffuf "${COMMON_OPTS[@]}" | sed -n '1,3p' || true
+
+# Résumé & stats FFUF
+SUMMARY="${OUTDIR}/summary_ffuf.txt"
+STATS="${OUTDIR}/stats_ffuf.txt"
+
+if [[ -s "${FFUF_CSV}" ]]; then
+  awk -F',' 'NR==1 {next} {printf "%-4s  len=%-7s  %s\n", $4, $5, $2}' "${FFUF_CSV}" \
+    | sed 's|"||g' | sort -u > "${SUMMARY}"
+  {
+    echo "== Stats par code HTTP =="
+    awk -F',' 'NR>1 {cnt[$4]++} END{for (s in cnt) printf "HTTP %s : %d\n", s, cnt[s]}' "${FFUF_CSV}" | sed 's|"||g' | sort
+    echo
+    echo "== Top 10 tailles les plus fréquentes =="
+    awk -F',' 'NR>1 {cnt[$5]++} END{for (l in cnt) printf "len=%s : %d\n", l, cnt[l]}' "${FFUF_CSV}" | sed 's|"||g' | sort -nr -k2 | head
+  } > "${STATS}"
+  ok "FFUF terminé. Résumé : ${SUMMARY}"
+else
+  warn "FFUF n’a rien écrit (aucun hit ? ban ?)."
+fi
+
+# Feroxbuster si demandé & si ffuf vide
+if ${FEROX_IF_EMPTY}; then
+  if command -v feroxbuster >/dev/null 2>&1; then
+    HITS=0
+    [[ -s "${SUMMARY}" ]] && HITS="$(grep -c . "${SUMMARY}" || true)"
+    if [[ "${HITS}" -eq 0 ]]; then
+      warn "Aucun hit FFUF → lancement feroxbuster (depth ${FEROX_DEPTH})"
+      FER_OUT="${OUTDIR}/ferox.txt"
+      FER_CMD=( feroxbuster -u "${BASE_URL}" -w "${WORDLIST}" --depth "${FEROX_DEPTH}" -k -t 40 --timeout 5 )
+      [[ -n "${EXTS}" ]] && FER_CMD+=( -x "${EXTS}" )
+      [[ -n "${RATE}" ]] && FER_CMD+=( --rate "${RATE}" )
+      ${VERBOSE} && echo "+ ${FER_CMD[*]}"
+      "${FER_CMD[@]}" | tee "${FER_OUT}" || true
+      ok "Feroxbuster terminé : ${FER_OUT}"
+    else
+      ok "FFUF a trouvé des pistes → Feroxbuster non déclenché."
+    fi
+  else
+    warn "feroxbuster introuvable, étape ignorée."
+  fi
+fi
+
+echo
+ok "Recon web fini."
+echo -e "  → Dossier : ${C_B}${OUTDIR}${C_RST}"
+echo "    - whatweb.txt"
+echo "    - ffuf.csv | summary_ffuf.txt | stats_ffuf.txt"
+${RUN_NMAP:+echo "    - nmap.txt"}
+${FEROX_IF_EMPTY:+echo "    - ferox.txt (si lancé)"}
+echo
+echo -e "${C_Y}Astuce:${C_RST} ouvre summary_ffuf.txt et repère les 401/403/500/200 atypiques."
