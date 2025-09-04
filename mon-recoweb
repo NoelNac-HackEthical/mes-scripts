@@ -43,36 +43,36 @@ OUTDIR=""
 VERBOSE=false
 
 usage() {
-  cat <<-EOF
-  ${C_B}Usage:${C_RST} mon-recoweb -t <IP|HOST|URL> [options]
+cat <<EOF
+${C_B}Usage:${C_RST} mon-recoweb -t <IP|HOST|URL> [options]
 
-  ${C_B}Options principales:${C_RST}
-    -t <target>          IP/host, ou URL (avec ou sans schéma). Ex: 10.10.10.10 | site.htb | https://site.htb
-    -w <wordlist>        Wordlist (def: ${WORDLIST})
-    -x <exts>            Extensions (ex: php,txt,html)
-    -T <threads>         Threads ffuf (def: ${THREADS})
-    -p <rate>            Tempo ffuf (ex: 50ms) pour ménager la cible
-    -o <outdir>          Dossier de sortie (def: auto horodaté)
-    -v                   Verbose
+${C_B}Options principales:${C_RST}
+  -t <target>          IP/host, ou URL (avec ou sans schéma). Ex: 10.10.10.10 | site.htb | https://site.htb
+  -w <wordlist>        Wordlist (def: ${WORDLIST})
+  -x <exts>            Extensions (ex: php,txt,html)
+  -T <threads>         Threads ffuf (def: ${THREADS})
+  -p <rate>            Tempo ffuf (ex: 50ms) pour ménager la cible
+  -o <outdir>          Dossier de sortie (def: auto horodaté)
+  -v                   Verbose
 
-  ${C_B}Détection HTTP/HTTPS:${C_RST}
-    --http               Forcer HTTP
-    --https              Forcer HTTPS
+${C_B}Détection HTTP/HTTPS:${C_RST}
+  --http               Forcer HTTP
+  --https              Forcer HTTPS
 
-  ${C_B}Nmap (optionnel):${C_RST}
-    --nmap               Lance un nmap rapide (ports ${NMAP_PORTS})
-    --ports <list>       Ports nmap (def: ${NMAP_PORTS})
+${C_B}Nmap (optionnel):${C_RST}
+  --nmap               Lance un nmap rapide (ports ${NMAP_PORTS})
+  --ports <list>       Ports nmap (def: ${NMAP_PORTS})
 
-  ${C_B}Feroxbuster (optionnel):${C_RST}
-    --ferox-if-empty     Lance feroxbuster si ffuf n'a rien trouvé
-    --depth <N>          Profondeur feroxbuster (def: ${FEROX_DEPTH})
+${C_B}Feroxbuster (optionnel):${C_RST}
+  --ferox-if-empty     Lance feroxbuster si ffuf n'a rien trouvé
+  --depth <N>          Profondeur feroxbuster (def: ${FEROX_DEPTH})
 
-  ${C_B}Exemples:${C_RST}
-    mon-recoweb -t 10.10.10.10
-    mon-recoweb -t site.htb -x php,txt,html
-    mon-recoweb -t https://target -w /usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt -T 60
-    mon-recoweb -t target --ferox-if-empty --depth 2
-  EOF
+${C_B}Exemples:${C_RST}
+  mon-recoweb -t 10.10.10.10
+  mon-recoweb -t site.htb -x php,txt,html
+  mon-recoweb -t https://target -w /usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt -T 60
+  mon-recoweb -t target --ferox-if-empty --depth 2
+EOF
 }
 
 log() { echo -e "${C_C}[i]${C_RST} $*"; }
@@ -151,7 +151,6 @@ fi
 # ---------- WhatWeb (logs sans ANSI via --log-brief) ----------
 if command -v whatweb >/dev/null 2>&1; then
   log "WhatWeb (-a 3)…"
-  # On logge proprement (sans couleurs), et on tente l’autre schéma aussi
   whatweb -a 3 "${BASE_URL}" --log-brief="${OUTDIR}/whatweb.txt" 2>/dev/null || true
   whatweb -a 3 "${ALT_URL}"  --log-brief="${OUTDIR}/whatweb_alt.txt" 2>/dev/null || true
   ok "WhatWeb terminé. (whatweb.txt, whatweb_alt.txt)"
@@ -164,7 +163,6 @@ if ! command -v ffuf >/dev/null 2>&1; then
   err "ffuf introuvable. Installe-le puis relance."; exit 1
 fi
 
-# Sondage d'une URL impossible pour mesurer la taille "bruit"
 RANDPATH="__this_should_not_exist__$(tr -dc 'a-z0-9' </dev/urandom | head -c 10)"
 TESTURL="${BASE_URL}/${RANDPATH}"
 log "Sondage taille d'erreur (404/custom) avec curl : ${TESTURL}"
@@ -180,14 +178,13 @@ COMMON_OPTS=( -u "${FFUF_URL}" -w "${WORDLIST}" -mc all -k -t "${THREADS}" -of c
 
 log "FFUF en cours… (wordlist: ${WORDLIST} ${EXTS:+| exts:${EXTS}} | threads:${THREADS} ${RATE:+| rate:${RATE}})"
 ${VERBOSE} && echo "+ ffuf ${COMMON_OPTS[*]}"
-ffuf "${COMMON_OPTS[@]}" | sed -n '1,3p' || true  # entête ffuf lisible
+ffuf "${COMMON_OPTS[@]}" | sed -n '1,3p' || true
 
 # ---------- Résumé & stats FFUF ----------
 SUMMARY="${OUTDIR}/summary_ffuf.txt"
 STATS="${OUTDIR}/stats_ffuf.txt"
 
 if [[ -s "${FFUF_CSV}" ]]; then
-  # CSV : time,url,redirectlocation,status,length,words,lines
   awk -F',' 'NR==1 {next} {printf "%-4s  len=%-7s  %s\n", $4, $5, $2}' "${FFUF_CSV}" \
     | sed 's|"||g' | sort -u > "${SUMMARY}"
   {
@@ -209,7 +206,7 @@ if ${FEROX_IF_EMPTY}; then
     [[ -s "${SUMMARY}" ]] && HITS="$(grep -c . "${SUMMARY}" || true)"
     if [[ "${HITS}" -eq 0 ]]; then
       warn "Aucun hit FFUF → lancement feroxbuster (depth ${FEROX_DEPTH})"
-      FER_OUT="${OUTDIR}/ferox.txt"
+      FER_OUT="${OUTDIR}/ferox.txt}"
       FER_CMD=( feroxbuster -u "${BASE_URL}" -w "${WORDLIST}" --depth "${FEROX_DEPTH}" -k -t 40 --timeout 5 )
       [[ -n "${EXTS}" ]] && FER_CMD+=( -x "${EXTS}" )
       [[ -n "${RATE}" ]] && FER_CMD+=( --rate "${RATE}" )
