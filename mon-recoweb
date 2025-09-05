@@ -8,6 +8,7 @@
 # Résultats : ./mon-recoweb_<target>/ + logs visibles
 # Dépendances : whatweb, ffuf, curl, awk, sed
 # -----------------------------------------------------------------------------------------
+# SIG: mon-recoweb vLite-2filters-2025-09-05-b
 
 set -euo pipefail
 set -o pipefail
@@ -202,7 +203,7 @@ summarize_csv "${CSV_DIRS}" "${SUMMARY_DIRS}"
 
 # ---------- 3) FFUF — FICHIERS ----------
 CSV_FILES="${OUTDIR}/ffuf_files.csv"
-LOG_FILES="${OUTDIR}/ffuf_files.log"}
+LOG_FILES="${OUTDIR}/ffuf_files.log"
 SUMMARY_FILES="${OUTDIR}/summary_files.txt"
 run_ffuf "fichiers (${EXTS})" "${CSV_FILES}" "${EXTS}" "${FILE_FILTER}" "${LOG_FILES}"
 summarize_csv "${CSV_FILES}" "${SUMMARY_FILES}"
