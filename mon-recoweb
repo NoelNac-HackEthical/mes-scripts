@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SIG: mon-recoweb vMini-perext-whatweb-2025-09-05-impr
+# SIG: mon-recoweb vMini-perext-whatweb-2025-09-05-impr2
 
 set -euo pipefail
 
@@ -60,15 +60,34 @@ echo
 
 # ---------- Helper : CSV ffuf -> lignes lisibles ----------
 format_ffuf_csv_to_lines() {
-  # attend CSV ffuf (en-tête: status,length,words,lines,duration,url,redirectlocation)
+  # attend CSV ffuf (en-tête: status, length, words, lines, duration, url/URL, redirectlocation)
   # imprime: "CODE  len=XXXX    URL"
   awk -F',' '
-    NR==1 { for (i=1; i<=NF; i++) { h[$i]=i } next }
+    NR==1 {
+      for (i=1; i<=NF; i++) {
+        key=$i
+        gsub(/^"|"$/, "", key)
+        h[key]=i
+      }
+      next
+    }
     {
-      code=$h["status"]; length=$h["length"]; url=$h["url"]; 
-      if (url=="") url=$h["URL"]; # compat
-      gsub(/^"|"$/, "", code); gsub(/^"|"$/, "", length); gsub(/^"|"$/, "", url);
-      if (url!="") printf "%s  len=%s    %s\n", code, length, url
+      # indices robustes selon la casse utilisée par ffuf
+      is = (("status" in h) ? h["status"] : (("Status" in h) ? h["Status"] : 0))
+      il = (("length" in h) ? h["length"] : (("Length" in h) ? h["Length"] : 0))
+      iu = (("url"    in h) ? h["url"]    : (("URL"    in h) ? h["URL"]    : (("Url" in h) ? h["Url"] : 0)))
+
+      code = (is ? $(is) : "")
+      length = (il ? $(il) : "")
+      url = (iu ? $(iu) : "")
+
+      gsub(/^"|"$/, "", code)
+      gsub(/^"|"$/, "", length)
+      gsub(/^"|"$/, "", url)
+
+      if (url != "") {
+        printf "%s  len=%s    %s\n", code, length, url
+      }
     }' "$1"
 }
 
