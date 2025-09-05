@@ -76,11 +76,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# === DEBUG VERBEUX ===
+# === DEBUG VERBEUX (safe with set -u) ===
 if $VERBOSE; then
-  set -x                      # trace chaque commande exécutée
-  PS4='+ ${BASH_SOURCE}:${LINENO}:${FUNCNAME[0]}: '  # montre le n° de ligne
+  # use fallbacks if FUNCNAME/BASH_SOURCE are unset
+  PS4='+ ${BASH_SOURCE:-'"$0"'}:${LINENO}:${FUNCNAME[0]:-main}: '
+  set -x
 fi
+
 
 [[ -z "${TARGET}" ]] && { err "Cible manquante (-t)."; usage; exit 1; }
 [[ ! -f "${WORDLIST}" ]] && { err "Wordlist introuvable: ${WORDLIST}"; exit 1; }
