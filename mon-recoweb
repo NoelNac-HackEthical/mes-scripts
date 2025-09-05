@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# mon-recoweb (lite, 2 filtres -fs séparés : dirs & files)
+# mon-recoweb (lite, 2 filtres, exécution ffuf visible + logs)
 # -----------------------------------------------------------------------------------------
-# 1) Détection CMS/technos : whatweb
-# 2) FFUF (répertoires)  : filtre taille appris sur .../RANDOM_DIR/
-# 3) FFUF (fichiers)     : filtre taille appris sur .../RANDOM_FILE.php
+# 1) whatweb (CMS/technos)
+# 2) ffuf (répertoires)  : filtre appris sur .../RANDOM_DIR/
+# 3) ffuf (fichiers)     : filtre appris sur .../RANDOM_FILE.php
 # -mc all -k, threads réglables, rate optionnel
-# Résultats dans ./mon-recoweb_<target>/ + affichage clair
+# Résultats : ./mon-recoweb_<target>/ + logs visibles
 # Dépendances : whatweb, ffuf, curl, awk, sed
 # -----------------------------------------------------------------------------------------
 
 set -euo pipefail
+set -o pipefail
 
 # Couleurs (coupées si pas TTY)
 if [[ -t 1 ]]; then
@@ -39,7 +40,7 @@ ${C_B}Usage:${C_RST} mon-recoweb -t <IP|HOST|URL> [options]
   -T <threads>    Threads ffuf (def: ${THREADS})
   -p <rate>       Tempo ffuf, ex: 50ms (facultatif)
   -o <outdir>     Dossier de sortie (def: auto, sans timestamp)
-  -v              Verbose
+  -v              Verbose (affiche les commandes lancées)
   --http          Forcer HTTP
   --https         Forcer HTTPS
   --no-filter     Désactive les filtres auto (-fs)
@@ -114,14 +115,11 @@ whatweb -a 3 "${BASE_URL}" --log-json="${OUTDIR}/whatweb.json" >/dev/null 2>&1 |
 # ---------- 2 filtres séparés (taille 404) ----------
 DIR_FILTER=""
 FILE_FILTER=""
-
 if ! ${NOFILTER}; then
-  # Sonde type "répertoire"
   RANDDIR="__dir__$(tr -dc 'a-z0-9' </dev/urandom | head -c 10)/"
   URL_DIR="${BASE_URL}/${RANDDIR}"
   SIZE_DIR="$(curl -k -s -o /dev/null -w '%{size_download}\n' "${URL_DIR}" || echo "0")"
 
-  # Sonde type "fichier" (php par défaut)
   RANDFILE="__file__$(tr -dc 'a-z0-9' </dev/urandom | head -c 10).php"
   URL_FILE="${BASE_URL}/${RANDFILE}"
   SIZE_FILE="$(curl -k -s -o /dev/null -w '%{size_download}\n' "${URL_FILE}" || echo "0")"
@@ -129,21 +127,38 @@ if ! ${NOFILTER}; then
   [[ "${SIZE_DIR}"  != "0" ]] && DIR_FILTER="-fs ${SIZE_DIR}"
   [[ "${SIZE_FILE}" != "0" ]] && FILE_FILTER="-fs ${SIZE_FILE}"
 
-  log "Taille 'bruit' DIR  : ${SIZE_DIR}  (URL test: ${URL_DIR})"
-  log "Taille 'bruit' FILE : ${SIZE_FILE} (URL test: ${URL_FILE})"
+  log "Taille 'bruit' DIR  : ${SIZE_DIR}  (test: ${URL_DIR})"
+  log "Taille 'bruit' FILE : ${SIZE_FILE} (test: ${URL_FILE})"
 else
   warn "Filtres auto désactivés (--no-filter)"
 fi
 
 # ---------- Helpers ----------
 run_ffuf () {
-  local mode="$1" out_csv="$2" exts_param="$3" size_filter="$4"
-  local opts=( -u "${BASE_URL}/FUZZ" -w "${WORDLIST}" -mc all -k -t "${THREADS}" -of csv -o "${out_csv}" )
-  [[ -n "${RATE}" ]] && opts+=( -p "${RATE}" )
-  [[ -n "${size_filter}" ]] && opts+=( ${size_filter} )
-  [[ -n "${exts_param}" ]] && opts+=( -x "${exts_param}" )
-  ${VERBOSE} && echo "+ ffuf ${opts[*]}"
-  ffuf "${opts[@]}" | sed -n '1,3p' || true
+  local label="$1" out_csv="$2" exts_param="$3" size_filter="$4" out_log="$5"
+
+  local cmd=( ffuf
+    -u "${BASE_URL}/FUZZ"
+    -w "${WORDLIST}"
+    -mc all
+    -k
+    -t "${THREADS}"
+    -of csv -o "${out_csv}"
+  )
+  [[ -n "${RATE}" ]]        && cmd+=( -p "${RATE}" )
+  [[ -n "${size_filter}" ]] && cmd+=( ${size_filter} )
+  [[ -n "${exts_param}"  ]] && cmd+=( -x "${exts_param}" )
+
+  echo
+  log "Lancement ffuf (${label}) → CSV: ${out_csv}"
+  ${VERBOSE} && echo "+ ${cmd[*]}"
+  # On logge toute la console dans un .log pour diag
+  "${cmd[@]}" 2>&1 | tee "${out_log}"
+  # Vérif fichier créé
+  if [[ ! -f "${out_csv}" ]]; then
+    err "Fichier non créé: ${out_csv}. Voir ${out_log}"
+    exit 1
+  fi
 }
 
 summarize_csv () {
@@ -156,18 +171,18 @@ summarize_csv () {
   fi
 }
 
-# ---------- 2) FFUF — RÉPERTOIRES (sans extensions, filtre DIR) ----------
-log "FFUF (répertoires) : wordlist=${WORDLIST} | threads=${THREADS} ${RATE:+| rate=${RATE}} ${DIR_FILTER:+| ${DIR_FILTER}}"
+# ---------- 2) FFUF — RÉPERTOIRES ----------
 CSV_DIRS="${OUTDIR}/ffuf_dirs.csv"
+LOG_DIRS="${OUTDIR}/ffuf_dirs.log"
 SUMMARY_DIRS="${OUTDIR}/summary_dirs.txt"
-run_ffuf "dirs" "${CSV_DIRS}" "" "${DIR_FILTER}"
+run_ffuf "répertoires" "${CSV_DIRS}" "" "${DIR_FILTER}" "${LOG_DIRS}"
 summarize_csv "${CSV_DIRS}" "${SUMMARY_DIRS}"
 
-# ---------- 3) FFUF — FICHIERS (avec extensions, filtre FILE) ----------
-log "FFUF (fichiers: ${EXTS}) : wordlist=${WORDLIST} | threads=${THREADS} ${RATE:+| rate=${RATE}} ${FILE_FILTER:+| ${FILE_FILTER}}"
+# ---------- 3) FFUF — FICHIERS ----------
 CSV_FILES="${OUTDIR}/ffuf_files.csv"
+LOG_FILES="${OUTDIR}/ffuf_files.log"
 SUMMARY_FILES="${OUTDIR}/summary_files.txt"
-run_ffuf "files" "${CSV_FILES}" "${EXTS}" "${FILE_FILTER}"
+run_ffuf "fichiers (${EXTS})" "${CSV_FILES}" "${EXTS}" "${FILE_FILTER}" "${LOG_FILES}"
 summarize_csv "${CSV_FILES}" "${SUMMARY_FILES}"
 
 # ---------- Affichage clair ----------
@@ -193,5 +208,5 @@ echo
 ok "Recon web (lite, 2 filtres) terminé."
 echo -e "  → Dossier : ${C_B}${OUTDIR}${C_RST}"
 echo "    - whatweb.txt | whatweb.json"
-echo "    - ffuf_dirs.csv | summary_dirs.txt"
-echo "    - ffuf_files.csv | summary_files.txt"
+echo "    - ffuf_dirs.csv | ffuf_dirs.log | summary_dirs.txt"
+echo "    - ffuf_files.csv | ffuf_files.log | summary_files.txt"
