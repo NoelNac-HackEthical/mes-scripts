@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mon-recoweb (lite, 2 filtres, exécution ffuf visible + logs)
+# mon-recoweb (lite, 2 filtres, exécution ffuf visible + logs, tolerant au code 1)
 # -----------------------------------------------------------------------------------------
 # 1) whatweb (CMS/technos)
 # 2) ffuf (répertoires)  : filtre appris sur .../RANDOM_DIR/
@@ -152,12 +152,24 @@ run_ffuf () {
   echo
   log "Lancement ffuf (${label}) → CSV: ${out_csv}"
   ${VERBOSE} && echo "+ ${cmd[*]}"
-  # On logge toute la console dans un .log pour diag
-  "${cmd[@]}" 2>&1 | tee "${out_log}"
-  # Vérif fichier créé
+
+  # --- exécution tolérante : on capture le code ffuf (PIPESTATUS[0])
+  # code 0 = OK (au moins 1 hit) | code 1 = aucun hit | code >=2 = erreur
+  { "${cmd[@]}" 2>&1 | tee "${out_log}"; ffuf_status=${PIPESTATUS[0]}; } || true
+
   if [[ ! -f "${out_csv}" ]]; then
-    err "Fichier non créé: ${out_csv}. Voir ${out_log}"
-    exit 1
+    warn "ffuf n'a pas créé ${out_csv} (aucun résultat ? version ffuf ?). Voir ${out_log}"
+  fi
+
+  if [[ ${ffuf_status} -ge 2 ]]; then
+    err "ffuf a échoué (code ${ffuf_status}). Regarde ${out_log}"
+    exit ${ffuf_status}
+  fi
+
+  if [[ ${ffuf_status} -eq 1 ]]; then
+    warn "ffuf (${label}) : aucun résultat (code 1)."
+  else
+    ok "ffuf (${label}) terminé (code ${ffuf_status})."
   fi
 }
 
