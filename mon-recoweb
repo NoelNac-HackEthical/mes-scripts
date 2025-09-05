@@ -1,60 +1,37 @@
 #!/usr/bin/env bash
-# mon-recoweb (mini) — whatweb d'abord, filtres ON par défaut, per-extension, résultats en évidence
-# ---------------------------------------------------------------------------------------------------
-# Utilisation : mon-recoweb <IP|HOST|URL> [-x php,html,txt] [--no-filters] [-w <wordlist>] [-T <threads>] [-p <rate>] [--http|--https]
-# Conserve uniquement : mon-recoweb_<target>/{whatweb.txt, summary_dirs.txt, summary_files.txt}
-# Dépendances : whatweb, ffuf, curl, awk, sed
-# ---------------------------------------------------------------------------------------------------
-# SIG: mon-recoweb vMini-perext-whatweb-2025-09-05-e
+# mon-recoweb (mini) — annonces des lancements + résultats en évidence
+# --------------------------------------------------------------------------------
+# Conserve : whatweb.txt, summary_dirs.txt, summary_files.txt
+# SIG: mon-recoweb vMini-perext-whatweb-2025-09-05-f
 
 set -euo pipefail
 
 # Couleurs (désactivées si pas TTY)
 if [[ -t 1 ]]; then
   C_B=$'\e[1m'; C_G=$'\e[32m'; C_Y=$'\e[33m'; C_R=$'\e[31m'; C_C=$'\e[36m'; C_RST=$'\e[0m'
-  C_HI="${C_B}${C_C}"     # surlignage (cyan gras)
+  C_HI="${C_B}${C_C}"
 else
   C_B=; C_G=; C_Y=; C_R=; C_C=; C_RST=; C_HI=
 fi
+ok(){ echo -e "${C_G}[✓]${C_RST} $*"; }
+warn(){ echo -e "${C_Y}[!]${C_RST} $*"; }
+err(){ echo -e "${C_R}[✗]${C_RST} $*" >&2; }
 
-ok()   { echo -e "${C_G}[✓]${C_RST} $*"; }
-warn() { echo -e "${C_Y}[!]${C_RST} $*"; }
-err()  { echo -e "${C_R}[✗]${C_RST} $*" >&2; }
-
-# Defaults
-TARGET=""
-WORDLIST="/usr/share/wordlists/dirb/common.txt"
-EXTS="php,html,txt"      # ordre demandé
-THREADS=40
-RATE=""
-OUTDIR=""
-FORCE_HTTP=false
-FORCE_HTTPS=false
-USE_FILTERS=true         # ON par défaut
+TARGET=""; WORDLIST="/usr/share/wordlists/dirb/common.txt"
+EXTS="php,html,txt"; THREADS=40; RATE=""; OUTDIR=""
+FORCE_HTTP=false; FORCE_HTTPS=false; USE_FILTERS=true
 SUMMARY_CODES="200|204|301|302|307|401|403|405|500"
 
-usage(){
-  cat <<EOF
+usage(){ cat <<EOF
 ${C_B}Usage:${C_RST} mon-recoweb <IP|HOST|URL> [options]
-
-Options:
-  -x <exts>       Extensions fichiers (def: ${EXTS})   ex: php,html,txt
-  -w <wordlist>   Wordlist (def: ${WORDLIST})
-  -T <threads>    Threads ffuf (def: ${THREADS})
-  -p <rate>       Tempo ffuf (ex: 50ms)
-  -o <outdir>     Dossier de sortie (def: mon-recoweb_<target>)
-  --http          Forcer HTTP
-  --https         Forcer HTTPS
-  --no-filters    Désactive -fs auto et -fc 404
-  -h|--help       Affiche l'aide
-
-Sorties:
-  whatweb.txt, summary_dirs.txt, summary_files.txt
+  -x <exts>  (def: ${EXTS})   -w <wordlist> (def: ${WORDLIST})
+  -T <threads> (def: ${THREADS})   -p <rate>   -o <outdir>
+  --http | --https             --no-filters
 EOF
 }
 
-# Parse positional TARGET + options
-if [[ $# -eq 0 ]]; then usage; exit 1; fi
+# Parse
+[[ $# -eq 0 ]] && { usage; exit 1; }
 if [[ "${1:-}" != -* ]]; then TARGET="$1"; shift; fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -71,43 +48,37 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ -z "${TARGET}" ]] && { err "Cible manquante."; usage; exit 1; }
-
-# Checks
 command -v ffuf >/dev/null 2>&1 || { err "ffuf manquant"; exit 1; }
 command -v whatweb >/dev/null 2>&1 || { err "whatweb manquant"; exit 1; }
 [[ -f "${WORDLIST}" ]] || { err "Wordlist introuvable: ${WORDLIST}"; exit 1; }
 
-# Outdir
 SAFE_TGT="$(echo "${TARGET}" | sed 's#[/:]#_#g')"
 OUTDIR="${OUTDIR:-mon-recoweb_${SAFE_TGT}}"
 mkdir -p "${OUTDIR}"; ok "Dossier : ${OUTDIR}"
 
-# Détection schéma
-if [[ "${TARGET}" =~ ^https?:// ]]; then
-  BASE_URL="${TARGET%/}"
+if [[ "${TARGET}" =~ ^https?:// ]]; then BASE_URL="${TARGET%/}"
 else
-  if ${FORCE_HTTP}; then
-    BASE_URL="http://${TARGET}"
-  elif ${FORCE_HTTPS}; then
-    BASE_URL="https://${TARGET}"
+  if ${FORCE_HTTP}; then BASE_URL="http://${TARGET}"
+  elif ${FORCE_HTTPS}; then BASE_URL="https://${TARGET}"
   else
-    if curl -k -sI "https://${TARGET}" >/dev/null 2>&1; then BASE_URL="https://${TARGET}"; else BASE_URL="http://${TARGET}"; fi
+    if curl -k -sI "https://${TARGET}" >/dev/null 2>&1; then BASE_URL="https://${TARGET}"
+    else BASE_URL="http://${TARGET}"; fi
   fi
 fi
 ok "Base URL : ${BASE_URL}"
 
-# === 0) WHATWEB → enregistre + affiche en évidence ===
+# --- WHATWEB ---
+echo -e "${C_HI}>>> LANCEMENT: WHATWEB${C_RST}"
 whatweb -a 3 "${BASE_URL}" | sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' > "${OUTDIR}/whatweb.txt" || true
 echo -e "${C_HI}=== WHATWEB ===${C_RST}"
 if [[ -s "${OUTDIR}/whatweb.txt" ]]; then
-  # Coloriser les lignes à l'écran sans polluer le fichier
   while IFS= read -r line; do echo -e "${C_HI}${line}${C_RST}"; done < "${OUTDIR}/whatweb.txt"
 else
   echo -e "${C_HI}(aucune détection)${C_RST}"
 fi
 echo
 
-# Filtres auto -fs + -fc 404 (silencieux)
+# Filtres auto
 DIR_FILTER=""; FILE_FILTER=""; STATUS_FILTER=""
 if ${USE_FILTERS}; then
   set +e
@@ -121,7 +92,6 @@ if ${USE_FILTERS}; then
   STATUS_FILTER="-fc 404"
 fi
 
-# Résumé dynamique (ffuf v1/v2)
 summarize_csv () {
   local csv="$1" summary="$2" codes_re="$3"
   if [[ ! -s "${csv}" ]]; then : > "${summary}"; return; fi
@@ -135,8 +105,7 @@ summarize_csv () {
         if (h=="length" || h=="content_length")   col_len=i
       } next
     }
-    {
-      if (!col_url || !col_status) next
+    { if (!col_url || !col_status) next
       for (i=1; i<=NF; i++) gsub(/"/,"",$i)
       st=$col_status; url=$col_url; ln=(col_len? $col_len : "-")
       if (st ~ CODES_RE) printf "%-3s  len=%-7s  %s\n", st, ln, url
@@ -144,18 +113,17 @@ summarize_csv () {
   ' "${csv}" | sort -u > "${summary}"
 }
 
-# Flags communs ffuf (aucune commande affichée à l'écran)
-_ffuf_common_flags() {
+_ffuf_flags() {
   local arr=( -mc all -k -t "${THREADS}" -of csv )
   [[ -n "${RATE}" ]]          && arr+=( -p "${RATE}" )
   [[ -n "${STATUS_FILTER}" ]] && arr+=( ${STATUS_FILTER} )
   echo "${arr[@]}"
 }
 
-# ---- 1) Répertoires (URL /FUZZ) → temp → summary_dirs.txt → afficher résultats
+# --- FFUF DIRS ---
+echo -e "${C_HI}>>> LANCEMENT: FFUF (RÉPERTOIRES)${C_RST}"
 CSV_DIRS="$(mktemp "${OUTDIR}/.dirs_XXXXXX.csv")"
-LOG_DIRS="$(mktemp "${OUTDIR}/.dirs_XXXXXX.log")"
-ffuf -u "${BASE_URL}/FUZZ" -w "${WORDLIST}" $(_ffuf_common_flags) -o "${CSV_DIRS}" ${DIR_FILTER} >"${LOG_DIRS}" 2>&1 || true
+ffuf -u "${BASE_URL}/FUZZ" -w "${WORDLIST}" $(_ffuf_flags) -o "${CSV_DIRS}" ${DIR_FILTER} >/dev/null 2>&1 || true
 summarize_csv "${CSV_DIRS}" "${OUTDIR}/summary_dirs.txt" "${SUMMARY_CODES}"
 echo -e "${C_HI}=== RÉPERTOIRES TROUVÉS ===${C_RST}"
 if [[ -s "${OUTDIR}/summary_dirs.txt" ]]; then
@@ -165,22 +133,20 @@ else
 fi
 echo
 
-# ---- 2) Fichiers (URL /FUZZ.<ext>) → concat CSV temp → summary_files.txt → afficher résultats
-CSV_FILES_ALL="$(mktemp "${OUTDIR}/.files_all_XXXXXX.csv")"
-: > "${CSV_FILES_ALL}"
+# --- FFUF FILES ---
+echo -e "${C_HI}>>> LANCEMENT: FFUF (FICHIERS: ${EXTS})${C_RST}"
+CSV_FILES_ALL="$(mktemp "${OUTDIR}/.files_all_XXXXXX.csv")"; : > "${CSV_FILES_ALL}"
 first=true
 IFS=',' read -r -a EXT_ARR <<< "${EXTS}"
 for raw in "${EXT_ARR[@]}"; do
   ext="${raw// /}"; [[ -z "${ext}" ]] && continue
   CSV_PART="$(mktemp "${OUTDIR}/.files_${ext}_XXXXXX.csv")"
-  LOG_PART="$(mktemp "${OUTDIR}/.files_${ext}_XXXXXX.log")"
-  ffuf -u "${BASE_URL}/FUZZ.${ext}" -w "${WORDLIST}" $(_ffuf_common_flags) -o "${CSV_PART}" ${FILE_FILTER} >"${LOG_PART}" 2>&1 || true
+  ffuf -u "${BASE_URL}/FUZZ.${ext}" -w "${WORDLIST}" $(_ffuf_flags) -o "${CSV_PART}" ${FILE_FILTER} >/dev/null 2>&1 || true
   if [[ -s "${CSV_PART}" ]]; then
     if ${first}; then cat "${CSV_PART}" >> "${CSV_FILES_ALL}"; first=false; else awk 'NR>1' "${CSV_PART}" >> "${CSV_FILES_ALL}"; fi
   fi
-  rm -f "${CSV_PART}" "${LOG_PART}"
+  rm -f "${CSV_PART}"
 done
-
 summarize_csv "${CSV_FILES_ALL}" "${OUTDIR}/summary_files.txt" "${SUMMARY_CODES}"
 echo -e "${C_HI}=== FICHIERS TROUVÉS (ext: ${EXTS}) ===${C_RST}"
 if [[ -s "${OUTDIR}/summary_files.txt" ]]; then
@@ -189,9 +155,7 @@ else
   echo -e "${C_HI}(aucun)${C_RST}"
 fi
 
-# ---- Nettoyage des temporaires
-rm -f "${CSV_DIRS}" "${LOG_DIRS}" "${CSV_FILES_ALL}"
-
+rm -f "${CSV_DIRS}" "${CSV_FILES_ALL}"
 echo
 ok "Terminé."
 echo "  -> ${OUTDIR}/whatweb.txt"
