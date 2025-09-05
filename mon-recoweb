@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# mon-recoweb (mini) — per-extension, filtres ON par défaut, sorties minimales
-# -----------------------------------------------------------------------------
+# mon-recoweb (mini) — whatweb en premier, per-extension, filtres ON par défaut, sorties minimales
+# -----------------------------------------------------------------------------------------------
 # Utilisation : mon-recoweb <IP|HOST|URL> [-x php,html,txt] [--no-filters] [-w <wordlist>] [-T <threads>] [-p <rate>] [--http|--https]
 # Produit uniquement : mon-recoweb_<target>/{summary_dirs.txt, summary_files.txt}
-# Dépendances : ffuf, curl, awk, sed
-# -----------------------------------------------------------------------------
-# SIG: mon-recoweb vMini-perext-2025-09-05-a
+# Dépendances : whatweb, ffuf, curl, awk, sed
+# -----------------------------------------------------------------------------------------------
+# SIG: mon-recoweb vMini-perext-whatweb-2025-09-05-b
 
 set -euo pipefail
 
@@ -68,6 +68,7 @@ done
 
 # Checks
 command -v ffuf >/dev/null 2>&1 || { err "ffuf manquant"; exit 1; }
+command -v whatweb >/dev/null 2>&1 || { err "whatweb manquant"; exit 1; }
 [[ -f "${WORDLIST}" ]] || { err "Wordlist introuvable: ${WORDLIST}"; exit 1; }
 
 # Outdir
@@ -88,6 +89,11 @@ else
   fi
 fi
 ok "Base URL : ${BASE_URL}"
+
+# === 0) WHATWEB (affichage console uniquement) ===
+# (on n'écrit pas sur disque pour rester "sortie minimale")
+echo "[i] WhatWeb (-a 3)…"
+whatweb -a 3 "${BASE_URL}" | sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' || true
 
 # Filtres auto -fs + -fc 404 (si activés)
 DIR_FILTER=""; FILE_FILTER=""; STATUS_FILTER=""
