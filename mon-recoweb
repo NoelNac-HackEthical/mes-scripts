@@ -76,6 +76,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# === DEBUG VERBEUX ===
+if $VERBOSE; then
+  set -x                      # trace chaque commande exécutée
+  PS4='+ ${BASH_SOURCE}:${LINENO}:${FUNCNAME[0]}: '  # montre le n° de ligne
+fi
+
 [[ -z "${TARGET}" ]] && { err "Cible manquante (-t)."; usage; exit 1; }
 [[ ! -f "${WORDLIST}" ]] && { err "Wordlist introuvable: ${WORDLIST}"; exit 1; }
 command -v whatweb >/dev/null 2>&1 || { err "whatweb manquant"; exit 1; }
