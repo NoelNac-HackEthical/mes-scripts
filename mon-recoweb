@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# mon-recoweb (lite, 2 filtres, exécution ffuf visible + logs, tolerant au code 1)
+# mon-recoweb (lite, 2 filtres, exécution ffuf visible + logs, tolérant au code 1)
 # -----------------------------------------------------------------------------------------
 # 1) whatweb (CMS/technos)
 # 2) ffuf (répertoires)  : filtre appris sur .../RANDOM_DIR/
@@ -150,26 +150,36 @@ run_ffuf () {
   [[ -n "${exts_param}"  ]] && cmd+=( -x "${exts_param}" )
 
   echo
-  log "Lancement ffuf (${label}) → CSV: ${out_csv}"
-  ${VERBOSE} && echo "+ ${cmd[*]}"
+  log "=== DÉBUT ffuf (${label}) ==="
+  echo "[CMD] ${cmd[*]}"
+  echo "[LOG] ${out_log}"
+  echo "[CSV] ${out_csv}"
 
-  # --- exécution tolérante : on capture le code ffuf (PIPESTATUS[0])
-  # code 0 = OK (au moins 1 hit) | code 1 = aucun hit | code >=2 = erreur
-  { "${cmd[@]}" 2>&1 | tee "${out_log}"; ffuf_status=${PIPESTATUS[0]}; } || true
+  # Exécution tolérante : on ne quitte pas sur code 1
+  set +e
+  "${cmd[@]}" >"${out_log}" 2>&1
+  local ffuf_status=$?
+  set -e
 
-  if [[ ! -f "${out_csv}" ]]; then
-    warn "ffuf n'a pas créé ${out_csv} (aucun résultat ? version ffuf ?). Voir ${out_log}"
-  fi
+  {
+    echo
+    echo "-----"
+    echo "ffuf terminé avec code: ${ffuf_status}"
+    echo "Heure: $(date)"
+  } >> "${out_log}"
 
   if [[ ${ffuf_status} -ge 2 ]]; then
-    err "ffuf a échoué (code ${ffuf_status}). Regarde ${out_log}"
-    exit ${ffuf_status}
+    err "ffuf (${label}) a échoué (code ${ffuf_status}). Regarde ${out_log}"
+  elif [[ ${ffuf_status} -eq 1 ]]; then
+    warn "ffuf (${label}) a tourné mais n'a trouvé aucun résultat (code 1). Voir ${out_log}"
+  else
+    ok "ffuf (${label}) a tourné correctement (code 0)."
   fi
 
-  if [[ ${ffuf_status} -eq 1 ]]; then
-    warn "ffuf (${label}) : aucun résultat (code 1)."
-  else
-    ok "ffuf (${label}) terminé (code ${ffuf_status})."
+  # Assure la présence d'un CSV (vide avec header si besoin)
+  if [[ ! -f "${out_csv}" ]]; then
+    echo "time,url,redirectlocation,status,length,words,lines" > "${out_csv}"
+    echo "[i] CSV manquant créé vide: ${out_csv}" >> "${out_log}"
   fi
 }
 
@@ -192,7 +202,7 @@ summarize_csv "${CSV_DIRS}" "${SUMMARY_DIRS}"
 
 # ---------- 3) FFUF — FICHIERS ----------
 CSV_FILES="${OUTDIR}/ffuf_files.csv"
-LOG_FILES="${OUTDIR}/ffuf_files.log"
+LOG_FILES="${OUTDIR}/ffuf_files.log"}
 SUMMARY_FILES="${OUTDIR}/summary_files.txt"
 run_ffuf "fichiers (${EXTS})" "${CSV_FILES}" "${EXTS}" "${FILE_FILTER}" "${LOG_FILES}"
 summarize_csv "${CSV_FILES}" "${SUMMARY_FILES}"
