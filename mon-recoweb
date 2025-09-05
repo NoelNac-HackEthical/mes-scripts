@@ -8,7 +8,7 @@
 # Résultats : ./mon-recoweb_<target>/ + logs visibles
 # Dépendances : whatweb, ffuf, curl, awk, sed
 # -----------------------------------------------------------------------------------------
-# SIG: mon-recoweb vLite-2filters-2025-09-05-b
+# SIG: mon-recoweb vLite-2filters-2025-09-05-c
 
 set -euo pipefail
 set -o pipefail
@@ -41,7 +41,7 @@ ${C_B}Usage:${C_RST} mon-recoweb -t <IP|HOST|URL> [options]
   -T <threads>    Threads ffuf (def: ${THREADS})
   -p <rate>       Tempo ffuf, ex: 50ms (facultatif)
   -o <outdir>     Dossier de sortie (def: auto, sans timestamp)
-  -v              Verbose (affiche les commandes lancées)
+  -v              Verbose (trace pas-à-pas)
   --http          Forcer HTTP
   --https         Forcer HTTPS
   --no-filter     Désactive les filtres auto (-fs)
@@ -53,10 +53,10 @@ Exemples:
 EOF
 }
 
-log() { echo -e "${C_C}[i]${C_RST} $*"; }
-ok()  { echo -e "${C_G}[✓]${C_RST} $*"; }
-warn(){ echo -e "${C_Y}[!]${C_RST} $*"; }
-err() { echo -e "${C_R}[✗]${C_RST} $*" >&2; }
+log()  { echo -e "${C_C}[i]${C_RST} $*"; }
+ok()   { echo -e "${C_G}[✓]${C_RST} $*"; }
+warn() { echo -e "${C_Y}[!]${C_RST} $*"; }
+err()  { echo -e "${C_R}[✗]${C_RST} $*" >&2; }
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -78,11 +78,9 @@ done
 
 # === DEBUG VERBEUX (safe with set -u) ===
 if $VERBOSE; then
-  # use fallbacks if FUNCNAME/BASH_SOURCE are unset
   PS4='+ ${BASH_SOURCE:-'"$0"'}:${LINENO}:${FUNCNAME[0]:-main}: '
   set -x
 fi
-
 
 [[ -z "${TARGET}" ]] && { err "Cible manquante (-t)."; usage; exit 1; }
 [[ ! -f "${WORDLIST}" ]] && { err "Wordlist introuvable: ${WORDLIST}"; exit 1; }
@@ -120,27 +118,39 @@ log "WhatWeb (-a 3)…"
 whatweb -a 3 "${BASE_URL}" | sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' | tee "${OUTDIR}/whatweb.txt"
 whatweb -a 3 "${BASE_URL}" --log-json="${OUTDIR}/whatweb.json" >/dev/null 2>&1 || true
 [[ ! -s "${OUTDIR}/whatweb.txt" ]] && warn "whatweb.txt est vide"
+echo "[DEBUG] after whatweb ok" >&2
 
-# ---------- 2 filtres séparés (taille 404) ----------
+# ---------- 2 filtres séparés (taille 404) — 100% tolérants ----------
 DIR_FILTER=""
 FILE_FILTER=""
+
 if ! ${NOFILTER}; then
+  # Sondes "dir" et "file" générées
   RANDDIR="__dir__$(tr -dc 'a-z0-9' </dev/urandom | head -c 10)/"
   URL_DIR="${BASE_URL}/${RANDDIR}"
-  SIZE_DIR="$(curl -k -s -o /dev/null -w '%{size_download}\n' "${URL_DIR}" || echo "0")"
-
   RANDFILE="__file__$(tr -dc 'a-z0-9' </dev/urandom | head -c 10).php"
   URL_FILE="${BASE_URL}/${RANDFILE}"
-  SIZE_FILE="$(curl -k -s -o /dev/null -w '%{size_download}\n' "${URL_FILE}" || echo "0")"
+
+  # Mesures tolérantes (n'interrompent jamais le script)
+  set +e
+  SIZE_DIR=$(curl -k -sS -o /dev/null -w '%{size_download}\n' "${URL_DIR}")
+  code_dir=$?
+  SIZE_FILE=$(curl -k -sS -o /dev/null -w '%{size_download}\n' "${URL_FILE}")
+  code_file=$?
+  set -e
+
+  [[ ${code_dir}  -ne 0 || -z "${SIZE_DIR}"  ]] && SIZE_DIR=0
+  [[ ${code_file} -ne 0 || -z "${SIZE_FILE}" ]] && SIZE_FILE=0
 
   [[ "${SIZE_DIR}"  != "0" ]] && DIR_FILTER="-fs ${SIZE_DIR}"
   [[ "${SIZE_FILE}" != "0" ]] && FILE_FILTER="-fs ${SIZE_FILE}"
 
-  log "Taille 'bruit' DIR  : ${SIZE_DIR}  (test: ${URL_DIR})"
-  log "Taille 'bruit' FILE : ${SIZE_FILE} (test: ${URL_FILE})"
+  log "Taille 'bruit' DIR  : ${SIZE_DIR}  (test: ${URL_DIR}) code=${code_dir}"
+  log "Taille 'bruit' FILE : ${SIZE_FILE} (test: ${URL_FILE}) code=${code_file}"
 else
   warn "Filtres auto désactivés (--no-filter)"
 fi
+echo "[DEBUG] after filters ok" >&2
 
 # ---------- Helpers ----------
 run_ffuf () {
@@ -164,7 +174,7 @@ run_ffuf () {
   echo "[LOG] ${out_log}"
   echo "[CSV] ${out_csv}"
 
-  # Exécution tolérante : on ne quitte pas sur code 1
+  # Exécution tolérante : ne pas quitter sur code 1
   set +e
   "${cmd[@]}" >"${out_log}" 2>&1
   local ffuf_status=$?
@@ -203,6 +213,7 @@ summarize_csv () {
 }
 
 # ---------- 2) FFUF — RÉPERTOIRES ----------
+echo "[DEBUG] launching ffuf DIRS" >&2
 CSV_DIRS="${OUTDIR}/ffuf_dirs.csv"
 LOG_DIRS="${OUTDIR}/ffuf_dirs.log"
 SUMMARY_DIRS="${OUTDIR}/summary_dirs.txt"
@@ -210,6 +221,7 @@ run_ffuf "répertoires" "${CSV_DIRS}" "" "${DIR_FILTER}" "${LOG_DIRS}"
 summarize_csv "${CSV_DIRS}" "${SUMMARY_DIRS}"
 
 # ---------- 3) FFUF — FICHIERS ----------
+echo "[DEBUG] launching ffuf FILES" >&2
 CSV_FILES="${OUTDIR}/ffuf_files.csv"
 LOG_FILES="${OUTDIR}/ffuf_files.log"
 SUMMARY_FILES="${OUTDIR}/summary_files.txt"
