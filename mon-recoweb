@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SIG: mon-recoweb vMini-perext-whatweb-2025-09-05-impr3
+# SIG: mon-recoweb vMini-perext-whatweb-2025-09-05-impr4
 
 set -euo pipefail
 
@@ -77,9 +77,11 @@ format_ffuf_csv_to_lines() {
       il = (("length" in h) ? h["length"] : (("Length" in h) ? h["Length"] : 0))
       iu = (("url"    in h) ? h["url"]    : (("URL"    in h) ? h["URL"]    : (("Url" in h) ? h["Url"] : 0)))
 
-      code = (is ? $is : "")
-      length = (il ? $il : "")
-      url = (iu ? $iu : "")
+      code=""; length=""; url=""
+
+      if (is) { code = $is } else { code = "" }
+      if (il) { length = $il } else { length = "" }
+      if (iu) { url = $iu } else { url = "" }
 
       gsub(/^"|"$/, "", code)
       gsub(/^"|"$/, "", length)
