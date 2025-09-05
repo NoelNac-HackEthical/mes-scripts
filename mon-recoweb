@@ -8,7 +8,7 @@
 # Résultats : ./mon-recoweb_<target>/ + logs + CSV (toujours présents)
 # Summaries : n'affichent que les codes utiles (par défaut 200/204/301/302/307/401/403/405/500)
 # -----------------------------------------------------------------------------
-# SIG: mon-recoweb vLite-perext-2025-09-05-c
+# SIG: mon-recoweb vLite-perext-2025-09-05-d
 
 set -euo pipefail
 set -o pipefail
@@ -209,21 +209,25 @@ SUMMARY_DIRS="${OUTDIR}/summary_dirs.txt"
 run_ffuf_dirs "${CSV_DIRS}" "${LOG_DIRS}" "${DIR_FILTER}"
 summarize_csv "${CSV_DIRS}" "${SUMMARY_DIRS}" "${SUMMARY_CODES_DEFAULT}"
 
-# 3) FFUF — FICHIERS (boucle par extension /FUZZ.<ext>)
+# ---------- 3) FFUF — FICHIERS (boucle par extension /FUZZ.<ext>) ----------
 echo "[DEBUG] launching ffuf FILES (per-ext)" >&2
 CSV_FILES="${OUTDIR}/ffuf_files.csv"
 LOG_FILES="${OUTDIR}/ffuf_files.log"
 SUMMARY_FILES="${OUTDIR}/summary_files.txt"
-: > "${CSV_FILES}"; : > "${LOG_FILES}"
-echo "time,url,redirectlocation,status,length,words,lines" > "${CSV_FILES}"
+
+: > "${LOG_FILES}"
+: > "${CSV_FILES}"
 
 IFS=',' read -r -a EXT_ARR <<< "${EXTS}"
+first_part_done=false
+
 for raw in "${EXT_ARR[@]}"; do
   ext="${raw// /}"; [[ -z "$ext" ]] && continue
   PART_CSV="${OUTDIR}/ffuf_files_${ext}.csv"
   PART_LOG="${OUTDIR}/ffuf_files_${ext}.log"
 
-  echo; log "=== DÉBUT ffuf (files .${ext}) ==="
+  echo
+  log "=== DÉBUT ffuf (files .${ext}) ==="
   echo "[CMD] ffuf -u \"${BASE_URL}/FUZZ.${ext}\" -w \"${WORDLIST}\" -mc all -k -t \"${THREADS}\" -of csv -o \"${PART_CSV}\" ${RATE:+-p ${RATE}} ${FILE_FILTER} ${STATUS_FILTER}"
   echo "[LOG] ${PART_LOG}"; echo "[CSV] ${PART_CSV}"
 
@@ -238,13 +242,23 @@ for raw in "${EXT_ARR[@]}"; do
 
   { echo; echo "-----"; echo "ffuf .${ext} terminé avec code: ${ffuf_status}"; echo "Heure: $(date)"; } >> "${PART_LOG}"
   cat "${PART_LOG}" >> "${LOG_FILES}"
-  if [[ -f "${PART_CSV}" && -s "${PART_CSV}" ]]; then awk 'NR>1' "${PART_CSV}" >> "${CSV_FILES}"; fi
+
+  if [[ -f "${PART_CSV}" && -s "${PART_CSV}" ]]; then
+    if ! $first_part_done; then
+      # premier morceau : on prend TOUT (en-tête inclus)
+      cat "${PART_CSV}" > "${CSV_FILES}"
+      first_part_done=true
+    else
+      # suivants : on saute l’en-tête
+      awk 'NR>1' "${PART_CSV}" >> "${CSV_FILES}"
+    fi
+  fi
 done
 
 # Résumé fichiers (codes utiles)
 summarize_csv "${CSV_FILES}" "${SUMMARY_FILES}" "${SUMMARY_CODES_DEFAULT}"
 
-# Affichage final (codes utiles)
+# ---------- Affichage final (codes utiles) ----------
 echo
 echo -e "${C_B}=== RÉPERTOIRES TROUVÉS (codes utiles) ===${C_RST}"
 [[ -s "${SUMMARY_DIRS}" ]] && cat "${SUMMARY_DIRS}" || echo "(aucun résultat pertinent)"
