@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SIG: mon-recoweb vMini-perext-whatweb-2025-09-05-impr4
+# SIG: mon-recoweb vMini-perext-whatweb-2025-09-05-impr5
 
 set -euo pipefail
 
@@ -67,28 +67,30 @@ format_ffuf_csv_to_lines() {
       for (i=1; i<=NF; i++) {
         key=$i
         gsub(/^"|"$/, "", key)
-        h[key]=i
+        key_l=tolower(key)
+        h[key_l]=i
       }
       next
     }
     {
-      # indices robustes selon la casse utilisée par ffuf
-      is = (("status" in h) ? h["status"] : (("Status" in h) ? h["Status"] : 0))
-      il = (("length" in h) ? h["length"] : (("Length" in h) ? h["Length"] : 0))
-      iu = (("url"    in h) ? h["url"]    : (("URL"    in h) ? h["URL"]    : (("Url" in h) ? h["Url"] : 0)))
+      is = h["status"];    if (!is) is = h["status "];      # tolérance espaces éventuels
+      il = h["length"];    if (!il) il = h["length "];
+      iu = h["url"];       if (!iu) iu = h["url "];
+      if (!iu) { iu = h["url"]; if (!iu) iu = h["url"]; }   # garde-fou
+      if (!iu && h["URL"]) iu = h["URL"];
 
-      code=""; length=""; url=""
+      code=""; len=""; url="";
 
       if (is) { code = $is } else { code = "" }
-      if (il) { length = $il } else { length = "" }
-      if (iu) { url = $iu } else { url = "" }
+      if (il) { len  = $il } else { len  = "" }
+      if (iu) { url  = $iu } else { url  = "" }
 
       gsub(/^"|"$/, "", code)
-      gsub(/^"|"$/, "", length)
+      gsub(/^"|"$/, "", len)
       gsub(/^"|"$/, "", url)
 
       if (url != "") {
-        printf "%s  len=%s    %s\n", code, length, url
+        printf "%s  len=%s    %s\n", code, len, url
       }
     }' "$1"
 }
