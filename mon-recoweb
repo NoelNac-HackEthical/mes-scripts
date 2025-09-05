@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SIG: mon-recoweb vMini-perext-whatweb-2025-09-05-impr5
+# SIG: mon-recoweb vMini-perext-whatweb-2025-09-05-impr6
 
 set -euo pipefail
 
@@ -10,9 +10,11 @@ C_HI="\e[1m"   # bold
 C_RST="\e[0m"  # reset
 
 # ---------- Defaults (surchargables) ----------
-DIR_WORDLIST="${DIR_WORDLIST:-/usr/share/seclists/Discovery/Web-Content/common.txt}"
-EXT_WORDLIST="${EXT_WORDLIST:-/usr/share/seclists/Discovery/Web-Content/raft-medium-extensions-lowercase.txt}"
+DIR_WORDLIST="${DIR_WORDLIST:-/usr/share/seclists/Discovery/Web-Content/common.txt}"        # répertoires
+FILE_WORDLIST="${FILE_WORDLIST:-/usr/share/seclists/Discovery/Web-Content/common.txt}"      # fichiers (noms)
+EXT_WORDLIST="${EXT_WORDLIST:-/usr/share/seclists/Discovery/Web-Content/raft-medium-extensions-lowercase.txt}" # (non utilisé désormais pour -w, mais on le laisse exportable si besoin)
 EXTS="${EXTS:-php,html,txt}"  # extensions traitées pour la phase "files"
+FFUF_THREADS="${FFUF_THREADS:-40}"
 
 # ---------- Args ----------
 if [[ $# -lt 1 ]]; then
@@ -41,9 +43,9 @@ echo -e "${C_G}[✓]${C_RST} Dossier : ${OUTDIR}"
 echo -e "${C_G}[✓]${C_RST} Base URL : ${BASE_URL%/}"
 
 # ---------- Vérifs outillage minimal ----------
-command -v ffuf >/dev/null 2>&1 || { echo "ffuf est requis." >&2; exit 2; }
+command -v ffuf  >/dev/null 2>&1 || { echo "ffuf est requis." >&2; exit 2; }
 command -v whatweb >/dev/null 2>&1 || { echo "whatweb est requis." >&2; exit 2; }
-command -v curl >/dev/null 2>&1 || { echo "curl est requis." >&2; exit 2; }
+command -v curl  >/dev/null 2>&1 || { echo "curl est requis." >&2; exit 2; }
 
 # ---------- Phase 1 : WhatWeb ----------
 echo -e "${C_B}Lancement de WhatWeb...${C_RST}"
@@ -60,30 +62,27 @@ echo
 
 # ---------- Helper : CSV ffuf -> lignes lisibles ----------
 format_ffuf_csv_to_lines() {
-  # attend CSV ffuf (en-tête: status,length,words,lines,duration,url/URL,redirectlocation)
-  # imprime: "CODE  len=XXXX    URL"
+  # Objectif : être compatible avec diverses variantes d'entêtes (status/Status, length/Length/size/Size, url/URL/Url)
   awk -F',' '
+    function tolow(s){ gsub(/^"|"$/, "", s); return tolower(s) }
     NR==1 {
       for (i=1; i<=NF; i++) {
-        key=$i
-        gsub(/^"|"$/, "", key)
-        key_l=tolower(key)
-        h[key_l]=i
+        key = tolow($i)
+        gsub(/[[:space:]]+/, "", key)
+        h[key]=i
       }
+      # Résoudre les colonnes avec fallback
+      is = (h["status"] ? h["status"] : (h["statuscode"] ? h["statuscode"] : 0))
+      il = (h["length"] ? h["length"] : (h["size"] ? h["size"] : 0))
+      iu = (h["url"]    ? h["url"]    : (h["redirecturl"] ? h["redirecturl"] : (h["link"] ? h["link"] : 0)))
       next
     }
     {
-      is = h["status"];    if (!is) is = h["status "];      # tolérance espaces éventuels
-      il = h["length"];    if (!il) il = h["length "];
-      iu = h["url"];       if (!iu) iu = h["url "];
-      if (!iu) { iu = h["url"]; if (!iu) iu = h["url"]; }   # garde-fou
-      if (!iu && h["URL"]) iu = h["URL"];
+      code=""; len=""; url=""
 
-      code=""; len=""; url="";
-
-      if (is) { code = $is } else { code = "" }
-      if (il) { len  = $il } else { len  = "" }
-      if (iu) { url  = $iu } else { url  = "" }
+      if (is) { code = $(is) } else { code = "" }
+      if (il) { len  = $(il) } else { len  = "" }
+      if (iu) { url  = $(iu) } else { url  = "" }
 
       gsub(/^"|"$/, "", code)
       gsub(/^"|"$/, "", len)
@@ -98,13 +97,16 @@ format_ffuf_csv_to_lines() {
 # ---------- Phase 2 : ffuf répertoires ----------
 echo -e "${C_B}Lancement de ffuf répertoires...${C_RST}"
 CSV_DIRS="${OUTDIR}/dirs.csv"; : > "$CSV_DIRS"
-ffuf -u "${BASE_URL}FUZZ" -w "$DIR_WORDLIST" -of csv -o "$CSV_DIRS" -fc 404 -sa -t 40 >/dev/null 2>&1 || true
+ffuf -u "${BASE_URL}FUZZ" -w "$DIR_WORDLIST" -of csv -o "$CSV_DIRS" -fc 404 -sa -t "$FFUF_THREADS" >/dev/null 2>&1 || true
 
-# Unicité par URL (dernière colonne)
+# Unicité par URL (dernière colonne du CSV = URL dans ffuf)
 awk -F',' 'NR==1{print;next} !seen[$NF]++' "$CSV_DIRS" > "${CSV_DIRS}.uniq" && mv "${CSV_DIRS}.uniq" "$CSV_DIRS"
 
 SUMMARY_DIRS="${OUTDIR}/summary_dirs.txt"
 format_ffuf_csv_to_lines "$CSV_DIRS" > "$SUMMARY_DIRS" || true
+
+# Filtrer les faux "dirs" se terminant par /index.php (ça doit rester côté files)
+sed -i '/\/index\.php$/d' "$SUMMARY_DIRS" 2>/dev/null || true
 
 # Filet de sécurité : s assurer que "/" figure côté répertoires si la racine répond 200
 root_code=$(curl -sk -o /dev/null -w '%{http_code}' "${BASE_URL}") || root_code=0
@@ -127,10 +129,11 @@ echo
 # ---------- Phase 3 : ffuf extensions (files) ----------
 echo -e "${C_B}Lancement de ffuf extensions...${C_RST}"
 CSV_FILES="${OUTDIR}/files.csv"; : > "$CSV_FILES"
-# Extensions traitées (php,html,txt par défaut)
-ffuf -u "${BASE_URL}FUZZ" -w "$EXT_WORDLIST" -of csv -o "$CSV_FILES" -fc 404 -sa -t 40 -e "$(tr -d ' ' <<< "$EXTS" | tr ',' ',')" >/dev/null 2>&1 || true
 
-# Unicité par URL (dernière colonne)
+# On utilise une wordlist de NOMS (FILE_WORDLIST) + -e pour les extensions
+ffuf -u "${BASE_URL}FUZZ" -w "$FILE_WORDLIST" -of csv -o "$CSV_FILES" -fc 404 -sa -t "$FFUF_THREADS" -e "$(tr -d ' ' <<< "$EXTS" | tr ',' ',')" >/dev/null 2>&1 || true
+
+# Unicité par URL
 awk -F',' 'NR==1{print;next} !seen[$NF]++' "$CSV_FILES" > "${CSV_FILES}.uniq" && mv "${CSV_FILES}.uniq" "$CSV_FILES"
 
 SUMMARY_FILES="${OUTDIR}/summary_files.txt"
