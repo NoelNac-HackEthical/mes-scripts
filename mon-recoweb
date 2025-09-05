@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# mon-recoweb (mini) — whatweb en premier, per-extension, filtres ON par défaut, sorties minimales
+# mon-recoweb (mini) — whatweb en premier, filtres ON par défaut, per-extension
 # -----------------------------------------------------------------------------------------------
 # Utilisation : mon-recoweb <IP|HOST|URL> [-x php,html,txt] [--no-filters] [-w <wordlist>] [-T <threads>] [-p <rate>] [--http|--https]
-# Produit uniquement : mon-recoweb_<target>/{summary_dirs.txt, summary_files.txt}
+# Conserve uniquement : mon-recoweb_<target>/{whatweb.txt, summary_dirs.txt, summary_files.txt}
 # Dépendances : whatweb, ffuf, curl, awk, sed
 # -----------------------------------------------------------------------------------------------
-# SIG: mon-recoweb vMini-perext-whatweb-2025-09-05-b
+# SIG: mon-recoweb vMini-perext-whatweb-2025-09-05-c
 
 set -euo pipefail
 
@@ -42,8 +42,8 @@ Options:
   --no-filters    Désactive -fs auto et -fc 404
   -h|--help       Affiche l'aide
 
-Sorties gardées uniquement:
-  summary_dirs.txt, summary_files.txt
+Sorties conservées:
+  whatweb.txt, summary_dirs.txt, summary_files.txt
 EOF
 }
 
@@ -90,10 +90,10 @@ else
 fi
 ok "Base URL : ${BASE_URL}"
 
-# === 0) WHATWEB (affichage console uniquement) ===
-# (on n'écrit pas sur disque pour rester "sortie minimale")
+# === 0) WHATWEB → affiche + enregistre whatweb.txt ===
 echo "[i] WhatWeb (-a 3)…"
-whatweb -a 3 "${BASE_URL}" | sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' || true
+whatweb -a 3 "${BASE_URL}" | sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' | tee "${OUTDIR}/whatweb.txt" >/dev/null || true
+[[ ! -s "${OUTDIR}/whatweb.txt" ]] && warn "whatweb.txt est vide (ou whatweb n'a rien renvoyé)."
 
 # Filtres auto -fs + -fc 404 (si activés)
 DIR_FILTER=""; FILE_FILTER=""; STATUS_FILTER=""
@@ -143,13 +143,13 @@ _ffuf_common_flags() {
   echo "${arr[@]}"
 }
 
-# ---- 1) Répertoires (URL /FUZZ)
+# ---- 1) Répertoires (URL /FUZZ) → temp → summary_dirs.txt
 CSV_DIRS="$(mktemp "${OUTDIR}/.dirs_XXXXXX.csv")"
 LOG_DIRS="$(mktemp "${OUTDIR}/.dirs_XXXXXX.log")"
 ffuf -u "${BASE_URL}/FUZZ" -w "${WORDLIST}" $(_ffuf_common_flags) -o "${CSV_DIRS}" ${DIR_FILTER} >"${LOG_DIRS}" 2>&1 || true
 summarize_csv "${CSV_DIRS}" "${OUTDIR}/summary_dirs.txt" "${SUMMARY_CODES}"
 
-# ---- 2) Fichiers (URL /FUZZ.<ext>), concat CSV puis résumé, puis cleanup
+# ---- 2) Fichiers (URL /FUZZ.<ext>) → concat CSV temp → summary_files.txt
 CSV_FILES_ALL="$(mktemp "${OUTDIR}/.files_all_XXXXXX.csv")"
 : > "${CSV_FILES_ALL}"
 first=true
@@ -171,5 +171,6 @@ rm -f "${CSV_DIRS}" "${LOG_DIRS}" "${CSV_FILES_ALL}"
 
 echo
 ok "Terminé."
+echo "  -> ${OUTDIR}/whatweb.txt"
 echo "  -> ${OUTDIR}/summary_dirs.txt"
 echo "  -> ${OUTDIR}/summary_files.txt"
