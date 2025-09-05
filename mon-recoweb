@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SIG: mon-recoweb vMini-perext-whatweb-2025-09-05-impr2
+# SIG: mon-recoweb vMini-perext-whatweb-2025-09-05-impr3
 
 set -euo pipefail
 
@@ -60,7 +60,7 @@ echo
 
 # ---------- Helper : CSV ffuf -> lignes lisibles ----------
 format_ffuf_csv_to_lines() {
-  # attend CSV ffuf (en-tête: status, length, words, lines, duration, url/URL, redirectlocation)
+  # attend CSV ffuf (en-tête: status,length,words,lines,duration,url/URL,redirectlocation)
   # imprime: "CODE  len=XXXX    URL"
   awk -F',' '
     NR==1 {
@@ -77,9 +77,9 @@ format_ffuf_csv_to_lines() {
       il = (("length" in h) ? h["length"] : (("Length" in h) ? h["Length"] : 0))
       iu = (("url"    in h) ? h["url"]    : (("URL"    in h) ? h["URL"]    : (("Url" in h) ? h["Url"] : 0)))
 
-      code = (is ? $(is) : "")
-      length = (il ? $(il) : "")
-      url = (iu ? $(iu) : "")
+      code = (is ? $is : "")
+      length = (il ? $il : "")
+      url = (iu ? $iu : "")
 
       gsub(/^"|"$/, "", code)
       gsub(/^"|"$/, "", length)
@@ -102,7 +102,7 @@ awk -F',' 'NR==1{print;next} !seen[$NF]++' "$CSV_DIRS" > "${CSV_DIRS}.uniq" && m
 SUMMARY_DIRS="${OUTDIR}/summary_dirs.txt"
 format_ffuf_csv_to_lines "$CSV_DIRS" > "$SUMMARY_DIRS" || true
 
-# Filet de sécurité : s'assurer que "/" figure côté répertoires si la racine répond 200
+# Filet de sécurité : s assurer que "/" figure côté répertoires si la racine répond 200
 root_code=$(curl -sk -o /dev/null -w '%{http_code}' "${BASE_URL}") || root_code=0
 if [[ "$root_code" == "200" ]]; then
   if ! grep -qE '/\s*$' "$SUMMARY_DIRS" 2>/dev/null; then
