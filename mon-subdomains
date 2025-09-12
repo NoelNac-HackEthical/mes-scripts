@@ -1,216 +1,166 @@
 #!/usr/bin/env bash
 set -euo pipefail
+LC_ALL=C
 
-# mon-subdomains (édition simplifiée)
-# Modes :
-#  -f | --fast   (défaut)  -> /usr/share/wordlists/htb-dns-vh-1000.txt
-#  -m | --medium           -> /usr/share/wordlists/htb-dns-vh-2000.txt
-#  -l | --large            -> /usr/share/wordlists/htb-dns-vh-5000.txt
-#  --custom <file>         -> wordlist personnalisée
-#
-# Options utiles :
-#  --https     -> cible en HTTPS (sinon HTTP)
-#  -p <port>   -> port (défaut 80 ou 443 si --https)
-#  --dns-only  -> n’exécute que le bruteforce DNS
-#  --vhost-only-> n’exécute que le fuzzing VHOST
-#  -h | --help -> aide
-#
-# Dépendances : ffuf, (dnsx OU gobuster), curl, (whatweb facultatif)
+# mon-subdomains (HTB) — v3.8
+# Modes : -f/--fast (1000, défaut)  -m/--medium (2000)  -l/--large (5000)  --custom FILE
+# Opts  : -t N (threads, défaut 50)  --timeout S (défaut 8)  --debug  -h/--help
 
-# ---------- Couleurs ----------
-GREEN="\e[32m"; BLUE="\e[34m"; YELLOW="\e[33m"; RED="\e[31m"; BOLD="\e[1m"; RESET="\e[0m"
+GREEN="\e[32m"; BLUE="\e[34m"; YELLOW="\e[33m"; RESET="\e[0m"
 ok(){ echo -e "${GREEN}[✓]${RESET} $*"; }
 info(){ echo -e "${BLUE}[*]${RESET} $*"; }
 warn(){ echo -e "${YELLOW}[!]${RESET} $*"; }
-err(){ echo -e "${RED}[x]${RESET} $*" >&2; }
 
-usage(){
-cat <<'EOF'
+usage(){ cat <<'EOF'
 Usage:
   mon-subdomains <domaine.htb> [mode] [options]
 
-Modes (un seul, défaut = --fast) :
-  -f, --fast        Utilise /usr/share/wordlists/htb-dns-vh-1000.txt
-  -m, --medium      Utilise /usr/share/wordlists/htb-dns-vh-2000.txt
-  -l, --large       Utilise /usr/share/wordlists/htb-dns-vh-5000.txt
-  --custom <file>   Utilise la wordlist fournie
+Modes:
+  -f, --fast      /usr/share/wordlists/htb-dns-vh-1000.txt (défaut)
+  -m, --medium    /usr/share/wordlists/htb-dns-vh-2000.txt
+  -l, --large     /usr/share/wordlists/htb-dns-vh-5000.txt
+  --custom FILE   Wordlist personnalisée
 
-Options :
-  --https           Utiliser HTTPS (défaut HTTP)
-  -p <port>         Port (défaut 80 ou 443 si --https)
-  --dns-only        Bruteforce DNS uniquement
-  --vhost-only      VHOST fuzzing uniquement
-  -h, --help        Afficher l'aide
-
-Exemples :
-  mon-subdomains site.htb                 # FAST (1000)
-  mon-subdomains site.htb --medium        # 2000
-  mon-subdomains site.htb --large --https # 5000 en HTTPS
-  mon-subdomains site.htb --custom ~/lists/mes-hosts.txt
+Options:
+  -t N            Threads (défaut: 50)
+  --timeout S     Timeout HTTP en secondes (défaut: 8)
+  --debug         Conserver les sorties brutes de ffuf
+  -h, --help      Aide
 EOF
 }
 
-need(){ command -v "$1" >/dev/null 2>&1; }
-
-# ---------- Params ----------
+# ----------- Parse args ------------
 DOMAIN="${1-}"
-[[ -z "${DOMAIN}" || "${DOMAIN}" == "-h" || "${DOMAIN}" == "--help" ]] && { usage; exit 1; }
+[[ -z "${DOMAIN}" || "${DOMAIN}" == "-h" || "${DOMAIN}" == "--help" ]] && { usage; exit 0; }
 shift || true
 
-MODE="fast"
-WL_CUSTOM=""
-HTTPS=0
-PORT=""
-DNS_ONLY=0
-VHOST_ONLY=0
-
+MODE="fast"; WL=""; THREADS=50; TIMEOUT=8; DEBUG=0
 while (( "$#" )); do
   case "$1" in
-    -f|--fast) MODE="fast"; shift;;
+    -f|--fast)   MODE="fast"; shift;;
     -m|--medium) MODE="medium"; shift;;
-    -l|--large) MODE="large"; shift;;
-    --custom) WL_CUSTOM="${2-}"; MODE="custom"; shift 2;;
-    --https) HTTPS=1; shift;;
-    -p) PORT="${2-}"; shift 2;;
-    --dns-only) DNS_ONLY=1; shift;;
-    --vhost-only) VHOST_ONLY=1; shift;;
-    -h|--help) usage; exit 0;;
+    -l|--large)  MODE="large"; shift;;
+    --custom)    WL="${2-}"; MODE="custom"; shift 2;;
+    -t)          THREADS="${2-}"; shift 2;;
+    --timeout)   TIMEOUT="${2-}"; shift 2;;
+    --debug)     DEBUG=1; shift;;
+    -h|--help)   usage; exit 0;;
     *) warn "Option inconnue: $1"; usage; exit 1;;
   esac
 done
 
-# ---------- Sélection de la wordlist ----------
-WL_PATH=""
-case "$MODE" in
-  fast)   WL_PATH="/usr/share/wordlists/htb-dns-vh-1000.txt" ;;
-  medium) WL_PATH="/usr/share/wordlists/htb-dns-vh-2000.txt" ;;
-  large)  WL_PATH="/usr/share/wordlists/htb-dns-vh-5000.txt" ;;
-  custom) WL_PATH="$WL_CUSTOM" ;;
-esac
+# ----------- Wordlists par mode ------------
+if [[ "$MODE" == "fast"   ]]; then WL="/usr/share/wordlists/htb-dns-vh-1000.txt"; fi
+if [[ "$MODE" == "medium" ]]; then WL="/usr/share/wordlists/htb-dns-vh-2000.txt"; fi
+if [[ "$MODE" == "large"  ]]; then WL="/usr/share/wordlists/htb-dns-vh-5000.txt"; fi
 
-if [[ -z "$WL_PATH" ]]; then
-  err "Aucune wordlist sélectionnée."
-  exit 1
-fi
+# ----------- Vérifs préalables ------------
+[[ -z "$WL" || ! -f "$WL" ]] && { warn "Wordlist manquante pour le mode $MODE ($WL)."; exit 1; }
+command -v gobuster >/dev/null || { warn "gobuster manquant"; exit 1; }
+command -v ffuf     >/dev/null || { warn "ffuf manquant"; exit 1; }
+command -v curl     >/dev/null || { warn "curl manquant"; exit 1; }
 
-if [[ ! -f "$WL_PATH" || ! -r "$WL_PATH" ]]; then
-  err "Wordlist introuvable ou illisible : $WL_PATH"
-  if [[ "$MODE" != "custom" ]]; then
-    echo -e "  → Assure-toi d'avoir généré les listes via :"
-    echo -e "    ${BOLD}make-htb-wordlist.sh --batch \"1000,2000,5000\" --with-medium --destdir /usr/share/wordlists --basename htb-dns-vh${RESET}"
-  fi
-  exit 1
-fi
-
-# ---------- Déterminer IP (via /etc/hosts prioritairement) ----------
-TARGET_IP="$(getent hosts "$DOMAIN" | awk '{print $1}' | head -n1 || true)"
-if [[ -z "${TARGET_IP}" ]]; then
-  TARGET_IP="$(command -v dig >/dev/null 2>&1 && dig +short A "$DOMAIN" | head -n1 || true)"
-fi
-
-# ---------- Schéma/port ----------
-SCHEME="http"; CURL_TLS=""; FFUF_TLS=""
-if [[ -z "${PORT}" ]]; then
-  if [[ $HTTPS -eq 1 ]]; then PORT=443; else PORT=80; fi
-fi
-if [[ $HTTPS -eq 1 ]]; then SCHEME="https"; CURL_TLS="--insecure"; FFUF_TLS="-k"; fi
-
-# ---------- Dépendances ----------
-[[ -z "${TARGET_IP}" ]] && warn "Impossible de déterminer l'IP de ${DOMAIN} (le VHOST fuzzing fonctionnera mieux avec /etc/hosts)."
-
-need ffuf || { err "ffuf requis (sudo apt install ffuf)."; exit 1; }
-HAS_DNSX=0; HAS_GOBUSTER=0
-if need dnsx; then HAS_DNSX=1; fi
-if need gobuster; then HAS_GOBUSTER=1; fi
-if ! (( HAS_DNSX )) && ! (( HAS_GOBUSTER )); then
-  err "dnsx ou gobuster requis pour le bruteforce DNS (sudo apt install dnsx gobuster)."
-  exit 1
-fi
-need curl || { err "curl requis."; exit 1; }
-WHATWEB=0; if need whatweb; then WHATWEB=1; fi
-
-# ---------- Dossier sorties ----------
+# ----------- Préparation dossier ------------
 OUTDIR="mon-subdomains_${DOMAIN}"
 mkdir -p "$OUTDIR"
 ok "Dossier : $OUTDIR"
 ok "Domaine : $DOMAIN"
-[[ -n "${TARGET_IP}" ]] && ok "IP détectée : ${TARGET_IP}"
-ok "Mode : ${MODE^^}  (wordlist: $WL_PATH)"
+
+TARGET_IP="$(getent hosts "$DOMAIN" | awk '{print $1}' | head -n1 || true)"
+[[ -n "$TARGET_IP" ]] && ok "IP détectée : $TARGET_IP" || warn "IP non détectée"
+
+ok "Mode : $(echo "$MODE" | tr a-z A-Z)  (wordlist: $WL)"
+
+# ----------- Détection schéma HTTP/HTTPS ------------
+SCHEME="http"; PORT=80; CURL_TLS=""; FFUF_TLS=""
+probe(){ curl -sk --max-time "$TIMEOUT" -o /dev/null -w "%{http_code}" "$1" || true; }
+if [[ "$(probe http://${DOMAIN}:80/)" == "000" ]]; then
+  if [[ "$(probe https://${DOMAIN}:443/)" != "000" ]]; then
+    SCHEME="https"; PORT=443; CURL_TLS="--insecure"; FFUF_TLS="-k"
+  fi
+fi
 ok "Schéma/Port : ${SCHEME}/${PORT}"
 
 DNS_TXT="$OUTDIR/dns_found.txt"
 VHOST_TXT="$OUTDIR/vhost_found.txt"
-WHATWEB_TXT="$OUTDIR/whatweb.txt"
 SUMMARY_TXT="$OUTDIR/summary.txt"
-SUMMARY_MD="$OUTDIR/summary.md"
-FFUF_JSON="$OUTDIR/ffuf_vhosts.json"
+FFUF_CSV="$OUTDIR/ffuf_vhosts.csv"
 FFUF_TXT="$OUTDIR/ffuf_vhosts.txt"
-: > "$DNS_TXT"; : > "$VHOST_TXT"; : > "$WHATWEB_TXT"; : > "$SUMMARY_TXT"; : > "$SUMMARY_MD"
-: > "$FFUF_TXT"
+: > "$DNS_TXT"; : > "$VHOST_TXT"; : > "$SUMMARY_TXT"
 
-# ---------- Fonctions ----------
-dns_bruteforce(){
-  info "Bruteforce DNS avec $( [[ $HAS_DNSX -eq 1 ]] && echo dnsx || echo gobuster ) ..."
-  if [[ $HAS_DNSX -eq 1 ]]; then
-    dnsx -silent -a -d "$DOMAIN" -w "$WL_PATH" | tee -a "$DNS_TXT" || true
-  else
-    gobuster dns -d "$DOMAIN" -w "$WL_PATH" --no-color \
-      | awk '/Found: /{print $2}' | tee -a "$DNS_TXT" || true
-  fi
-  local c; c=$(grep -c '.' "$DNS_TXT" || true)
-  [[ "$c" -gt 0 ]] && ok "DNS: $c sous-domaines résolus." || warn "DNS: rien trouvé."
+# ----------- DNS bruteforce (Gobuster v3+) ------------
+info "Bruteforce DNS avec gobuster ..."
+gobuster dns --domain "$DOMAIN" -w "$WL" -t "$THREADS" --no-color 2>/dev/null \
+  | awk '/Found:/{print $2}' | tee -a "$DNS_TXT" >/dev/null || true
+DNS_COUNT=$(grep -c '.' "$DNS_TXT" || true)
+[[ "$DNS_COUNT" -gt 0 ]] && ok "DNS: ${DNS_COUNT} sous-domaines." || warn "DNS: rien trouvé."
+
+# ----------- VHOST fuzzing (ffuf) — CSV puis fallback stdout ------------
+extract_tokens() {
+  # Lit stdin -> garde tokens [a-z0-9-] (1..63) -> suffixe .DOMAIN -> uniq
+  awk 'NF{print $1}' \
+  | tr -d '\r\t ' \
+  | grep -E '^[a-z0-9-]{1,63}$' \
+  | awk -v d="$DOMAIN" '{print $0 "." d}' \
+  | sort -u
 }
 
-vhost_fuzz(){
-  if [[ -z "${TARGET_IP}" ]]; then warn "Pas d'IP → VHOST fuzzing sauté."; return; fi
-  info "VHOST fuzzing via ffuf (Host: FUZZ.${DOMAIN})..."
-  # Calibrage taille de base
-  local INVALID_HOST="x$(tr -dc 'a-z0-9' </dev/urandom | head -c8).${DOMAIN}"
-  local BASE_SIZE
-  BASE_SIZE=$(curl -sS $CURL_TLS --max-time 5 -H "Host: ${INVALID_HOST}" "${SCHEME}://${TARGET_IP}:${PORT}/" -o /dev/null -w "%{size_download}" || echo "0")
-  info "Réponse base (Host invalide) : ${BASE_SIZE} octets"
-
+if [[ -n "${TARGET_IP-}" ]]; then
+  info "VHOST fuzzing via ffuf ..."
+  # 1) Tentative CSV silencieuse
+  rm -f "$FFUF_CSV"
   ffuf -u "${SCHEME}://${TARGET_IP}:${PORT}/" $FFUF_TLS \
        -H "Host: FUZZ.${DOMAIN}" \
-       -w "$WL_PATH" -mc all -r -s \
-       -fs "$BASE_SIZE" \
-       -o "$FFUF_JSON" -of json 2>/dev/null | tee -a "$FFUF_TXT" >/dev/null || true
+       -w "$WL" -t "$THREADS" -ac -r \
+       -of csv -o "$FFUF_CSV" -s 1>/dev/null 2>/dev/null || true
 
-  if command -v jq >/dev/null 2>&1; then
-    jq -r '.results[].input.FUZZ' "$FFUF_JSON" 2>/dev/null \
-      | sed "s#^#&.${DOMAIN}#" | sort -u | tee -a "$VHOST_TXT" >/dev/null || true
-  else
-    grep -oP '(?<=FUZZ: )[^\s]+' "$FFUF_TXT" 2>/dev/null \
-      | sed "s#^#&.${DOMAIN}#" | sort -u | tee -a "$VHOST_TXT" >/dev/null || true
+  if [[ -s "$FFUF_CSV" ]]; then
+    tail -n +2 "$FFUF_CSV" | cut -d',' -f1 | extract_tokens > "$VHOST_TXT" || true
   fi
 
-  local c; c=$(grep -c '.' "$VHOST_TXT" || true)
-  [[ "$c" -gt 0 ]] && ok "VHOST: $c hôtes virtuels probables." || warn "VHOST: rien détecté."
-}
+  # 2) Fallback si rien trouvé en CSV : relance façon "console" (comme ton test manuel)
+  if [[ ! -s "$VHOST_TXT" ]]; then
+    if [[ $DEBUG -eq 1 ]]; then
+      ffuf -u "${SCHEME}://${TARGET_IP}:${PORT}/" $FFUF_TLS \
+           -H "Host: FUZZ.${DOMAIN}" \
+           -w "$WL" -t "$THREADS" -ac \
+           2>/dev/null | tee "$FFUF_TXT" \
+           | awk '/\[Status:/{print $1}' | extract_tokens > "$VHOST_TXT" || true
+    else
+      ffuf -u "${SCHEME}://${TARGET_IP}:${PORT}/" $FFUF_TLS \
+           -H "Host: FUZZ.${DOMAIN}" \
+           -w "$WL" -t "$THREADS" -ac \
+           2>/dev/null | awk '/\[Status:/{print $1}' | extract_tokens > "$VHOST_TXT" || true
+    fi
+  fi
 
-do_whatweb(){
-  [[ $WHATWEB -eq 0 ]] && return
-  local targets=()
-  [[ -s "$DNS_TXT" ]] && mapfile -t arr <"$DNS_TXT" && targets+=("${arr[@]}")
-  [[ -s "$VHOST_TXT" ]] && mapfile -t arr2 <"$VHOST_TXT" && targets+=("${arr2[@]}")
-  [[ ${#targets[@]} -eq 0 ]] && return
-  info "WhatWeb sur les trouvailles..."
-  for h in "${targets[@]}"; do
-    whatweb -a 1 "${SCHEME}://${h}:${PORT}/" 2>/dev/null | tee -a "$WHATWEB_TXT" || true
-  done
-}
+  VHOST_COUNT=$(grep -c '.' "$VHOST_TXT" || true)
+  [[ "$VHOST_COUNT" -gt 0 ]] && ok "VHOST: ${VHOST_COUNT} hôtes." || warn "VHOST: rien trouvé."
+else
+  warn "Pas d'IP → VHOST fuzzing sauté."
+fi
 
-# ---------- Lancements ----------
-if [[ $VHOST_ONLY -eq 0 ]]; then dns_bruteforce; fi
-if [[ $DNS_ONLY  -eq 0 ]]; then vhost_fuzz; fi
-do_whatweb
-
-# ---------- Résumés ----------
-DNS_COUNT=$(grep -c '.' "$DNS_TXT" || true)
-VHOST_COUNT=$(grep -c '.' "$VHOST_TXT" || true)
-
+# ----------- Résumé texte ------------
 {
   echo "=== mon-subdomains (${DOMAIN}) ==="
-  echo "Mode        : ${MODE}"
-  echo "Wordlist    : ${WL_PATH}"
-  [[ -n "${TARGET_IP}" ]] && echo "IP cible   :
+  echo "Date: $(date '+%F %T')"
+  [[ -n "${TARGET_IP-}" ]] && echo "IP: ${TARGET_IP}"
+  echo "Schéma/Port: ${SCHEME}/${PORT}"
+  echo "Wordlist: ${WL}"
+  echo
+  echo "DNS (${DNS_COUNT})"
+  [[ -s "$DNS_TXT" ]] && sed 's/^/  - /' "$DNS_TXT" || echo "  - (aucun)"
+  echo
+  echo "VHOST ($(grep -c '.' "$VHOST_TXT" || true))"
+  [[ -s "$VHOST_TXT" ]] && sed 's/^/  - /' "$VHOST_TXT" || echo "  - (aucun)"
+  if [[ $DEBUG -eq 1 ]]; then
+    echo
+    echo "--- Debug ---"
+    [[ -f "$FFUF_CSV" ]] && echo "CSV: $FFUF_CSV"
+    [[ -f "$FFUF_TXT" ]] && echo "TXT: $FFUF_TXT"
+  fi
+} > "$SUMMARY_TXT"
+
+# ----------- Affichage synthèse ------------
+[[ -s "$DNS_TXT" ]] && { echo -e "${GREEN}[✓]${RESET} DNS trouvés :"; sed 's/^/   • /' "$DNS_TXT"; }
+[[ -s "$VHOST_TXT" ]] && { echo -e "${GREEN}[✓]${RESET} VHOST trouvés :"; sed 's/^/   • /' "$VHOST_TXT"; }
