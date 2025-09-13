@@ -2,165 +2,249 @@
 set -euo pipefail
 LC_ALL=C
 
-# mon-subdomains (HTB) — v3.8
-# Modes : -f/--fast (1000, défaut)  -m/--medium (2000)  -l/--large (5000)  --custom FILE
-# Opts  : -t N (threads, défaut 50)  --timeout S (défaut 8)  --debug  -h/--help
+# mon-subdomains — v0.2
+# VHOST fuzzing (ffuf) avec :
+#  - Master unique 5000 (découpe 1000/2000/5000 via head)
+#  - Conservation de la wordlist effective dans le dossier d’output
+#  - Filtre anti-wildcard par baseline: taille (-fs) + nombre de mots (-fw)
+#  - Parse robuste des sorties console ffuf (lignes “collées”)
+#  - Options: --codes, --save-hosts, --dry-run-hosts, --https, --debug
+#
+# Exemples:
+#   mon-subdomains site.htb                 # fast (1000)
+#   mon-subdomains site.htb --medium        # 2000
+#   mon-subdomains site.htb --large         # 5000
+#   mon-subdomains site.htb --codes 200,401,403
+#   mon-subdomains site.htb --save-hosts
+#   mon-subdomains site.htb --dry-run-hosts
 
 GREEN="\e[32m"; BLUE="\e[34m"; YELLOW="\e[33m"; RESET="\e[0m"
 ok(){ echo -e "${GREEN}[✓]${RESET} $*"; }
 info(){ echo -e "${BLUE}[*]${RESET} $*"; }
 warn(){ echo -e "${YELLOW}[!]${RESET} $*"; }
 
-usage(){ cat <<'EOF'
+usage(){
+  cat <<'USAGE'
 Usage:
   mon-subdomains <domaine.htb> [mode] [options]
 
-Modes:
-  -f, --fast      /usr/share/wordlists/htb-dns-vh-1000.txt (défaut)
-  -m, --medium    /usr/share/wordlists/htb-dns-vh-2000.txt
-  -l, --large     /usr/share/wordlists/htb-dns-vh-5000.txt
-  --custom FILE   Wordlist personnalisée
+Modes :
+  -f, --fast      1000 premières lignes de la master
+  -m, --medium    2000 premières lignes
+  -l, --large     5000 (entière)
+  --custom FILE   Wordlist personnalisée (ignore la master)
 
-Options:
-  -t N            Threads (défaut: 50)
-  --timeout S     Timeout HTTP en secondes (défaut: 8)
-  --debug         Conserver les sorties brutes de ffuf
+Options :
+  --master FILE   Chemin de la master 5000 (défaut: /usr/share/wordlists/htb-dns-vh-5000.txt)
+  -t N            Threads ffuf (défaut: 50)
+  --timeout S     Timeout curl (défaut: 8)
+  --https         Forcer HTTPS (sinon auto: http, et fallback https si http down)
+  --codes LIST    Liste pour ffuf -mc (ex: "200,401,403", défaut: all)
+  --save-hosts    Ajoute les vhosts trouvés dans /etc/hosts (backup, sans doublon)
+  --dry-run-hosts Simule l’ajout dans /etc/hosts (n’écrit rien)
+  --debug         Affiche la commande ffuf et garde la sortie brute
   -h, --help      Aide
-EOF
+USAGE
 }
 
-# ----------- Parse args ------------
+# ---------- Parse ----------
 DOMAIN="${1-}"
-[[ -z "${DOMAIN}" || "${DOMAIN}" == "-h" || "${DOMAIN}" == "--help" ]] && { usage; exit 0; }
+if [[ -z "${DOMAIN}" || "${DOMAIN}" == "-h" || "${DOMAIN}" == "--help" ]]; then usage; exit 0; fi
 shift || true
 
-MODE="fast"; WL=""; THREADS=50; TIMEOUT=8; DEBUG=0
+MODE="fast"; WL=""; THREADS=50; TIMEOUT=8
+FORCE_HTTPS=0; DEBUG=0; SAVE_HOSTS=0; DRY_RUN_HOSTS=0
+MASTER="/usr/share/wordlists/htb-dns-vh-5000.txt"
+MATCH_CODES="all"
+
 while (( "$#" )); do
   case "$1" in
     -f|--fast)   MODE="fast"; shift;;
     -m|--medium) MODE="medium"; shift;;
     -l|--large)  MODE="large"; shift;;
     --custom)    WL="${2-}"; MODE="custom"; shift 2;;
+    --master)    MASTER="${2-}"; shift 2;;
     -t)          THREADS="${2-}"; shift 2;;
     --timeout)   TIMEOUT="${2-}"; shift 2;;
+    --https)     FORCE_HTTPS=1; shift;;
+    --codes)     MATCH_CODES="${2-}"; shift 2;;
+    --save-hosts) SAVE_HOSTS=1; shift;;
+    --dry-run-hosts) DRY_RUN_HOSTS=1; shift;;
     --debug)     DEBUG=1; shift;;
     -h|--help)   usage; exit 0;;
     *) warn "Option inconnue: $1"; usage; exit 1;;
   esac
 done
 
-# ----------- Wordlists par mode ------------
-if [[ "$MODE" == "fast"   ]]; then WL="/usr/share/wordlists/htb-dns-vh-1000.txt"; fi
-if [[ "$MODE" == "medium" ]]; then WL="/usr/share/wordlists/htb-dns-vh-2000.txt"; fi
-if [[ "$MODE" == "large"  ]]; then WL="/usr/share/wordlists/htb-dns-vh-5000.txt"; fi
+# ---------- Outils ----------
+command -v ffuf >/dev/null || { warn "ffuf manquant"; exit 1; }
+command -v curl >/dev/null || { warn "curl manquant"; exit 1; }
 
-# ----------- Vérifs préalables ------------
-[[ -z "$WL" || ! -f "$WL" ]] && { warn "Wordlist manquante pour le mode $MODE ($WL)."; exit 1; }
-command -v gobuster >/dev/null || { warn "gobuster manquant"; exit 1; }
-command -v ffuf     >/dev/null || { warn "ffuf manquant"; exit 1; }
-command -v curl     >/dev/null || { warn "curl manquant"; exit 1; }
-
-# ----------- Préparation dossier ------------
+# ---------- Dossier & WL effective ----------
 OUTDIR="mon-subdomains_${DOMAIN}"
 mkdir -p "$OUTDIR"
 ok "Dossier : $OUTDIR"
 ok "Domaine : $DOMAIN"
 
+if [[ "$MODE" == "custom" ]]; then
+  [[ -f "$WL" ]] || { warn "Wordlist custom introuvable: $WL"; exit 1; }
+  ok "Mode : CUSTOM  (wordlist: $WL)"
+else
+  [[ -f "$MASTER" ]] || { warn "Master introuvable: $MASTER"; exit 1; }
+  case "$MODE" in
+    fast)   N=1000;;
+    medium) N=2000;;
+    large)  N=5000;;
+  esac
+  WL="$OUTDIR/effective_wordlist.txt"
+  head -n "$N" "$MASTER" > "$WL"
+  ok "Mode : $(echo "$MODE" | tr a-z A-Z)  (wordlist: $WL)"
+  info "Master : $MASTER"
+fi
+
+# ---------- Résolution IP ----------
 TARGET_IP="$(getent hosts "$DOMAIN" | awk '{print $1}' | head -n1 || true)"
+[[ -z "$TARGET_IP" ]] && TARGET_IP="$(dig +short A "$DOMAIN" 2>/dev/null | head -n1 || true)"
 [[ -n "$TARGET_IP" ]] && ok "IP détectée : $TARGET_IP" || warn "IP non détectée"
 
-ok "Mode : $(echo "$MODE" | tr a-z A-Z)  (wordlist: $WL)"
-
-# ----------- Détection schéma HTTP/HTTPS ------------
+# ---------- HTTP/HTTPS ----------
 SCHEME="http"; PORT=80; CURL_TLS=""; FFUF_TLS=""
 probe(){ curl -sk --max-time "$TIMEOUT" -o /dev/null -w "%{http_code}" "$1" || true; }
-if [[ "$(probe http://${DOMAIN}:80/)" == "000" ]]; then
-  if [[ "$(probe https://${DOMAIN}:443/)" != "000" ]]; then
+if [[ $FORCE_HTTPS -eq 1 ]]; then
+  SCHEME="https"; PORT=443; CURL_TLS="--insecure"; FFUF_TLS="-k"
+else
+  if [[ "$(probe http://${DOMAIN}:80/)" == "000" && "$(probe https://${DOMAIN}:443/)" != "000" ]]; then
     SCHEME="https"; PORT=443; CURL_TLS="--insecure"; FFUF_TLS="-k"
   fi
 fi
 ok "Schéma/Port : ${SCHEME}/${PORT}"
 
-DNS_TXT="$OUTDIR/dns_found.txt"
+# ---------- Fichiers ----------
 VHOST_TXT="$OUTDIR/vhost_found.txt"
 SUMMARY_TXT="$OUTDIR/summary.txt"
-FFUF_CSV="$OUTDIR/ffuf_vhosts.csv"
-FFUF_TXT="$OUTDIR/ffuf_vhosts.txt"
-: > "$DNS_TXT"; : > "$VHOST_TXT"; : > "$SUMMARY_TXT"
+FFUF_RAW="$OUTDIR/ffuf_vhosts.txt"
+: > "$VHOST_TXT"; : > "$SUMMARY_TXT"
 
-# ----------- DNS bruteforce (Gobuster v3+) ------------
-info "Bruteforce DNS avec gobuster ..."
-gobuster dns --domain "$DOMAIN" -w "$WL" -t "$THREADS" --no-color 2>/dev/null \
-  | awk '/Found:/{print $2}' | tee -a "$DNS_TXT" >/dev/null || true
-DNS_COUNT=$(grep -c '.' "$DNS_TXT" || true)
-[[ "$DNS_COUNT" -gt 0 ]] && ok "DNS: ${DNS_COUNT} sous-domaines." || warn "DNS: rien trouvé."
+# ---------- Échantillon baseline ----------
+BASE_HOST="$(tr -dc 'a-z0-9' </dev/urandom | head -c 10 || echo rnd)"
+BASE_URL="${SCHEME}://${TARGET_IP}:${PORT}/"
 
-# ----------- VHOST fuzzing (ffuf) — CSV puis fallback stdout ------------
-extract_tokens() {
-  # Lit stdin -> garde tokens [a-z0-9-] (1..63) -> suffixe .DOMAIN -> uniq
-  awk 'NF{print $1}' \
-  | tr -d '\r\t ' \
-  | grep -E '^[a-z0-9-]{1,63}$' \
-  | awk -v d="$DOMAIN" '{print $0 "." d}' \
-  | sort -u
+# Code + taille
+BASE_RESP="$(curl -sk ${CURL_TLS:-} -H "Host: ${BASE_HOST}.${DOMAIN}" --max-time "$TIMEOUT" -o /dev/null -w "%{http_code} %{size_download}" "$BASE_URL" 2>/dev/null || true)"
+BASE_CODE="${BASE_RESP%% *}"; BASE_CODE="${BASE_CODE:-000}"
+BASE_SIZE="${BASE_RESP##* }"; BASE_SIZE="${BASE_SIZE:-0}"
+
+# Nombre de mots (pour -fw)
+BASE_WORDS="$(curl -sk ${CURL_TLS:-} -H "Host: ${BASE_HOST}.${DOMAIN}" --max-time "$TIMEOUT" "$BASE_URL" 2>/dev/null | wc -w | tr -d ' ' || echo 0)"
+BASE_WORDS="${BASE_WORDS:-0}"
+
+info "Baseline: code=${BASE_CODE} size=${BASE_SIZE} words=${BASE_WORDS} (Host=${BASE_HOST}.${DOMAIN})"
+
+# ---------- Parseur robuste (console ffuf) ----------
+extract_tokens_file() {
+  local f="$1"
+  awk -v d="$DOMAIN" '
+    {
+      line=$0
+      gsub(/\r/,"",line)
+      gsub(/\033\[[0-9;]*[A-Za-z]/,"",line)
+      if (index(line,"[Status:")>0) {
+        n = split(line, a, /\[Status:/)
+        left = a[1]
+        if (match(left, /([a-z0-9-]{1,63})[[:space:]]*$/, m)) {
+          print m[1] "." d
+        }
+      }
+    }
+  ' "$f" | sort -u
 }
 
+# ---------- VHOST fuzzing ----------
 if [[ -n "${TARGET_IP-}" ]]; then
   info "VHOST fuzzing via ffuf ..."
-  # 1) Tentative CSV silencieuse
-  rm -f "$FFUF_CSV"
-  ffuf -u "${SCHEME}://${TARGET_IP}:${PORT}/" $FFUF_TLS \
-       -H "Host: FUZZ.${DOMAIN}" \
-       -w "$WL" -t "$THREADS" -ac -r \
-       -of csv -o "$FFUF_CSV" -s 1>/dev/null 2>/dev/null || true
+  FFUF_FILTER=()
+  [[ "${BASE_SIZE}"  != "0" ]] && FFUF_FILTER+=(-fs "$BASE_SIZE")
+  [[ "${BASE_WORDS}" != "0" ]] && FFUF_FILTER+=(-fw "$BASE_WORDS")
 
-  if [[ -s "$FFUF_CSV" ]]; then
-    tail -n +2 "$FFUF_CSV" | cut -d',' -f1 | extract_tokens > "$VHOST_TXT" || true
-  fi
+  CMD=(ffuf -u "${SCHEME}://${TARGET_IP}:${PORT}/" $FFUF_TLS \
+            -H "Host: FUZZ.${DOMAIN}" \
+            -w "$WL" -t "$THREADS" \
+            -mc "${MATCH_CODES}" "${FFUF_FILTER[@]}")
 
-  # 2) Fallback si rien trouvé en CSV : relance façon "console" (comme ton test manuel)
-  if [[ ! -s "$VHOST_TXT" ]]; then
-    if [[ $DEBUG -eq 1 ]]; then
-      ffuf -u "${SCHEME}://${TARGET_IP}:${PORT}/" $FFUF_TLS \
-           -H "Host: FUZZ.${DOMAIN}" \
-           -w "$WL" -t "$THREADS" -ac \
-           2>/dev/null | tee "$FFUF_TXT" \
-           | awk '/\[Status:/{print $1}' | extract_tokens > "$VHOST_TXT" || true
-    else
-      ffuf -u "${SCHEME}://${TARGET_IP}:${PORT}/" $FFUF_TLS \
-           -H "Host: FUZZ.${DOMAIN}" \
-           -w "$WL" -t "$THREADS" -ac \
-           2>/dev/null | awk '/\[Status:/{print $1}' | extract_tokens > "$VHOST_TXT" || true
-    fi
-  fi
+  [[ $DEBUG -eq 1 ]] && echo "[*] CMD: ${CMD[*]}"
 
-  VHOST_COUNT=$(grep -c '.' "$VHOST_TXT" || true)
-  [[ "$VHOST_COUNT" -gt 0 ]] && ok "VHOST: ${VHOST_COUNT} hôtes." || warn "VHOST: rien trouvé."
+  "${CMD[@]}" > "$FFUF_RAW" 2>&1 || true
+  extract_tokens_file "$FFUF_RAW" > "$VHOST_TXT" || true
 else
-  warn "Pas d'IP → VHOST fuzzing sauté."
+  warn "Pas d'IP → ajoute l’IP de $DOMAIN dans /etc/hosts pour que le vhost fuzzing fonctionne."
 fi
 
-# ----------- Résumé texte ------------
+VHOST_COUNT="$(grep -c '.' "$VHOST_TXT" || true)"
+if [[ "$VHOST_COUNT" -gt 0 ]]; then
+  ok "VHOST: ${VHOST_COUNT} hôtes."
+  echo -e "${GREEN}[✓]${RESET} VHOST trouvés :"
+  sed 's/^/   • /' "$VHOST_TXT"
+else
+  warn "VHOST: rien trouvé."
+  [[ -f "$FFUF_RAW" ]] && { echo "[i] Extrait ffuf:"; sed -n '1,120p' "$FFUF_RAW"; }
+fi
+
+# ---------- /etc/hosts ----------
+if [[ $SAVE_HOSTS -eq 1 || $DRY_RUN_HOSTS -eq 1 ]]; then
+  if [[ "$VHOST_COUNT" -eq 0 ]]; then
+    warn "Pas de vhost trouvé → rien à faire."
+  elif [[ -z "${TARGET_IP-}" ]]; then
+    warn "IP inconnue → impossible d’écrire dans /etc/hosts."
+  else
+    if [[ $DRY_RUN_HOSTS -eq 1 ]]; then
+      info "[DRY-RUN] Lignes qui seraient ajoutées à /etc/hosts :"
+      while IFS= read -r host; do
+        echo "${TARGET_IP} ${host}"
+      done < "$VHOST_TXT"
+    else
+      TS="$(date +%Y%m%d-%H%M%S)"
+      BACKUP="/etc/hosts.bak.${TS}"
+      info "Sauvegarde: ${BACKUP}"
+      if sudo cp /etc/hosts "$BACKUP"; then
+        ADDED=0
+        while IFS= read -r host; do
+          if ! grep -qw "$host" /etc/hosts; then
+            echo "${TARGET_IP} ${host}" | sudo tee -a /etc/hosts >/dev/null
+            ((ADDED++))
+          fi
+        done < "$VHOST_TXT"
+        [[ $ADDED -gt 0 ]] && ok "--save-hosts : ${ADDED} entrées ajoutées" || info "Aucun ajout (déjà présent)"
+      else
+        warn "Backup /etc/hosts échoué → abandon de --save-hosts"
+      fi
+    fi
+  fi
+fi
+
+# ---------- Résumé ----------
 {
-  echo "=== mon-subdomains (${DOMAIN}) ==="
+  echo "=== mon-subdomains (${DOMAIN}) — v0.2 ==="
   echo "Date: $(date '+%F %T')"
   [[ -n "${TARGET_IP-}" ]] && echo "IP: ${TARGET_IP}"
   echo "Schéma/Port: ${SCHEME}/${PORT}"
-  echo "Wordlist: ${WL}"
+  echo "Wordlist effective: ${WL}"
+  [[ "$MODE" != "custom" ]] && echo "Master: ${MASTER}"
+  echo "Codes: ${MATCH_CODES}"
+  echo "Baseline: size=${BASE_SIZE} words=${BASE_WORDS} (code=${BASE_CODE})"
   echo
-  echo "DNS (${DNS_COUNT})"
-  [[ -s "$DNS_TXT" ]] && sed 's/^/  - /' "$DNS_TXT" || echo "  - (aucun)"
-  echo
-  echo "VHOST ($(grep -c '.' "$VHOST_TXT" || true))"
-  [[ -s "$VHOST_TXT" ]] && sed 's/^/  - /' "$VHOST_TXT" || echo "  - (aucun)"
-  if [[ $DEBUG -eq 1 ]]; then
+  echo "VHOST (${VHOST_COUNT})"
+  if [[ -s "$VHOST_TXT" ]]; then sed 's/^/  - /' "$VHOST_TXT"; else echo "  - (aucun)"; fi
+  if [[ ${SAVE_HOSTS} -eq 1 ]]; then
     echo
-    echo "--- Debug ---"
-    [[ -f "$FFUF_CSV" ]] && echo "CSV: $FFUF_CSV"
-    [[ -f "$FFUF_TXT" ]] && echo "TXT: $FFUF_TXT"
+    echo "--save-hosts: backup=${BACKUP-}"
   fi
+  if [[ ${DRY_RUN_HOSTS} -eq 1 ]]; then
+    echo
+    echo "--dry-run-hosts: affichage uniquement, aucun fichier modifié"
+  fi
+  echo
+  echo "--- Debug files ---"
+  echo "ffuf raw : $FFUF_RAW"
 } > "$SUMMARY_TXT"
 
-# ----------- Affichage synthèse ------------
-[[ -s "$DNS_TXT" ]] && { echo -e "${GREEN}[✓]${RESET} DNS trouvés :"; sed 's/^/   • /' "$DNS_TXT"; }
-[[ -s "$VHOST_TXT" ]] && { echo -e "${GREEN}[✓]${RESET} VHOST trouvés :"; sed 's/^/   • /' "$VHOST_TXT"; }
+exit 0
