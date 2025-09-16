@@ -46,6 +46,33 @@ N'utilisez jamais ces scripts sur des systèmes dont vous n'avez pas l'autorisat
 
 ---
 
+### 🔹 make-htb-wordlist.sh
+- **But** : Générer une wordlist optimisée pour HackTheBox, destinée surtout aux énumérations DNS virtuelles et web fuzzing.
+- **Sources utilisées** :
+  - `subdomains-top1million-5000.txt` (SecLists DNS Top 5000)
+  - `raft-small-words.txt` (SecLists Web Content)
+  - (optionnel) `raft-medium-words.txt` pour enrichir la liste
+  - Une mini seed interne « FAST » (admin, test, dev, api, login, etc.) toujours prioritaire
+- **Règles de filtrage** :
+  - minuscules uniquement `[a-z0-9-]`
+  - pas de `--`, ni de `-` en début/fin
+  - longueur 3 à 24 caractères
+  - suppression des doublons, ordre préservé
+- **Exemple** :
+  ```bash
+  # Générer la wordlist par défaut (5000 entrées max)
+  make-htb-wordlist.sh
+  
+  # Générer une liste personnalisée
+  make-htb-wordlist.sh --out /tmp/wordlist.txt --maxlen 16 --allow-digit-start
+  ```
+- **Résultat** :
+  - Par défaut : `/usr/share/wordlists/htb-dns-vh-5000.txt`
+  - Fichier limité aux 5000 premières entrées, déjà filtré et prêt à l’emploi avec `ffuf`, `gobuster`, etc.
+  - Affiche un résumé et les 10 premiers mots générés.
+
+---
+
 ## 📦 Installation
 
 Cloner le dépôt et ajouter les scripts au `$PATH` :
