@@ -79,8 +79,8 @@ Cloner le dépôt et ajouter les scripts au `$PATH` :
 ```bash
 git clone https://github.com/NoelNac-HackEthical/mes-scripts.git
 cd mes-scripts
-chmod +x mon-*
-ln -sf "$PWD/mon-*" ~/.local/bin/
+chmod +x mon-* make-*
+ln -sf "$PWD"/mon-* "$PWD"/make-* ~/.local/bin/
 ```
 
 Vérifier :
