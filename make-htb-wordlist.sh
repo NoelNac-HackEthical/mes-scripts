@@ -2,6 +2,19 @@
 set -euo pipefail
 LC_ALL=C
 
+# VERSION=1.0.0
+
+# --- version helpers (uniformisation) ---
+_self_base="$(basename "${BASH_SOURCE[0]}")"
+_version_str() {
+  local v
+  v="$(grep -m1 -E '^# VERSION=' "${BASH_SOURCE[0]}" | sed 's/^# VERSION=//')"
+  [ -n "$v" ] || v="0.0.0"
+  printf '%s %s\n' "$_self_base" "$v"
+}
+_print_version_and_exit() { _version_str; exit 0; }
+# ----------------------------------------
+
 # make-htb-wordlist.sh — minimal (master only)
 # Produit : /usr/share/wordlists/htb-dns-vh-5000.txt (par défaut)
 # Sources : seclists DNS top5000 + raft-small + mini-liste "FAST" (priorisée)
@@ -17,9 +30,19 @@ ALLOW_DIGIT_START=0
 usage() {
   cat <<EOF
 Usage:
-  $0 [--out FILE] [--no-install] [--no-medium] [--minlen N] [--maxlen N] [--allow-digit-start]
+  $0 [--out FILE] [--no-install] [--no-medium] [--minlen N] [--maxlen N] [--allow-digit-start] [-V|--version] [-h|--help]
 
 Par défaut : --out $OUT
+
+Options:
+  --out FILE           Chemin de sortie (défaut: $OUT)
+  --no-install         Ne pas tenter d'installer seclists automatiquement
+  --no-medium          Ne pas inclure raft-medium-words.txt
+  --minlen N           Longueur minimale (défaut: $MINLEN)
+  --maxlen N           Longueur maximale (défaut: $MAXLEN)
+  --allow-digit-start  Autoriser un début par chiffre
+  -V, --version        Afficher la version et quitter
+  -h, --help           Afficher cette aide et quitter
 EOF
 }
 
@@ -31,6 +54,7 @@ while [[ $# -gt 0 ]]; do
     --minlen) shift; MINLEN="${1:-3}"; shift || true;;
     --maxlen) shift; MAXLEN="${1:-24}"; shift || true;;
     --allow-digit-start) ALLOW_DIGIT_START=1; shift;;
+    -V|--version) _print_version_and_exit ;;
     -h|--help) usage; exit 0;;
     *) echo "[!] Option inconnue: $1" >&2; usage; exit 1;;
   esac

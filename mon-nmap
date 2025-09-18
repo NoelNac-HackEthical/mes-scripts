@@ -5,16 +5,28 @@
 
 set -euo pipefail
 
-VERSION="mon-nmap v2025.09.04-md-r7"
-if [[ "${1:-}" == "--version" ]]; then echo "$VERSION"; exit 0; fi
-if [[ "${1:-}" == "--help" ]]; then
+# VERSION=1.0.0
+
+# --- version helpers (uniformisation) ---
+_self_base="$(basename "${BASH_SOURCE[0]}")"
+_version_str() {
+  local v
+  v="$(grep -m1 -E '^# VERSION=' "${BASH_SOURCE[0]}" | sed 's/^# VERSION=//')"
+  [ -n "$v" ] || v="0.0.0"
+  printf '%s %s\n' "$_self_base" "$v"
+}
+_print_version_and_exit() { _version_str; exit 0; }
+# ----------------------------------------
+
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then _print_version_and_exit; fi
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  _version_str
   cat <<EOF
-$VERSION
 Usage: $(basename "$0") [--udp-all] <IP_CIBLE>
 Options:
   --udp-all     Scan UDP complet (-p-) au lieu du top 20
-  --version     Afficher la version
-  --help        Afficher cette aide
+  -V, --version Afficher la version
+  -h, --help    Afficher cette aide
 EOF
   exit 0
 fi
@@ -159,23 +171,18 @@ fi
   current_main=""
 
   flush_item() {
-    # imprime l'item courant si présent
     if [[ -n "${current_main:-}" ]]; then
       echo "$i. **$current_main**"
-      # détails non redondants (avec retour-ligne Markdown '  ')
       [[ -n "$http_title" ]] && echo "   → http-title: $http_title  "
       [[ -n "$server_hdr" ]] && echo "   → http-server-header: $server_hdr  "
       [[ -n "$ssl_cn"    ]] && echo "   → ssl-cert CN: $ssl_cn  "
       if [[ $have_sshhk -eq 1 ]]; then
-        # affiche uniquement les types de clés détectés
-        # normalise espaces + virgules
         ssh_types_clean="$(echo "$ssh_types" | tr '[:lower:]' '[:upper:]' | sed 's/ \{1,\}/ /g; s/^, *//; s/, *,/, /g')"
         echo "   → ssh-hostkey: $ssh_types_clean  "
       fi
       echo
       i=$((i+1))
     fi
-    # reset
     current_main=""
     in_block=false
     have_sshhk=0; ssh_types=""
@@ -184,7 +191,6 @@ fi
 
   while IFS= read -r line; do
     if [[ "$line" =~ ^[0-9]+/tcp[[:space:]]+open([[:space:]]|$) ]]; then
-      # nouveau port → flush précédent
       flush_item
       current_main="$line"
       in_block=true
@@ -192,12 +198,9 @@ fi
     fi
     if $in_block && [[ "$line" =~ ^[\|_] ]]; then
       sub="${line#|_}"; sub="${sub#|}"; sub="${sub#" "}"
-      # Garder uniquement certains sous-détails
       if [[ "$sub" =~ ^ssh-hostkey: ]]; then
         have_sshhk=1
-        # on ne stocke pas toute la suite ici; on détectera les types sur les lignes suivantes
       elif [[ $have_sshhk -eq 1 ]]; then
-        # lignes des clés: "... (RSA)" / "(ECDSA)" / "(ED25519)"
         if [[ "$sub" =~ \(RSA\) ]]; then ssh_types="$ssh_types, RSA"; fi
         if [[ "$sub" =~ \(ECDSA\) ]]; then ssh_types="$ssh_types, ECDSA"; fi
         if [[ "$sub" =~ \(ED25519\) ]]; then ssh_types="$ssh_types, ED25519"; fi
@@ -206,14 +209,12 @@ fi
       elif [[ "$sub" =~ ^http-server-header: ]]; then
         server_hdr="$(echo "$sub" | sed 's/^http-server-header:[[:space:]]*//')"
       elif [[ "$sub" =~ ^ssl-cert: ]]; then
-        # essaie d'extraire CN/commonName depuis la même ligne si présent
         if [[ "$sub" =~ commonName=([^/[:space:]]+) ]]; then
           ssl_cn="${BASH_REMATCH[1]}"
         elif [[ "$sub" =~ CN=([^/[:space:]]+) ]]; then
           ssl_cn="${BASH_REMATCH[1]}"
         fi
       elif [[ "$sub" =~ ^Subject: ]]; then
-        # cas où Subject est sur une ligne séparée
         if [[ "$sub" =~ commonName=([^/[:space:]]+) ]]; then
           ssl_cn="${BASH_REMATCH[1]}"
         elif [[ "$sub" =~ CN=([^/[:space:]]+) ]]; then
@@ -224,10 +225,8 @@ fi
       in_block=false
     fi
   done < "$F2"
-  # flush dernier item
   flush_item
 
-  # ---- OS détecté ----
   echo "#### OS détecté"
   if [[ -n "$OS_LINE" ]]; then
     echo "\`$OS_LINE\`"
@@ -236,7 +235,6 @@ fi
   fi
   echo
 
-  # ---- UDP (résumé concis) ----
   echo "#### UDP"
   if [[ -n "$UDP_CSV" ]]; then
     echo "- Ports ouverts (CSV) : \`$UDP_CSV\`"
@@ -258,7 +256,6 @@ fi
   fi
 } > "$FSUM_MD"
 
-# Fin
 ELAPSED=$((SECONDS - START_TIME)); MINS=$((ELAPSED/60)); SECS=$((ELAPSED%60))
 echo -e "\n${CYAN}🧾  Résumé texte :${NC} ${BOLD}$FSUM_TXT${NC}"
 echo -e "${CYAN}🧾  Résumé Markdown :${NC} ${BOLD}$FSUM_MD${NC}"

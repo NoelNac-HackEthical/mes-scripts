@@ -2,6 +2,19 @@
 set -euo pipefail
 LC_ALL=C
 
+# VERSION=1.0.0
+
+# --- version helpers ---
+_self_base="$(basename "${BASH_SOURCE[0]}")"
+_version_str() {
+  local v
+  v="$(grep -m1 -E '^# VERSION=' "${BASH_SOURCE[0]}" | sed 's/^# VERSION=//')"
+  [ -n "$v" ] || v="0.0.0"
+  printf '%s %s\n' "$_self_base" "$v"
+}
+_print_version_and_exit() { _version_str; exit 0; }
+# -----------------------
+
 # mon-subdomains — v0.3
 # - VHOST fuzzing via ffuf
 # - Master 5000 unique (FAST=1000 / MEDIUM=2000 / LARGE=5000 via head)
@@ -35,6 +48,7 @@ Options :
   --save-hosts      Ajoute les vhosts trouvés dans /etc/hosts (backup, sans doublon)
   --dry-run-hosts   Simule l’ajout dans /etc/hosts (n’écrit rien)
   --debug           Affiche la commande ffuf et garde la sortie brute
+  -V, --version     Afficher la version et quitter
   -h, --help        Aide
 
 Exemples :
@@ -45,6 +59,9 @@ USAGE
 }
 
 # ---------- Parse ----------
+# Pré-check : si le premier argument est -V/--version, afficher et quitter (évite de le prendre comme <domaine>)
+if [[ "${1-}" == "-V" || "${1-}" == "--version" ]]; then _print_version_and_exit; fi
+
 DOMAIN="${1-}"
 if [[ -z "${DOMAIN}" || "${DOMAIN}" == "-h" || "${DOMAIN}" == "--help" ]]; then usage; exit 0; fi
 shift || true
@@ -70,6 +87,7 @@ while (( "$#" )); do
     --save-hosts) SAVE_HOSTS=1; shift;;
     --dry-run-hosts) DRY_RUN_HOSTS=1; shift;;
     --debug)     DEBUG=1; shift;;
+    -V|--version) _print_version_and_exit ;;
     -h|--help)   usage; exit 0;;
     *) warn "Option inconnue: $1"; usage; exit 1;;
   esac

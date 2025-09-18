@@ -9,6 +9,19 @@
 
 set -euo pipefail
 
+# VERSION=1.0.0
+
+# --- version helpers ---
+_self_base="$(basename "${BASH_SOURCE[0]}")"
+_version_str() {
+  local v
+  v="$(grep -m1 -E '^# VERSION=' "${BASH_SOURCE[0]}" | sed 's/^# VERSION=//')"
+  [ -n "$v" ] || v="0.0.0"
+  printf '%s %s\n' "$_self_base" "$v"
+}
+_print_version_and_exit() { _version_str; exit 0; }
+# -----------------------
+
 # Couleurs (désactivées si pas TTY)
 if [[ -t 1 ]]; then
   C_B=$'\e[1m'; C_G=$'\e[32m'; C_Y=$'\e[33m'; C_R=$'\e[31m'; C_C=$'\e[36m'; C_RST=$'\e[0m'
@@ -43,6 +56,8 @@ ${C_B}Usage:${C_RST} mon-recoweb <IP|HOST|URL> [options]
   -o <outdir>     Dossier de sortie (def: mon-recoweb_<target>)
   --http | --https
   --no-filters    Désactive -fs auto et -fc 404
+  -V, --version   Afficher la version et quitter
+  -h, --help      Afficher cette aide et quitter
 EOF
 }
 
@@ -59,6 +74,7 @@ while [[ $# -gt 0 ]]; do
     --http)  FORCE_HTTP=true; shift ;;
     --https) FORCE_HTTPS=true; shift ;;
     --no-filters) USE_FILTERS=false; shift ;;
+    -V|--version) _print_version_and_exit ;;
     -h|--help) usage; exit 0 ;;
     *) err "Option inconnue: $1"; usage; exit 1 ;;
   esac
