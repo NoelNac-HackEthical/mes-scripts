@@ -2,7 +2,7 @@
 set -euo pipefail
 LC_ALL=C
 
-# VERSION=1.0.0
+# VERSION=1.0.1
 
 # --- version helpers (uniformisation) ---
 _self_base="$(basename "${BASH_SOURCE[0]}")"
