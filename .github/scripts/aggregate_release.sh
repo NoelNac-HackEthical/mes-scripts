@@ -42,11 +42,8 @@ for f in "${SCRIPTS[@]}"; do
 done
 
 pad(){ printf "%02d" "$1"; }
-year=$(date -u +%Y)
-month=$(date -u +%m)
-day=$(date -u +%d)
-hour=$(date -u +%H)
-min=$(date -u +%M)
+year=$(date +%Y); month=$(date +%m); day=$(date +%d)
+hour=$(date +%H);  min=$(date +%M)
 
 moisNoms=( "" "janvier" "février" "mars" "avril" "mai" "juin" "juillet" "août" "septembre" "octobre" "novembre" "décembre" )
 moisIdx=$((10#$month))

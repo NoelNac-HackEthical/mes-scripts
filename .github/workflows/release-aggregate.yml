@@ -4,11 +4,17 @@ on:
   push:
     branches: [ "main" ]
     paths:
-      - "**"
+      # Ne relance que si des "vrais" fichiers changent (scripts, etc.)
+      - "*"
+      - "!README*"
+      - "!LICENSE*"
+      - "!.github/**"
+      - "!templates/**"
+      - "!tools/**"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: write   # créer tags + releases
 
 concurrency:
   group: release-aggregate
@@ -17,11 +23,15 @@ concurrency:
 jobs:
   build-release:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Set timezone (Europe/Brussels)
+        run: sudo timedatectl set-timezone Europe/Brussels
 
       - name: Prepare environment
         run: |
@@ -31,7 +41,7 @@ jobs:
       - name: Aggregate & publish release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RETAIN: "5"
-          BRANCH_DEFAULT: "main"
+          RETAIN: "5"            # garder uniquement les 5 dernières releases
+          BRANCH_DEFAULT: "main" # réservé si besoin plus tard
         run: |
           bash .github/scripts/aggregate_release.sh
