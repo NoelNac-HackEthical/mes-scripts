@@ -1,4 +1,3 @@
-\
 #!/usr/bin/env bash
 # fix-version-autoload.sh
 # - Injecte le bloc d'auto-métadonnées (NAME/VERSION/DESCRIPTION/HOMEPAGE depuis l'en-tête)
@@ -26,7 +25,7 @@ while (( $# )); do
     --no-bump) DO_BUMP=0; shift;;
     --only)    shift; while (( $# )) && [[ "$1" != --* ]]; do ONLY+=("$1"); shift; done;;
     -h|--help)
-      sed -n '1,25p' "$0"
+      sed -n '1,30p' "$0"
       exit 0
       ;;
     *) echo "Arg inconnu: $1" >&2; exit 1;;
@@ -56,7 +55,7 @@ collect_scripts(){
 
 AUTO_MARK='### AUTO-METADATA (do not remove)'
 
-read -r -d '' AUTO_BLOCK <<'AUTOBLOCK'
+AUTO_BLOCK=$(cat <<'AUTOBLOCK'
 ### AUTO-METADATA (do not remove)
 # Auto metadata derived from header lines above
 SELF="${BASH_SOURCE[0]:-$0}"
@@ -70,11 +69,15 @@ HOMEPAGE="${HOMEPAGE:-$(grep -m1 -E '^#\s*HOMEPAGE='   "$SELF" | sed -E 's#^#\s*
 : "${HOMEPAGE:=https://github.com/NoelNac-HackEthical/mes-scripts}"
 ### END AUTO-METADATA
 AUTOBLOCK
+)
 
 insert_auto_block() {
   local f="$1"
   # Si déjà présent, ne rien faire
-  grep -q "$AUTO_MARK" "$f" && { echo "  = auto-meta: déjà présent"; return; }
+  if grep -q "$AUTO_MARK" "$f"; then
+    echo "  = auto-meta: déjà présent"
+    return
+  fi
   # Injection après la ligne IFS=… si possible, sinon après set -euo pipefail, sinon après la 1ère ligne
   if grep -nE "^IFS=" "$f" >/dev/null; then
     local ln; ln=$(grep -nE "^IFS=" "$f" | head -n1 | cut -d: -f1)
@@ -94,7 +97,6 @@ run_insert(){
   if ((DRY_RUN)); then
     echo "  ~ insertion $where (ligne $ln)"
   else
-    # awk pour injecter proprement
     awk -v n="$ln" -v txt="$block\n" 'NR==n{print txt} {print}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
     echo "  + inséré $where"
   fi
@@ -111,7 +113,6 @@ remove_body_assigns(){
       echo "  = aucune assignation redondante"
     fi
   else
-    # Supprime les assignations de début de ligne
     sed -i -E "s/$expr//" "$f"
     # Nettoie lignes vides multiples
     awk 'NF || !blank++' blank=0 "$f" > "$f.tmp" && mv "$f.tmp" "$f"
@@ -131,7 +132,6 @@ bump_version_header(){
     if ((DRY_RUN)); then
       echo "  ~ bump: $ver -> $new"
     else
-      # remplace la ligne entière à son numéro exact (préserve indentation éventuelle)
       awk -v n="$n" -v newver="$new" '
         NR==n { sub(/VERSION=.*/, "VERSION=" newver); print; next }
         { print }
