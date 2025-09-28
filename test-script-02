@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # NAME=test-script-02
-# VERSION=0.0.1
+# VERSION=0.0.2
 # DESCRIPTION=Short one-line description
 # HOMEPAGE=https://github.com/NoelNac-HackEthical/mes-scripts
 
+#exemple d'ine modif mineure avec modif de version -> 0.0.2 pour tester la GHA
 set -euo pipefail
 IFS=$'\n\t'
 
