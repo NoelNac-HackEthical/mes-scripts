@@ -25,6 +25,11 @@ EOF
   exit 2
 }
 
+# juste après usage() { ... }
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+fi
+
 # Escape string for safe sed replacement (escapes / and & and backslashes)
 _sed_escape() {
   # usage: _sed_escape "string"
