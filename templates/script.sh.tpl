@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
-# NAME=__NAME__
-# VERSION=__VERSION__
-# DESCRIPTION=__DESCRIPTION__
-# HOMEPAGE=__HOMEPAGE__
+# NAME={{NAME}}
+# VERSION={{VERSION}}
+# DESCRIPTION={{DESCRIPTION}}
+# HOMEPAGE={{HOMEPAGE}}
 #____________________________________________________________________________
-
+#
+# Bref résumé :
+#   {{DESCRIPTION}}
+#
+# Template minimal pour scripts mes-scripts :
+# - contient usage() et examples() en heredoc (extraits par la pipeline)
+# - contient _version_str / _print_version_and_exit pour être cohérent
+#
 set -euo pipefail
-IFS=$'\n\t'
 
-# --- version helpers ---
+# ---------------------------------------------------------------------------
+# Basic metadata helpers (ne pas toucher)
 _self_path="${BASH_SOURCE[0]:-$0}"
-# si possible, résoudre les symlinks pour afficher le nom réel du fichier
 if command -v readlink >/dev/null 2>&1; then
   _resolved="$(readlink -f -- "$_self_path" 2>/dev/null || true)"
   [ -n "$_resolved" ] && _self_path="$_resolved"
@@ -18,61 +24,91 @@ fi
 _self_base="$(basename "$_self_path")"
 
 _version_str() {
-  # récupère la première ligne '# VERSION=...' (tolère espaces autour de '=' et CRLF)
+  # lit la première occurrence '# VERSION=...'
   local v
   v="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$_self_path" 2>/dev/null || true)"
-  [ -n "$v" ] || v="0.0.0"
+  v="${v:-0.0.0}"
   printf '%s %s\n' "$_self_base" "$v"
 }
-
 _print_version_and_exit() { _version_str; exit 0; }
-# -----------------------
-# Compat: ancien nom de fonction
-show_version() { _print_version_and_exit; }
+# ---------------------------------------------------------------------------
 
-# --- header helpers (NAME/DESCRIPTION/HOMEPAGE) ---
-_get_header() {
-  # Usage: _get_header NAME|DESCRIPTION|HOMEPAGE
-  local key="$1" val
-  val="$(awk -F= -v k="$key" '$0 ~ "^# *"k" *=" { gsub(/\r$/,"",$2); print $2; exit }' "$_self_path" 2>/dev/null || true)"
-  printf '%s' "$val"
-}
+# --------------------------
+# Usage (heredoc) — obligatoire dans le template
+usage(){
+  cat <<USAGE
+Usage: $(basename "$0") [OPTIONS] <args>
 
-_show_help() {
-  local name desc home
-  name="$(_get_header NAME)"; [ -n "$name" ] || name="$_self_base"
-  desc="$(_get_header DESCRIPTION)"
-  home="$(_get_header HOMEPAGE)"
-  cat <<EOF
-$name - $desc
+Short description:
+  {{DESCRIPTION}}
 
+Options:
+  -h, --help     Show this help
+  -V, --version  Show version
+  --debug        Debug mode (set -x)
 USAGE
-  $name [options] [args]
-
-OPTIONS
-  -h, --help       Show this help
-  -v, --version    Show version
-
-HOMEPAGE
-  $home
-EOF
 }
+# --------------------------
 
-# --- main logic (à adapter) ---
-main() {
-  # Parse options
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      -h|--help) _show_help; exit 0 ;;
-      -v|--version) _print_version_and_exit ;;
-      --) shift; break ;;
-      -*) echo "Unknown option: $1" >&2; echo; _show_help; exit 2 ;;
-      *)  break ;;
-    esac
-  done
+# --------------------------
+# Examples / astuces (heredoc) — optionnel mais recommandé
+examples(){
+  cat <<EXAMPLES
+# Basic example
+$(basename "$0") arg1 arg2
 
-  # TODO: implémenter la logique du script
-  echo "TODO: implémenter la logique du script"
+# Advanced example (fill as needed)
+# $(basename "$0") --option value target
+
+EXAMPLES
 }
+# --------------------------
 
-main "$@"
+# --------------------------
+# Common CLI parsing (minimal)
+DEBUG=false
+
+# quick args check (respect _print_version_and_exit and usage)
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
+  _print_version_and_exit
+fi
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  _version_str
+  usage
+  exit 0
+fi
+
+# Basic option loop (extend in the concrete script)
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --debug) DEBUG=true; shift ;;
+    -V|--version) _print_version_and_exit ;;
+    -h|--help) _version_str; usage; exit 0 ;;
+    --) shift; break ;;
+    -*) echo "Unknown option: $1"; usage; exit 2 ;;
+    *) break ;;  # leave positional args for the script
+  esac
+done
+# --------------------------
+
+# --------------------------
+# Example main — to be adapted in generated scripts
+_main(){
+  # Example: simply echo args
+  if [ "${DEBUG:-false}" = "true" ]; then
+    set -x
+  fi
+
+  echo "Script: $(_version_str)"
+  echo "Args: $*"
+
+  # Put the real behavior here in generated script
+  return 0
+}
+# --------------------------
+
+# If the template is used to generate a real script, replace the _main body.
+# Run main if script invoked directly
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  _main "$@"
+fi
