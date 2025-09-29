@@ -1,7 +1,7 @@
 #!/bin/bash
-# NAME=mon-nmap
+# NAME=mon-subdomains
 # VERSION=1.0.1
-# DESCRIPTION=Short one-line description
+# DESCRIPTION=Short one-line description du sript mon-subdomains
 # HOMEPAGE=https://github.com/NoelNac-HackEthical/mes-scripts
 #____________________________________________________________________________
 
