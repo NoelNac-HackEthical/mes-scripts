@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# NAME={{NAME}}
-# VERSION={{VERSION}}
-# DESCRIPTION={{DESCRIPTION}}
-# HOMEPAGE={{HOMEPAGE}}
+# NAME=__NAME__
+# VERSION=__VERSION__
+# DESCRIPTION=__DESCRIPTION__
+# HOMEPAGE=__HOMEPAGE__
 #____________________________________________________________________________
 #
 # Bref résumé :
-#   {{DESCRIPTION}}
+#   __DESCRIPTION__
 #
 # Template minimal pour scripts mes-scripts :
 # - contient usage() et examples() en heredoc (extraits par la pipeline)
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Basic metadata helpers (ne pas toucher)
+# Helpers version (ne pas modifier)
 _self_path="${BASH_SOURCE[0]:-$0}"
 if command -v readlink >/dev/null 2>&1; then
   _resolved="$(readlink -f -- "$_self_path" 2>/dev/null || true)"
@@ -23,20 +23,22 @@ if command -v readlink >/dev/null 2>&1; then
 fi
 _self_base="$(basename "$_self_path")"
 
-_version_str() {
-  # lit la première occurrence '# VERSION=...'
+_version_str(){
+  # lit la première occurrence '# VERSION='
   local v
   v="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$_self_path" 2>/dev/null || true)"
   v="${v:-0.0.0}"
   printf '%s %s\n' "$_self_base" "$v"
 }
-_print_version_and_exit() { _version_str; exit 0; }
+_print_version_and_exit(){ _version_str; exit 0; }
 # ---------------------------------------------------------------------------
 
-# --------------------------
-# Usage (heredoc) — obligatoire dans le template
+# ---------------------------------------------------------------------------
+# USAGE (heredoc) — extrait automatiquement par la pipeline
 usage(){
   cat <<USAGE
+$(basename "$0") __VERSION__
+
 Usage: $(basename "$0") [OPTIONS] <args>
 
 Short description:
@@ -48,38 +50,35 @@ Options:
   --debug        Debug mode (set -x)
 USAGE
 }
+# ---------------------------------------------------------------------------
 
-# --------------------------
-
-# --------------------------
-# Examples / astuces (heredoc) — optionnel mais recommandé
+# ---------------------------------------------------------------------------
+# EXAMPLES / ASTUCES (optionnel ; extrait si présent)
 examples(){
   cat <<EXAMPLES
 # Basic example
 $(basename "$0") arg1 arg2
 
-# Advanced example (fill as needed)
+# Advanced example (edit as needed)
 # $(basename "$0") --option value target
-
 EXAMPLES
 }
-# --------------------------
+# ---------------------------------------------------------------------------
 
-# --------------------------
-# Common CLI parsing (minimal)
+# ---------------------------------------------------------------------------
+# Parsing minimal CLI (classique)
 DEBUG=false
 
-# quick args check (respect _print_version_and_exit and usage)
+# Aides rapides
 if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
   _print_version_and_exit
 fi
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  _version_str
   usage
   exit 0
 fi
 
-# Basic option loop (extend in the concrete script)
+# Boucle d'options basique (à compléter selon le script)
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --debug) DEBUG=true; shift ;;
@@ -87,29 +86,23 @@ while [[ $# -gt 0 ]]; do
     -h|--help) _version_str; usage; exit 0 ;;
     --) shift; break ;;
     -*) echo "Unknown option: $1"; usage; exit 2 ;;
-    *) break ;;  # leave positional args for the script
+    *) break ;;  # positions
   esac
 done
-# --------------------------
+# ---------------------------------------------------------------------------
 
-# --------------------------
-# Example main — to be adapted in generated scripts
 _main(){
-  # Example: simply echo args
-  if [ "${DEBUG:-false}" = "true" ]; then
-    set -x
-  fi
+  # Exemple de squelette (remplacer par la logique du script généré)
+  if [ "$DEBUG" = true ]; then set -x; fi
 
   echo "Script: $(_version_str)"
-  echo "Args: $*"
+  echo "Args  : $*"
 
-  # Put the real behavior here in generated script
+  # TODO: implémentation
   return 0
 }
-# --------------------------
 
-# If the template is used to generate a real script, replace the _main body.
-# Run main if script invoked directly
+# Exécuter _main si appelé directement
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   _main "$@"
 fi
