@@ -3,6 +3,7 @@
 # VERSION=__VERSION__
 # DESCRIPTION=__DESCRIPTION__
 # HOMEPAGE=__HOMEPAGE__
+#____________________________________________________________________________
 
 set -euo pipefail
 IFS=$'\n\t'
