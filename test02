@@ -40,7 +40,7 @@ usage(){
 Usage: $(basename "$0") [OPTIONS] <args>
 
 Short description:
-  __DESCRIPTION__
+  nouveau script test02 v0.3.0
 
 Options:
   -h, --help     Show this help
