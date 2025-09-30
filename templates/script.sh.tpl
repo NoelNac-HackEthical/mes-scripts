@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
-# NAME=__NAME__
-# VERSION=__VERSION__
-# DESCRIPTION=__DESCRIPTION__
-# HOMEPAGE=__HOMEPAGE__
+# NAME={{NAME}}
+# VERSION={{VERSION}}
+# DESCRIPTION={{DESCRIPTION}}
+# HOMEPAGE={{HOMEPAGE}}
+# TAGS=scripts,tools
+# CATEGORY=Mes scripts
+# SLUG={{NAME}}
+# DRAFT=false
 #____________________________________________________________________________
 #
 # Bref résumé :
-#   __DESCRIPTION__
+#   {{DESCRIPTION}}
 #
 # Template minimal pour scripts mes-scripts :
 # - contient usage() et examples() en heredoc (extraits par la pipeline)
 # - contient _version_str / _print_version_and_exit pour être cohérent
+# - fournit un squelette de parsing CLI et un _main()
 #
 set -euo pipefail
 
@@ -24,7 +29,7 @@ fi
 _self_base="$(basename "$_self_path")"
 
 _version_str(){
-  # lit la première occurrence '# VERSION='
+  # lit la première occurrence '# VERSION=' dans le fichier source (robuste CRLF)
   local v
   v="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$_self_path" 2>/dev/null || true)"
   v="${v:-0.0.0}"
@@ -37,12 +42,12 @@ _print_version_and_exit(){ _version_str; exit 0; }
 # USAGE (heredoc) — extrait automatiquement par la pipeline
 usage(){
   cat <<USAGE
-$(basename "$0") __VERSION__
+$(_self_base) $(_version_str)
 
-Usage: $(basename "$0") [OPTIONS] <args>
+Usage: $(_self_base) [OPTIONS] <args>
 
 Short description:
-  __DESCRIPTION__
+  {{DESCRIPTION}}
 
 Options:
   -h, --help     Show this help
@@ -57,10 +62,10 @@ USAGE
 examples(){
   cat <<EXAMPLES
 # Basic example
-$(basename "$0") arg1 arg2
+$(_self_base) arg1 arg2
 
 # Advanced example (edit as needed)
-# $(basename "$0") --option value target
+# $(_self_base) --option value target
 EXAMPLES
 }
 # ---------------------------------------------------------------------------
@@ -74,6 +79,7 @@ if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
   _print_version_and_exit
 fi
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  _version_str
   usage
   exit 0
 fi
@@ -85,7 +91,7 @@ while [[ $# -gt 0 ]]; do
     -V|--version) _print_version_and_exit ;;
     -h|--help) _version_str; usage; exit 0 ;;
     --) shift; break ;;
-    -*) echo "Unknown option: $1"; usage; exit 2 ;;
+    -*) echo "Unknown option: $1" >&2; usage; exit 2 ;;
     *) break ;;  # positions
   esac
 done

@@ -1,99 +1,125 @@
 #!/usr/bin/env bash
 # tools/new-script.sh
-# Usage: tools/new-script.sh <name> [version] [description] [homepage]
 #
-# Crée un nouveau script à partir du template templates/script.sh.tpl
-# - garantit LF (suppression CR)
-# - rend le fichier exécutable
-# - crée un fichier .sha256 avec le nom du fichier (format: "<sha256>  <basename>")
+# Usage:
+#   tools/new-script.sh [--tags "scripts,tools"] [--category "Mes scripts"] [--slug "mon-slug"] [--draft true|false] \
+#                       <name> <version> <description> <homepage>
 #
 # Exemple:
-#   tools/new-script.sh mon-nmap 1.2.3 "Mon scanner NMAP" "https://github.com/NoelNac-HackEthical/mes-scripts"
+#   tools/new-script.sh --tags "scripts,tools" --category "Mes scripts" mon-nmap 1.0.0 \
+#       "Scan nmap customisé" "https://github.com/NoelNac-HackEthical/mes-scripts"
 
 set -euo pipefail
-IFS=$'\n\t'
 
-# --- helpers ---
-err() { printf '%s\n' "$*" >&2; }
 usage() {
-  cat <<EOF
-Usage: $0 <name> [version] [description] [homepage]
+  cat <<'EOF'
+Usage:
+  tools/new-script.sh [OPTIONS] <name> <version> <description> <homepage>
 
-Creates: ./<name> and ./<name>.sha256
-Template: templates/script.sh.tpl
+Options:
+  --tags "t1,t2"        Tags à écrire dans le header (# TAGS=…), par défaut: "scripts,tools"
+  --category "Cat"      Catégorie à écrire (# CATEGORY=…), par défaut: "Mes scripts"
+  --slug "mon-slug"     Slug forcé (# SLUG=…), par défaut: <name>
+  --draft true|false    Valeur du draft (# DRAFT=…), par défaut: false
+  -h, --help            Afficher cette aide
+
+Arguments:
+  <name>         Nom du script (fichier créé)
+  <version>      Version du script
+  <description>  Description courte (une ligne)
+  <homepage>     URL de la page du dépôt/projet
+
+Exemples:
+  tools/new-script.sh mon-nmap 1.0.0 "Scan nmap customisé" "https://github.com/NoelNac-HackEthical/mes-scripts"
+  tools/new-script.sh --tags "ctf,utils" --category "Mes scripts" test02 0.4.0 "outil test" "https://…"
 EOF
-  exit 2
 }
 
-# juste après usage() { ... }
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+# Valeurs par défaut
+TAGS="scripts,tools"
+CATEGORY="Mes scripts"
+SLUG=""          # si vide, = NAME
+DRAFT="false"
+
+# Parse options
+OPTS=()
+while [[ $# -gt 0 ]]; do
+  case "${1}" in
+    --tags)
+      [[ $# -ge 2 ]] || { echo "Erreur: --tags requiert une valeur." >&2; exit 1; }
+      TAGS="${2}"; shift 2;;
+    --category)
+      [[ $# -ge 2 ]] || { echo "Erreur: --category requiert une valeur." >&2; exit 1; }
+      CATEGORY="${2}"; shift 2;;
+    --slug)
+      [[ $# -ge 2 ]] || { echo "Erreur: --slug requiert une valeur." >&2; exit 1; }
+      SLUG="${2}"; shift 2;;
+    --draft)
+      [[ $# -ge 2 ]] || { echo "Erreur: --draft requiert une valeur (true|false)." >&2; exit 1; }
+      case "${2}" in
+        true|false) DRAFT="${2}";;
+        *) echo "Erreur: --draft doit être true ou false." >&2; exit 1;;
+      esac
+      shift 2;;
+    -h|--help)
+      usage; exit 0;;
+    --) shift; break;;
+    -*)
+      echo "Option inconnue: ${1}" >&2; usage; exit 1;;
+    *)
+      OPTS+=("${1}"); shift;;
+  esac
+done
+
+# Remettre les positionnels restants
+set -- "${OPTS[@]}" "$@"
+
+# Positionnels requis
+NAME="${1:-}"; VERSION="${2:-}"; DESCRIPTION="${3:-}"; HOMEPAGE="${4:-}"
+if [[ -z "${NAME}" || -z "${VERSION}" || -z "${DESCRIPTION}" || -z "${HOMEPAGE}" ]]; then
+  echo "Erreur: arguments manquants." >&2
   usage
-fi
-
-# Escape string for safe sed replacement (escapes / and & and backslashes)
-_sed_escape() {
-  # usage: _sed_escape "string"
-  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/\//\\\//g' -e 's/&/\\\&/g'
-}
-
-# Write sha256 file in the format: "<lowerhex>  <basename>"
-_write_sha256() {
-  local file="$1"
-  local base
-  base="$(basename "$file")"
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$file" | awk -v f="$base" '{print tolower($1) "  " f}' > "$file.sha256"
-  elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$file" | awk -v f="$base" '{print tolower($1) "  " f}' > "$file.sha256"
-  else
-    err "No sha256sum or shasum available; skipping .sha256 creation"
-  fi
-}
-
-# --- arguments ---
-[ $# -ge 1 ] || usage
-NAME="$1"
-VERSION="${2:-0.1.0}"
-DESCRIPTION="${3:-A useful script}"
-HOMEPAGE="${4:-https://github.com/NoelNac-HackEthical/mes-scripts}"
-
-# template path (modifiable si tu veux)
-TPL_PATH="templates/script.sh.tpl"
-[ -f "$TPL_PATH" ] || { err "Template not found: $TPL_PATH"; exit 1; }
-
-OUT="./$NAME"
-if [ -e "$OUT" ]; then
-  err "Target file already exists: $OUT"
   exit 1
 fi
 
-# prepare escaped values for sed
-_e_name=$(_sed_escape "$NAME")
-_e_version=$(_sed_escape "$VERSION")
-_e_desc=$(_sed_escape "$DESCRIPTION")
-_e_home=$(_sed_escape "$HOMEPAGE")
+TEMPLATE="templates/script.sh.tpl"
+OUT="./${NAME}"
 
-# Replace placeholders, remove CR (CRLF -> LF), write atomically to avoid partial files
-tmp="$(mktemp "${TMPDIR:-/tmp}/newscript.XXXXXX")"
-trap 'rm -f "$tmp"' EXIT
+if [[ ! -f "${TEMPLATE}" ]]; then
+  echo "Template introuvable: ${TEMPLATE}" >&2
+  exit 1
+fi
 
-# Use sed with escaped values; use @ as delimiter to reduce escaping noise
+# Si pas de slug fourni, utiliser le nom
+if [[ -z "${SLUG}" ]]; then
+  SLUG="${NAME}"
+fi
+
+# Génération depuis le template
+# 1er sed : variables {{...}} ; 2e sed : lignes de meta (# TAGS=, etc.)
 sed \
-  -e "s@__NAME__@${_e_name}@g" \
-  -e "s@__VERSION__@${_e_version}@g" \
-  -e "s@__DESCRIPTION__@${_e_desc}@g" \
-  -e "s@__HOMEPAGE__@${_e_home}@g" \
-  "$TPL_PATH" \
-  | sed 's/\r$//' > "$tmp"
+  -e "s/{{NAME}}/${NAME}/g" \
+  -e "s/{{VERSION}}/${VERSION}/g" \
+  -e "s/{{DESCRIPTION}}/${DESCRIPTION}/g" \
+  -e "s|{{HOMEPAGE}}|${HOMEPAGE}|g" \
+  "${TEMPLATE}" \
+| sed \
+  -e "s|^# TAGS=.*$|# TAGS=${TAGS}|" \
+  -e "s|^# CATEGORY=.*$|# CATEGORY=${CATEGORY}|" \
+  -e "s|^# SLUG=.*$|# SLUG=${SLUG}|" \
+  -e "s|^# DRAFT=.*$|# DRAFT=${DRAFT}|" \
+> "${OUT}"
 
-# final move
-mv "$tmp" "$OUT"
-chmod +x "$OUT"
-# ensure readable by user
-chmod 744 "$OUT" || true
+chmod +x "${OUT}"
 
-# create sha256 file
-_write_sha256 "$OUT"
+# SHA256 (fichier .sha256 ne contenant que l'empreinte)
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256sum "${OUT}" | awk '{print $1}' > "${OUT}.sha256"
+elif command -v shasum >/dev/null 2>&1; then
+  shasum -a 256 "${OUT}" | awk '{print $1}' > "${OUT}.sha256"
+else
+  echo "Avertissement: ni sha256sum ni shasum n'ont été trouvés. ${OUT}.sha256 non créé." >&2
+fi
 
-printf 'Created: %s and %s.sha256\n' "$OUT" "$OUT"
-printf 'Try:   ./%s -h\n' "$NAME"
+echo "Created: ${OUT} and ${OUT}.sha256"
+echo "Try:   ./${NAME} -h"
