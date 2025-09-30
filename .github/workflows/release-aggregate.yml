@@ -3,17 +3,17 @@ name: release-aggregate
 on:
   push:
     branches: [ "main" ]
-    # On déclenche pour tout… sauf ces chemins ignorés
-    paths-ignore:
-      - "README*"
-      - "LICENSE*"
-      - ".github/**"
-      - "templates/**"
-      - "tools/**"
-  workflow_dispatch:
+    paths:
+      - "*"
+      - "!README*"
+      - "!LICENSE*"
+      - "!.github/**"
+      - "!templates/**"
+      - "!tools/**"
+  workflow_dispatch: {}
 
 permissions:
-  contents: write   # nécessaire pour créer/mettre à jour la Release
+  contents: write   # tags + releases
 
 concurrency:
   group: release-aggregate
@@ -23,74 +23,94 @@ jobs:
   build-release:
     runs-on: ubuntu-latest
 
-    # Variables d'environnement (évite les ${ { … } } dans les scripts shell)
-    env:
-      RETAIN: "5"                         # garder les 5 dernières releases (si géré par ton script)
-      BRANCH_DEFAULT: "main"              # réservé si ton script l'utilise
-      TARGET_HUGO_REPO: ${{ vars.TARGET_HUGO_REPO }}   # ex: NoelNac-HackEthical/hugo-demo
-      HUGO_DEMO_TOKEN: ${{ secrets.HUGO_DEMO_TOKEN }}  # PAT classic scope public_repo
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Sanity check env
-        run: |
-          set -euo pipefail
-          [ -n "${TARGET_HUGO_REPO:-}" ] || { echo "::error ::TARGET_HUGO_REPO manquante (Actions → Variables)"; exit 1; }
-          [ -n "${HUGO_DEMO_TOKEN:-}" ]  || { echo "::error ::HUGO_DEMO_TOKEN manquant (Actions → Secrets)"; exit 1; }
-          case "$TARGET_HUGO_REPO" in
-            */*) : ;;
-            *) echo "::error ::TARGET_HUGO_REPO doit être au format owner/repo (ex: NoelNac-HackEthical/hugo-demo)"; exit 1;;
-          esac
-          echo "TARGET_HUGO_REPO=${TARGET_HUGO_REPO}"
-          echo "HUGO_DEMO_TOKEN défini (masqué)."
-
       - name: Set timezone (Europe/Brussels)
         run: sudo timedatectl set-timezone Europe/Brussels
 
-      - name: Install dependencies (jq, curl)
+      - name: Prepare environment
         run: |
-          set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y jq curl
 
-      # === Ton script d'agrégation publie/actualise la Release GitHub ===
+      # 👉 ton script existant qui fabrique/agrège la release
       - name: Aggregate & publish release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # token automatique GitHub Actions
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RETAIN: "5"            # garder uniquement les 5 dernières releases (si géré par ton script)
+          BRANCH_DEFAULT: "main"
         run: |
-          set -euo pipefail
           bash .github/scripts/aggregate_release.sh
 
-      # === Construire le payload pour le site Hugo (liste des scripts sans .sha256) ===
-      - name: Build payload for hugo site
+      # 👉 NOUVEAU : construire un payload avec URLs + SHA256 + VERSION (depuis # VERSION= du script)
+      - name: Build payload for hugo site (with asset URLs + script versions)
+        id: build_payload
+        shell: bash
         run: |
           set -euo pipefail
+
           REPO="${{ github.repository }}"  # ex: NoelNac-HackEthical/mes-scripts
           API="https://api.github.com/repos/${REPO}/releases/latest"
 
-          JSON="$(curl -sSL -H 'Accept: application/vnd.github+json' "$API")"
+          # Récupérer le JSON de la release "latest"
+          JSON="$(curl -sSL -H "Accept: application/vnd.github+json" "$API")"
           TAG="$(echo "$JSON" | jq -r '.tag_name')"
-          SCRIPTS="$(echo "$JSON" | jq -r '[.assets[].name | select(test("\\.sha256$")|not)]')"
 
-          printf '{"source_repo":"%s","release_tag":"%s","scripts":%s}\n' \
-            "$REPO" "$TAG" "$SCRIPTS" > payload.json
+          # Tableau des assets (name + browser_download_url)
+          ASSETS_JSON="$(echo "$JSON" | jq -c '[.assets[] | {name: .name, url: .browser_download_url}]')"
 
-          echo "Payload construit :"
+          # Scripts = noms sans .sha256
+          SCRIPTS_JSON="$(echo "$ASSETS_JSON" | jq -r '[.[].name] | map(select(test("\\.sha256$")|not))')"
+
+          # Map initiale { "script": {"url":"...", "sha256":"..."} }
+          MAP="$(jq -n --argjson assets "$ASSETS_JSON" '
+            ($assets | map(select(.name|test("\\.sha256$")|not))) as $bins
+            | ($assets | map(select(.name|test("\\.sha256$")))) as $hashes
+            | reduce $bins[] as $b ({}; .[$b.name] = {url: $b.url})
+            | reduce $hashes[] as $h (.;
+                .[ ($h.name|sub("\\.sha256$";"")) ] += {sha256: $h.url}
+              )
+          ')"
+
+          # Extraire VERSION depuis le contenu de chaque script (première ligne '# VERSION=')
+          TMPDIR="$(mktemp -d)"
+          cleanup(){ rm -rf "$TMPDIR"; }
+          trap cleanup EXIT
+
+          for s in $(echo "$SCRIPTS_JSON" | jq -r '.[]'); do
+            url="$(echo "$MAP" | jq -r --arg s "$s" '.[$s].url')"
+            ver="unknown"
+            if [ -n "$url" ] && curl -sSL "$url" -o "$TMPDIR/$s"; then
+              ver="$(grep -m1 -E '^# *VERSION *= *' "$TMPDIR/$s" | sed -E 's/^# *VERSION *= *//' | tr -d '\r' || true)"
+              ver="${ver:-unknown}"
+            fi
+            MAP="$(echo "$MAP" | jq --arg s "$s" --arg v "$ver" '.[$s].version = $v')"
+          done
+
+          # Payload final
+          printf '{"source_repo":"%s","release_tag":"%s","scripts":%s,"assets":%s}\n' \
+            "$REPO" "$TAG" "$SCRIPTS_JSON" "$MAP" > payload.json
+
+          echo "Payload built:"
           cat payload.json
 
-      # === Envoyer un repository_dispatch vers le dépôt Hugo (sans cloner) ===
+      # 👉 Envoi à hugo-demo (no clone)
       - name: Dispatch to hugo site (no clone)
+        env:
+          TARGET_HUGO_REPO: ${{ vars.TARGET_HUGO_REPO }}       # ex: NoelNac-HackEthical/hugo-demo
+          HUGO_DEMO_TOKEN: ${{ secrets.HUGO_DEMO_TOKEN }}      # PAT classic scope public_repo
+        shell: bash
         run: |
           set -euo pipefail
+
           OWNER="$(echo "$TARGET_HUGO_REPO" | cut -d/ -f1)"
           NAME="$(echo "$TARGET_HUGO_REPO" | cut -d/ -f2)"
           BODY=$(printf '{"event_type":"mes-scripts-release","client_payload":%s}' "$(cat payload.json)")
 
-          echo "Envoi d'un repository_dispatch vers ${OWNER}/${NAME}…"
           HTTP_CODE="$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST \
             -H 'Accept: application/vnd.github+json' \
             -H "Authorization: Bearer ${HUGO_DEMO_TOKEN}" \
@@ -100,7 +120,6 @@ jobs:
           echo "Réponse HTTP: $HTTP_CODE"
           cat /tmp/resp.json || true
 
-          # Échouer proprement si l'appel API n'est pas OK
           case "$HTTP_CODE" in
             204) echo "repository_dispatch envoyé avec succès." ;;
             *) echo "::error ::Échec repository_dispatch (HTTP $HTTP_CODE)"; exit 1 ;;
