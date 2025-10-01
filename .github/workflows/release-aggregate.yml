@@ -37,6 +37,7 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq curl coreutils
 
+      # Agrégation / publication de la release (inline)
       - name: Aggregate & publish release (inline)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -142,6 +143,7 @@ jobs:
 
           log "Done."
 
+      # Construction du payload pour hugo-demo (Dynamic execution + 'v' sur 1re ligne du help)
       - name: Build payload for hugo site (dynamic execution)
         id: build_payload
         shell: bash
@@ -182,21 +184,21 @@ jobs:
             ver="unknown"; desc=""; usage_block=""
 
             if [ -n "$url" ] && curl -sSL "$url" -o "$TMPDIR/$s"; then
-              cp "$TMPDIR/$s" "$TMPDIR/run-$s" || true
-              chmod +x "$TMPDIR/run-$s" || true
+              # On garde le NOM d'origine: pas de préfixe run-
+              chmod +x "$TMPDIR/$s" || true
 
-              # Exécution isolée pour --version et -h/--help
+              # Exécution isolée (réseau coupé) pour --version et -h/--help
               docker run --rm --network none -v "$TMPDIR":/work -w /work --memory=256m --cpus=0.5 \
                 ubuntu:22.04 bash -lc "\
                   set -e; \
                   apt-get update -qq >/dev/null 2>&1 || true; \
                   apt-get install -y -qq bash coreutils >/dev/null 2>&1 || true; \
-                  ( timeout 6s /work/run-$s --version 2>&1 || timeout 6s /work/run-$s -V 2>&1 || true ) > /work/run_version.txt 2>&1 || true; \
-                  ( timeout 8s /work/run-$s -h 2>&1 || timeout 8s /work/run-$s --help 2>&1 || true ) > /work/run_help.txt 2>&1 || true" || true
+                  ( timeout 6s bash /work/$s --version 2>&1 || timeout 6s bash /work/$s -V 2>&1 || true ) > /work/${s}.version.txt 2>&1 || true; \
+                  ( timeout 8s bash /work/$s -h 2>&1 || timeout 8s bash /work/$s --help 2>&1 || true ) > /work/${s}.help.txt 2>&1 || true" || true
 
               # VERSION : privilégier la sortie dynamique, fallback header
-              if [ -s "$TMPDIR/run_version.txt" ]; then
-                ver="$(sed -E 's/\r$//g' "$TMPDIR/run_version.txt" | head -n 1 | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+              if [ -s "$TMPDIR/${s}.version.txt" ]; then
+                ver="$(sed -E 's/\r$//g' "$TMPDIR/${s}.version.txt" | head -n 1 | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
                 ver="$(printf "%s" "$ver" | head -c 128)"
                 if [ -z "$ver" ]; then
                   ver="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
@@ -212,9 +214,22 @@ jobs:
               desc="${desc:-}"
               desc="$(printf "%s" "$desc" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' | head -c 200)"
 
-              # USAGE depuis sortie dynamique
-              if [ -s "$TMPDIR/run_help.txt" ]; then
-                usage_block="$(sed -E 's/\r$//g' "$TMPDIR/run_help.txt" | sed -e 's/^[[:space:]]*//; s/[[:space:]]*$//' | head -n 200)"
+              # USAGE depuis sortie dynamique + ajout du 'v' devant la version en 1re ligne
+              if [ -s "$TMPDIR/${s}.help.txt" ]; then
+                help_txt="$(sed -E 's/\r$//g' "$TMPDIR/${s}.help.txt")"
+
+                # Pat pour matcher le nom exact du script au début de la ligne (échappé pour sed)
+                pat="$(printf '%s' "$s" | sed -e 's/[][(){}.^$*+?|\\/]/\\&/g')"
+
+                first="$(printf '%s\n' "$help_txt" | head -n 1)"
+                rest="$(printf '%s\n' "$help_txt" | tail -n +2 || true)"
+                norm_first="$(printf '%s\n' "$first" | sed -E "s/^(${pat})([[:space:]]+)v?([0-9][0-9A-Za-z._+-]*)([[:space:]].*)?$/\\1 v\\3\\4/")"
+                help_txt="${norm_first}"
+                if [ -n "$rest" ]; then
+                  help_txt="${help_txt}"$'\n'"${rest}"
+                fi
+
+                usage_block="$(printf "%s" "$help_txt" | sed -e 's/^[[:space:]]*//; s/[[:space:]]*$//' | head -n 200)"
                 usage_block="$(printf "%s" "$usage_block" | head -c 2000)"
               else
                 usage_block=""
