@@ -1,87 +1,144 @@
-#!/usr/bin/env bash
-set -euo pipefail
-IFS=$'\n\t'
+name: release-aggregate
 
-die(){ echo "✖ $*" >&2; exit 1; }
-log(){ echo "• $*"; }
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "*"
+      - "!README*"
+      - "!LICENSE*"
+      - "!.github/**"
+      - "!templates/**"
+      - "!tools/**"
+  workflow_dispatch: {}
 
-OWNER_REPO="$(git config --get remote.origin.url | sed -E 's#.*github.com[:/](.+/.+)(\.git)?#\1#')"
-[ -n "${OWNER_REPO:-}" ] || die "Cannot determine owner/repo"
+permissions:
+  contents: write   # tags + releases
 
-mapfile -t SCRIPTS < <(
-  git ls-files   | grep -v -E '^(.github/|templates/|tools/|README|LICENSE)'   | grep -v -E '\.sha256$'   | while read -r f; do
-      [ -f "$f" ] || continue
-      head -n1 "$f" | grep -q '^#!' || continue
-      grep -q -m1 -E '^#\s*VERSION=' "$f" || continue
-      echo "$f"
-    done
-)
+concurrency:
+  group: release-aggregate
+  cancel-in-progress: false
 
-[ ${#SCRIPTS[@]} -gt 0 ] || die "No scripts detected (missing '# VERSION=' lines?)"
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
 
-NOTES="$(mktemp)"
-FILES_TO_UPLOAD=()
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-{
-  echo "## Scripts et versions"
-  echo
-  echo "| Script | Version |"
-  echo "|-------:|:--------|"
-} > "$NOTES"
+      - name: Set timezone (Europe/Brussels)
+        run: sudo timedatectl set-timezone Europe/Brussels
 
-for f in "${SCRIPTS[@]}"; do
-  name="$(basename "$f")"
-  ver="$(grep -m1 -E '^#\s*VERSION=' "$f" | sed -E 's/^#\s*VERSION=//')"
-  [ -n "$ver" ] || ver="inconnue"
+      - name: Prepare environment
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl
 
-  hash="$(sha256sum "$f" | awk '{print tolower($1)}')"
-  printf "%s  %s\n" "$hash" "$name" > "$f.sha256"
+      # Ton script existant qui fabrique/agrège la release
+      - name: Aggregate & publish release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RETAIN: "5"            # garder uniquement les 5 dernières releases (si géré par ton script)
+          BRANCH_DEFAULT: "main"
+        run: |
+          bash .github/scripts/aggregate_release.sh
 
-  FILES_TO_UPLOAD+=( "$f" "$f.sha256" )
-  printf "| \`%s\` | \`%s\` |\n" "$name" "$ver" >> "$NOTES"
-done
+      # Construire le payload: URLs + VERSION + DESCRIPTION + USAGE
+      - name: Build payload for hugo site (with asset URLs + script versions + descriptions + usage)
+        id: build_payload
+        shell: bash
+        run: |
+          set -euo pipefail
 
-pad(){ printf "%02d" "$1"; }
-year=$(date +%Y); month=$(date +%m); day=$(date +%d)
-hour=$(date +%H);  min=$(date +%M)
+          REPO="${{ github.repository }}"  # ex: NoelNac-HackEthical/mes-scripts
+          API="https://api.github.com/repos/${REPO}/releases/latest"
 
-moisNoms=( "" "janvier" "février" "mars" "avril" "mai" "juin" "juillet" "août" "septembre" "octobre" "novembre" "décembre" )
-moisIdx=$((10#$month))
-date_fr="${day} ${moisNoms[$moisIdx]} ${year} ${hour}h${min}"
+          # Récupérer le JSON de la release "latest"
+          JSON="$(curl -sSL -H "Accept: application/vnd.github+json" "$API")"
+          TAG="$(echo "$JSON" | jq -r '.tag_name')"
 
-TAG="r-${year}-${month}-${day}-${hour}${min}"
-TITLE="Mes scripts au ${date_fr}"
+          # Assets (name + browser_download_url)
+          ASSETS_JSON="$(echo "$JSON" | jq -c '[.assets[] | {name: .name, url: .browser_download_url}]')"
 
-echo -e "\n---"
-echo "Tag      : $TAG"
-echo "Titre    : $TITLE"
-echo "Repo     : $OWNER_REPO"
-echo "Scripts  : ${#SCRIPTS[@]}"
-echo "---"
+          # Scripts = noms sans .sha256
+          SCRIPTS_JSON="$(echo "$ASSETS_JSON" | jq -r '[.[].name] | map(select(test("\\.sha256$")|not))')"
 
-if ! command -v gh >/dev/null 2>&1; then
-  die "GitHub CLI (gh) is required on the runner"
-fi
+          # Map initiale { "script": {"url":"...", "sha256":"..."} }
+          MAP="$(jq -n --argjson assets "$ASSETS_JSON" '
+            ($assets | map(select(.name|test("\\.sha256$")|not))) as $bins
+            | ($assets | map(select(.name|test("\\.sha256$")))) as $hashes
+            | reduce $bins[] as $b ({}; .[$b.name] = {url: $b.url})
+            | reduce $hashes[] as $h (.;
+                .[ ($h.name|sub("\\.sha256$";"")) ] += {sha256: $h.url}
+              )
+          ')"
 
-if gh release view "$TAG" >/dev/null 2>&1; then
-  log "Tag $TAG already exists – deleting release and tag"
-  gh release delete "$TAG" -y || true
-  git push origin ":refs/tags/$TAG" || true
-fi
+          TMPDIR="$(mktemp -d)"
+          cleanup(){ rm -rf "$TMPDIR"; }
+          trap cleanup EXIT
 
-gh release create "$TAG"   --title "$TITLE"   --notes-file "$NOTES"   --latest   "${FILES_TO_UPLOAD[@]}"
+          for s in $(echo "$SCRIPTS_JSON" | jq -r '.[]'); do
+            url="$(echo "$MAP" | jq -r --arg s "$s" '.[$s].url')"
+            ver="unknown"; desc=""; usage_block=""
+            if [ -n "$url" ] && curl -sSL "$url" -o "$TMPDIR/$s"; then
+              # VERSION
+              ver="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
+              ver="${ver:-unknown}"
+              # DESCRIPTION
+              desc="$(awk -F= '/^# *DESCRIPTION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
+              desc="${desc:-}"
+              desc="$(echo "$desc" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
 
-log "Release $TAG published with ${#FILES_TO_UPLOAD[@]} assets."
+              # USAGE (extraire le contenu du heredoc dans la fonction usage())
+              # 1) Extraire le corps de la fonction usage() (entre 'usage(){' et la '}' correspondante)
+              body="$(awk '
+                /^usage[[:space:]]*\(\)[[:space:]]*{/ {infun=1; next}
+                infun && /^\}[[:space:]]*$/ {infun=0; exit}
+                infun
+              ' "$TMPDIR/$s")"
+              # 2) Retirer la ligne "cat <<USAGE" et la ligne "USAGE" (délimiteurs)
+              usage_block="$(printf "%s\n" "$body" | sed -e '/cat <<USAGE/d' -e '/^USAGE$/d')"
+              # Trim CR éventuels
+              usage_block="$(printf "%s" "$usage_block" | sed 's/\r$//')"
+            fi
 
-RETAIN="${RETAIN:-5}"
-log "Pruning releases beyond the most recent ${RETAIN}…"
+            MAP="$(echo "$MAP" | jq --arg s "$s" --arg v "$ver" --arg d "$desc" --arg u "$usage_block" \
+              '.[$s].version = $v | .[$s].description = $d | .[$s].usage = $u')"
+          done
 
-gh api -H "Accept: application/vnd.github+json" "/repos/${OWNER_REPO}/releases?per_page=100"   | jq -r '.[].tag_name'   | awk 'NF'   | nl -ba   | while read -r idx tag; do
-      if [ "$idx" -gt "$RETAIN" ]; then
-        log "  - deleting $tag"
-        gh release delete "$tag" -y || true
-        git push origin ":refs/tags/$tag" || true
-      fi
-    done
+          # Payload final
+          printf '{"source_repo":"%s","release_tag":"%s","scripts":%s,"assets":%s}\n' \
+            "$REPO" "$TAG" "$SCRIPTS_JSON" "$MAP" > payload.json
 
-log "Done."
+          echo "Payload built:"
+          cat payload.json
+
+      # Envoi à hugo-demo (no clone)
+      - name: Dispatch to hugo site (no clone)
+        env:
+          TARGET_HUGO_REPO: ${{ vars.TARGET_HUGO_REPO }}       # ex: NoelNac-HackEthical/hugo-demo
+          HUGO_DEMO_TOKEN: ${{ secrets.HUGO_DEMO_TOKEN }}      # PAT classic scope public_repo
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          OWNER="$(echo "$TARGET_HUGO_REPO" | cut -d/ -f1)"
+          NAME="$(echo "$TARGET_HUGO_REPO" | cut -d/ -f2)"
+          BODY=$(printf '{"event_type":"mes-scripts-release","client_payload":%s}' "$(cat payload.json)")
+
+          HTTP_CODE="$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${HUGO_DEMO_TOKEN}" \
+            "https://api.github.com/repos/${OWNER}/${NAME}/dispatches" \
+            -d "$BODY")"
+
+          echo "HTTP: $HTTP_CODE"
+          cat /tmp/resp.json || true
+
+          case "$HTTP_CODE" in
+            204) echo "repository_dispatch envoyé avec succès." ;;
+            *) echo "::error ::Échec repository_dispatch (HTTP $HTTP_CODE)"; exit 1 ;;
+          esac
