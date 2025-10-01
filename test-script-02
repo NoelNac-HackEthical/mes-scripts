@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# NAME={{NAME}}
-# VERSION={{VERSION}}
-# DESCRIPTION={{DESCRIPTION}}
+# NAME=test-script-02
+# VERSION=0.6.0
+# DESCRIPTION=Nouveau script test-script-02 avec une version 0.6.0 pour tester Usage
 # HOMEPAGE=https://github.com/NoelNac-HackEthical/mes-scripts
 #____________________________________________________________________________
 #
 # Bref résumé :
-#   {{DESCRIPTION}}
+#   Nouveau script test-script-02 avec une version 0.6.0 pour tester Usage
 #
 # Template minimal pour scripts mes-scripts :
 # - contient usage() et examples() en heredoc (extraits par la pipeline)
@@ -42,7 +42,7 @@ $(_version_str)
 Usage: ${_self_base} [OPTIONS] <args>
 
 Short description:
-  {{DESCRIPTION}}
+  Nouveau script test-script-02 avec une version 0.6.0 pour tester Usage
 
 Options:
   -h, --help     Show this help
