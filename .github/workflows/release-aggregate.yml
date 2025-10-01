@@ -37,17 +37,110 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq curl
 
-      # Ton script existant qui fabrique/agrège la release
-      - name: Aggregate & publish release
+      # AGRÉGATION / PUBLICATION DE LA RELEASE (INLINE) — AUCUN .sh APPELÉ
+      - name: Aggregate & publish release (inline)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RETAIN: "5"            # garder uniquement les 5 dernières releases (si géré par ton script)
-          BRANCH_DEFAULT: "main"
+          RETAIN: "5"            # garder uniquement les 5 dernières releases
         run: |
-          bash .github/scripts/aggregate_release.sh
+          set -euo pipefail
+          IFS=$'\n\t'
 
-      # Construire un payload avec URLs + SHA256 + VERSION + DESCRIPTION
-      - name: Build payload for hugo site (with asset URLs + script versions + descriptions)
+          die(){ echo "✖ $*" >&2; exit 1; }
+          log(){ echo "• $*"; }
+
+          OWNER_REPO="$(git config --get remote.origin.url | sed -E 's#.*github.com[:/](.+/.+)(\.git)?#\1#')"
+          [ -n "${OWNER_REPO:-}" ] || die "Cannot determine owner/repo"
+
+          mapfile -t SCRIPTS < <(
+            git ls-files \
+              | grep -v -E '^(.github/|templates/|tools/|README|LICENSE)' \
+              | grep -v -E '\.sha256$' \
+              | while read -r f; do
+                  [ -f "$f" ] || continue
+                  head -n1 "$f" | grep -q '^#!' || continue
+                  grep -q -m1 -E '^#\s*VERSION=' "$f" || continue
+                  echo "$f"
+                done
+          )
+
+          [ ${#SCRIPTS[@]} -gt 0 ] || die "No scripts detected (missing '# VERSION=' lines?)"
+
+          NOTES="$(mktemp)"
+          FILES_TO_UPLOAD=()
+
+          {
+            echo "## Scripts et versions"
+            echo
+            echo "| Script | Version |"
+            echo "|-------:|:--------|"
+          } > "$NOTES"
+
+          for f in "${SCRIPTS[@]}"; do
+            name="$(basename "$f")"
+            ver="$(grep -m1 -E '^#\s*VERSION=' "$f" | sed -E 's/^#\s*VERSION=//')"
+            [ -n "$ver" ] || ver="inconnue"
+
+            hash="$(sha256sum "$f" | awk '{print tolower($1)}')"
+            printf "%s  %s\n" "$hash" "$name" > "$f.sha256"
+
+            FILES_TO_UPLOAD+=( "$f" "$f.sha256" )
+            printf "| \`%s\` | \`%s\` |\n" "$name" "$ver" >> "$NOTES"
+          done
+
+          pad(){ printf "%02d" "$1"; }
+          year=$(date +%Y); month=$(date +%m); day=$(date +%d)
+          hour=$(date +%H);  min=$(date +%M)
+
+          moisNoms=( "" "janvier" "février" "mars" "avril" "mai" "juin" "juillet" "août" "septembre" "octobre" "novembre" "décembre" )
+          moisIdx=$((10#$month))
+          date_fr="${day} ${moisNoms[$moisIdx]} ${year} ${hour}h${min}"
+
+          TAG="r-${year}-${month}-${day}-${hour}${min}"
+          TITLE="Mes scripts au ${date_fr}"
+
+          echo -e "\n---"
+          echo "Tag      : $TAG"
+          echo "Titre    : $TITLE"
+          echo "Repo     : $OWNER_REPO"
+          echo "Scripts  : ${#SCRIPTS[@]}"
+          echo "---"
+
+          if ! command -v gh >/dev/null 2>&1; then
+            die "GitHub CLI (gh) is required on the runner"
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            log "Tag $TAG already exists – deleting release and tag"
+            gh release delete "$TAG" -y || true
+            git push origin ":refs/tags/$TAG" || true
+          fi
+
+          gh release create "$TAG" \
+            --title "$TITLE" \
+            --notes-file "$NOTES" \
+            --latest \
+            "${FILES_TO_UPLOAD[@]}"
+
+          log "Release $TAG published with ${#FILES_TO_UPLOAD[@]} assets."
+
+          RETAIN="${RETAIN:-5}"
+          log "Pruning releases beyond the most recent ${RETAIN}…"
+
+          gh api -H "Accept: application/vnd.github+json" "/repos/${OWNER_REPO}/releases?per_page=100" \
+            | jq -r '.[].tag_name' | awk 'NF' | nl -ba \
+            | while read -r idx tag; do
+                if [ "$idx" -gt "$RETAIN" ]; then
+                  log "  - deleting $tag"
+                  gh release delete "$tag" -y || true
+                  git push origin ":refs/tags/$tag" || true
+                fi
+              done
+
+          log "Done."
+
+      # PAYLOAD pour hugo-demo : URLs + VERSION + DESCRIPTION + USAGE
+      - name: Build payload for hugo site (with asset URLs + script versions + descriptions + usage)
         id: build_payload
         shell: bash
         run: |
@@ -56,17 +149,12 @@ jobs:
           REPO="${{ github.repository }}"  # ex: NoelNac-HackEthical/mes-scripts
           API="https://api.github.com/repos/${REPO}/releases/latest"
 
-          # Récupérer le JSON de la release "latest"
           JSON="$(curl -sSL -H "Accept: application/vnd.github+json" "$API")"
           TAG="$(echo "$JSON" | jq -r '.tag_name')"
 
-          # Tableau des assets (name + browser_download_url)
           ASSETS_JSON="$(echo "$JSON" | jq -c '[.assets[] | {name: .name, url: .browser_download_url}]')"
-
-          # Scripts = noms sans .sha256
           SCRIPTS_JSON="$(echo "$ASSETS_JSON" | jq -r '[.[].name] | map(select(test("\\.sha256$")|not))')"
 
-          # Map initiale { "script": {"url":"...", "sha256":"..."} }
           MAP="$(jq -n --argjson assets "$ASSETS_JSON" '
             ($assets | map(select(.name|test("\\.sha256$")|not))) as $bins
             | ($assets | map(select(.name|test("\\.sha256$")))) as $hashes
@@ -76,39 +164,37 @@ jobs:
               )
           ')"
 
-          # Temporary dir to download scripts and extract # VERSION= and # DESCRIPTION=
           TMPDIR="$(mktemp -d)"
           cleanup(){ rm -rf "$TMPDIR"; }
           trap cleanup EXIT
 
           for s in $(echo "$SCRIPTS_JSON" | jq -r '.[]'); do
             url="$(echo "$MAP" | jq -r --arg s "$s" '.[$s].url')"
-            ver="unknown"
-            desc=""
+            ver="unknown"; desc=""; usage_block=""
             if [ -n "$url" ] && curl -sSL "$url" -o "$TMPDIR/$s"; then
-              # Extraire VERSION: première ligne contenant '# VERSION='
               ver="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
               ver="${ver:-unknown}"
-              # Extraire DESCRIPTION: première ligne contenant '# DESCRIPTION='
               desc="$(awk -F= '/^# *DESCRIPTION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
               desc="${desc:-}"
-              # Trim leading/trailing spaces
               desc="$(echo "$desc" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
-            else
-              ver="unknown"
-              desc=""
+
+              usage_body="$(sed -n '/^[[:space:]]*usage[[:space:]]*()[[:space:]]*{/,/^[[:space:]]*}[[:space:]]*$/p' "$TMPDIR/$s" \
+                             | sed '1d;$d')"
+              usage_block="$(printf "%s\n" "$usage_body" \
+                             | sed -e '/cat[[:space:]]*<<[[:space:]]*USAGE/d' -e '/^[[:space:]]*USAGE[[:space:]]*$/d' \
+                             | sed -E 's/\r$//')"
             fi
-            MAP="$(echo "$MAP" | jq --arg s "$s" --arg v "$ver" --arg d "$desc" '.[$s].version = $v | .[$s].description = $d')"
+
+            MAP="$(echo "$MAP" | jq --arg s "$s" --arg v "$ver" --arg d "$desc" --arg u "$usage_block" \
+              '.[$s].version = $v | .[$s].description = $d | .[$s].usage = $u')"
           done
 
-          # Payload final
           printf '{"source_repo":"%s","release_tag":"%s","scripts":%s,"assets":%s}\n' \
             "$REPO" "$TAG" "$SCRIPTS_JSON" "$MAP" > payload.json
 
           echo "Payload built:"
           cat payload.json
 
-      # Envoi à hugo-demo (no clone)
       - name: Dispatch to hugo site (no clone)
         env:
           TARGET_HUGO_REPO: ${{ vars.TARGET_HUGO_REPO }}       # ex: NoelNac-HackEthical/hugo-demo
@@ -121,16 +207,13 @@ jobs:
           NAME="$(echo "$TARGET_HUGO_REPO" | cut -d/ -f2)"
           BODY=$(printf '{"event_type":"mes-scripts-release","client_payload":%s}' "$(cat payload.json)")
 
-          echo "BODY envoyé à hugo-demo (extrait) :"
-          jq -c . payload.json | sed -n '1,3p' || cat payload.json
-
           HTTP_CODE="$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST \
             -H 'Accept: application/vnd.github+json' \
             -H "Authorization: Bearer ${HUGO_DEMO_TOKEN}" \
             "https://api.github.com/repos/${OWNER}/${NAME}/dispatches" \
             -d "$BODY")"
 
-          echo "Réponse HTTP: $HTTP_CODE"
+          echo "HTTP: $HTTP_CODE"
           cat /tmp/resp.json || true
 
           case "$HTTP_CODE" in
