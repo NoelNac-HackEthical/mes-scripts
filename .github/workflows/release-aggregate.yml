@@ -1,4 +1,4 @@
-name: release-aggregate
+name: release-aggregate (dynamic execution)
 
 on:
   push:
@@ -13,7 +13,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write   # tags + releases
+  contents: write
 
 concurrency:
   group: release-aggregate
@@ -35,13 +35,12 @@ jobs:
       - name: Prepare environment
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y jq curl
+          sudo apt-get install -y jq curl coreutils
 
-      # AGRÉGATION / PUBLICATION DE LA RELEASE (INLINE) — AUCUN .sh APPELÉ
       - name: Aggregate & publish release (inline)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RETAIN: "5"            # garder uniquement les 5 dernières releases
+          RETAIN: "5"
         run: |
           set -euo pipefail
           IFS=$'\n\t'
@@ -81,9 +80,15 @@ jobs:
             ver="$(grep -m1 -E '^#\s*VERSION=' "$f" | sed -E 's/^#\s*VERSION=//')"
             [ -n "$ver" ] || ver="inconnue"
 
-            hash="$(sha256sum "$f" | awk '{print tolower($1)}')"
-            printf "%s  %s\n" "$hash" "$name" > "$f.sha256"
+            if command -v sha256sum >/dev/null 2>&1; then
+              hash="$(sha256sum "$f" | awk '{print tolower($1)}')"
+            elif command -v shasum >/dev/null 2>&1; then
+              hash="$(shasum -a 256 "$f" | awk '{print $1}')"
+            else
+              hash="unknown"
+            fi
 
+            printf "%s  %s\n" "$hash" "$name" > "$f.sha256"
             FILES_TO_UPLOAD+=( "$f" "$f.sha256" )
             printf "| \`%s\` | \`%s\` |\n" "$name" "$ver" >> "$NOTES"
           done
@@ -139,28 +144,28 @@ jobs:
 
           log "Done."
 
-      # PAYLOAD pour hugo-demo : URLs + VERSION + DESCRIPTION + USAGE
-      - name: Build payload for hugo site (with asset URLs + script versions + descriptions + usage)
+      - name: Build payload for hugo site (dynamic execution)
         id: build_payload
         shell: bash
         run: |
           set -euo pipefail
+          IFS=$'\n\t'
 
-          REPO="${{ github.repository }}"  # ex: NoelNac-HackEthical/mes-scripts
+          REPO="${{ github.repository }}"
           API="https://api.github.com/repos/${REPO}/releases/latest"
 
           JSON="$(curl -sSL -H "Accept: application/vnd.github+json" "$API")"
           TAG="$(echo "$JSON" | jq -r '.tag_name')"
 
           ASSETS_JSON="$(echo "$JSON" | jq -c '[.assets[] | {name: .name, url: .browser_download_url}]')"
-          SCRIPTS_JSON="$(echo "$ASSETS_JSON" | jq -r '[.[].name] | map(select(test("\\.sha256$")|not))')"
+          SCRIPTS_JSON="$(echo "$ASSETS_JSON" | jq -r '[.[].name] | map(select(test(\"\\.sha256$\")|not))')"
 
           MAP="$(jq -n --argjson assets "$ASSETS_JSON" '
-            ($assets | map(select(.name|test("\\.sha256$")|not))) as $bins
-            | ($assets | map(select(.name|test("\\.sha256$")))) as $hashes
+            ($assets | map(select(.name|test(\"\\.sha256$\")|not))) as $bins
+            | ($assets | map(select(.name|test(\"\\.sha256$\")))) as $hashes
             | reduce $bins[] as $b ({}; .[$b.name] = {url: $b.url})
             | reduce $hashes[] as $h (.;
-                .[ ($h.name|sub("\\.sha256$";"")) ] += {sha256: $h.url}
+                .[ ($h.name|sub(\"\\.sha256$\";\"\")) ] += {sha256: $h.url}
               )
           ')"
 
@@ -171,20 +176,51 @@ jobs:
           for s in $(echo "$SCRIPTS_JSON" | jq -r '.[]'); do
             url="$(echo "$MAP" | jq -r --arg s "$s" '.[$s].url')"
             ver="unknown"; desc=""; usage_block=""
+
             if [ -n "$url" ] && curl -sSL "$url" -o "$TMPDIR/$s"; then
-              ver="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
-              ver="${ver:-unknown}"
+              # fallback: try run --version first (dynamic)
+              cp "$TMPDIR/$s" "$TMPDIR/run-$s" || true
+              chmod +x "$TMPDIR/run-$s" || true
+
+              # execute in docker isolated: try --version and -h/--help
+              docker run --rm --network none -v "$TMPDIR":/work -w /work --memory=256m --cpus=0.5 \
+                ubuntu:22.04 bash -lc "\
+                  set -e; \
+                  apt-get update -qq >/dev/null 2>&1 || true; \
+                  apt-get install -y -qq bash coreutils >/dev/null 2>&1 || true; \
+                  ( timeout 6s /work/run-$s --version 2>&1 || timeout 6s /work/run-$s -V 2>&1 || true ) > /work/run_version.txt 2>&1 || true; \
+                  ( timeout 8s /work/run-$s -h 2>&1 || timeout 8s /work/run-$s --help 2>&1 || true ) > /work/run_help.txt 2>&1 || true" || true
+
+              # read and sanitize
+              if [ -s "$TMPDIR/run_version.txt" ]; then
+                ver="$(sed -E 's/\r$//g' "$TMPDIR/run_version.txt" | head -n 1 | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+                ver="$(printf "%s" "$ver" | head -c 128)"
+                # if version looks empty, fallback to header
+                if [ -z "$ver" ]; then
+                  ver="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,\"\",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
+                  ver="${ver:-unknown}"
+                fi
+              else
+                # static fallback for version
+                ver="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
+                ver="${ver:-unknown}"
+              fi
+
+              # DESCRIPTION: try header static (safer)
               desc="$(awk -F= '/^# *DESCRIPTION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
               desc="${desc:-}"
-              desc="$(echo "$desc" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+              desc="$(printf "%s" "$desc" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' | head -c 200)"
 
-              usage_body="$(sed -n '/^[[:space:]]*usage[[:space:]]*()[[:space:]]*{/,/^[[:space:]]*}[[:space:]]*$/p' "$TMPDIR/$s" \
-                             | sed '1d;$d')"
-              usage_block="$(printf "%s\n" "$usage_body" \
-                             | sed -e '/cat[[:space:]]*<<[[:space:]]*USAGE/d' -e '/^[[:space:]]*USAGE[[:space:]]*$/d' \
-                             | sed -E 's/\r$//')"
+              # USAGE: prefer dynamic help captured from docker
+              if [ -s "$TMPDIR/run_help.txt" ]; then
+                usage_block="$(sed -E 's/\r$//g' "$TMPDIR/run_help.txt" | sed -e 's/^[[:space:]]*//; s/[[:space:]]*$//' | head -n 200)"
+                usage_block="$(printf "%s" "$usage_block" | head -c 2000)"
+              else
+                usage_block=""
+              fi
             fi
 
+            echo "USAGE bytes for $s: $(printf "%s" "$usage_block" | wc -c)"
             MAP="$(echo "$MAP" | jq --arg s "$s" --arg v "$ver" --arg d "$desc" --arg u "$usage_block" \
               '.[$s].version = $v | .[$s].description = $d | .[$s].usage = $u')"
           done
@@ -192,17 +228,16 @@ jobs:
           printf '{"source_repo":"%s","release_tag":"%s","scripts":%s,"assets":%s}\n' \
             "$REPO" "$TAG" "$SCRIPTS_JSON" "$MAP" > payload.json
 
-          echo "Payload built:"
-          cat payload.json
+          echo "Payload built (snippet):"
+          jq -c . payload.json | sed -n '1,3p' || cat payload.json
 
       - name: Dispatch to hugo site (no clone)
         env:
-          TARGET_HUGO_REPO: ${{ vars.TARGET_HUGO_REPO }}       # ex: NoelNac-HackEthical/hugo-demo
-          HUGO_DEMO_TOKEN: ${{ secrets.HUGO_DEMO_TOKEN }}      # PAT classic scope public_repo
+          TARGET_HUGO_REPO: ${{ vars.TARGET_HUGO_REPO }}
+          HUGO_DEMO_TOKEN: ${{ secrets.HUGO_DEMO_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
-
           OWNER="$(echo "$TARGET_HUGO_REPO" | cut -d/ -f1)"
           NAME="$(echo "$TARGET_HUGO_REPO" | cut -d/ -f2)"
           BODY=$(printf '{"event_type":"mes-scripts-release","client_payload":%s}' "$(cat payload.json)")
@@ -213,7 +248,7 @@ jobs:
             "https://api.github.com/repos/${OWNER}/${NAME}/dispatches" \
             -d "$BODY")"
 
-          echo "HTTP: $HTTP_CODE"
+          echo "Réponse HTTP: $HTTP_CODE"
           cat /tmp/resp.json || true
 
           case "$HTTP_CODE" in
