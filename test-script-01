@@ -37,8 +37,6 @@ _print_version_and_exit(){ _version_str; exit 0; }
 # USAGE (heredoc) — extrait automatiquement par la pipeline
 usage(){
   cat <<USAGE
-$(_version_str)
-
 Usage: ${_self_base} [OPTIONS] <args>
 
 Short description:
