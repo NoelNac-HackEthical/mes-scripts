@@ -3,6 +3,13 @@
 # VERSION={{VERSION}}
 # DESCRIPTION={{DESCRIPTION}}
 # HOMEPAGE={{HOMEPAGE}}
+<<<<<<< HEAD
+=======
+# TAGS=scripts,tools
+# CATEGORY=Mes scripts
+# SLUG={{NAME}}
+# DRAFT=false
+>>>>>>> 8c8c023c8a4a3534614495c3374d389926a8bf8d
 #____________________________________________________________________________
 #
 # Bref résumé :
@@ -11,6 +18,7 @@
 # Template minimal pour scripts mes-scripts :
 # - contient usage() et examples() en heredoc (extraits par la pipeline)
 # - contient _version_str / _print_version_and_exit pour être cohérent
+# - fournit un squelette de parsing CLI et un _main()
 #
 set -euo pipefail
 
