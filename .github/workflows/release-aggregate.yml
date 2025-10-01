@@ -93,10 +93,8 @@ jobs:
             printf "| \`%s\` | \`%s\` |\n" "$name" "$ver" >> "$NOTES"
           done
 
-          pad(){ printf "%02d" "$1"; }
           year=$(date +%Y); month=$(date +%m); day=$(date +%d)
           hour=$(date +%H);  min=$(date +%M)
-
           moisNoms=( "" "janvier" "février" "mars" "avril" "mai" "juin" "juillet" "août" "septembre" "octobre" "novembre" "décembre" )
           moisIdx=$((10#$month))
           date_fr="${day} ${moisNoms[$moisIdx]} ${year} ${hour}h${min}"
@@ -157,17 +155,23 @@ jobs:
           JSON="$(curl -sSL -H "Accept: application/vnd.github+json" "$API")"
           TAG="$(echo "$JSON" | jq -r '.tag_name')"
 
+          # Assets (name + url)
           ASSETS_JSON="$(echo "$JSON" | jq -c '[.assets[] | {name: .name, url: .browser_download_url}]')"
-          SCRIPTS_JSON="$(echo "$ASSETS_JSON" | jq -r '[.[].name] | map(select(test(\"\\.sha256$\")|not))')"
 
-          MAP="$(jq -n --argjson assets "$ASSETS_JSON" '
-            ($assets | map(select(.name|test(\"\\.sha256$\")|not))) as $bins
-            | ($assets | map(select(.name|test(\"\\.sha256$\")))) as $hashes
-            | reduce $bins[] as $b ({}; .[$b.name] = {url: $b.url})
-            | reduce $hashes[] as $h (.;
-                .[ ($h.name|sub(\"\\.sha256$\";\"\")) ] += {sha256: $h.url}
-              )
-          ')"
+          # Liste des scripts (sans les .sha256)
+          SCRIPTS_JSON="$(echo "$ASSETS_JSON" | jq -r '[.[].name] | map(select(test("\\.sha256$")|not))')"
+
+          # MAP initiale : nom -> {url, sha256}
+          MAP="$(
+            jq -n --argjson assets "$ASSETS_JSON" '
+              ($assets | map(select(.name|test("\\.sha256$")|not))) as $bins
+              | ($assets | map(select(.name|test("\\.sha256$")))) as $hashes
+              | reduce $bins[] as $b ({}; .[$b.name] = {url: $b.url})
+              | reduce $hashes[] as $h (.;
+                  .[ ($h.name|sub("\\.sha256$";"")) ] += {sha256: $h.url}
+                )
+            '
+          )"
 
           TMPDIR="$(mktemp -d)"
           cleanup(){ rm -rf "$TMPDIR"; }
@@ -178,11 +182,10 @@ jobs:
             ver="unknown"; desc=""; usage_block=""
 
             if [ -n "$url" ] && curl -sSL "$url" -o "$TMPDIR/$s"; then
-              # fallback: try run --version first (dynamic)
               cp "$TMPDIR/$s" "$TMPDIR/run-$s" || true
               chmod +x "$TMPDIR/run-$s" || true
 
-              # execute in docker isolated: try --version and -h/--help
+              # Exécution isolée pour --version et -h/--help
               docker run --rm --network none -v "$TMPDIR":/work -w /work --memory=256m --cpus=0.5 \
                 ubuntu:22.04 bash -lc "\
                   set -e; \
@@ -191,27 +194,25 @@ jobs:
                   ( timeout 6s /work/run-$s --version 2>&1 || timeout 6s /work/run-$s -V 2>&1 || true ) > /work/run_version.txt 2>&1 || true; \
                   ( timeout 8s /work/run-$s -h 2>&1 || timeout 8s /work/run-$s --help 2>&1 || true ) > /work/run_help.txt 2>&1 || true" || true
 
-              # read and sanitize
+              # VERSION : privilégier la sortie dynamique, fallback header
               if [ -s "$TMPDIR/run_version.txt" ]; then
                 ver="$(sed -E 's/\r$//g' "$TMPDIR/run_version.txt" | head -n 1 | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
                 ver="$(printf "%s" "$ver" | head -c 128)"
-                # if version looks empty, fallback to header
                 if [ -z "$ver" ]; then
-                  ver="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,\"\",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
+                  ver="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
                   ver="${ver:-unknown}"
                 fi
               else
-                # static fallback for version
                 ver="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
                 ver="${ver:-unknown}"
               fi
 
-              # DESCRIPTION: try header static (safer)
+              # DESCRIPTION depuis header
               desc="$(awk -F= '/^# *DESCRIPTION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
               desc="${desc:-}"
               desc="$(printf "%s" "$desc" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' | head -c 200)"
 
-              # USAGE: prefer dynamic help captured from docker
+              # USAGE depuis sortie dynamique
               if [ -s "$TMPDIR/run_help.txt" ]; then
                 usage_block="$(sed -E 's/\r$//g' "$TMPDIR/run_help.txt" | sed -e 's/^[[:space:]]*//; s/[[:space:]]*$//' | head -n 200)"
                 usage_block="$(printf "%s" "$usage_block" | head -c 2000)"
@@ -221,6 +222,7 @@ jobs:
             fi
 
             echo "USAGE bytes for $s: $(printf "%s" "$usage_block" | wc -c)"
+
             MAP="$(echo "$MAP" | jq --arg s "$s" --arg v "$ver" --arg d "$desc" --arg u "$usage_block" \
               '.[$s].version = $v | .[$s].description = $d | .[$s].usage = $u')"
           done
