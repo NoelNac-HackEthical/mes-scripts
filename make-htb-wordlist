@@ -1,6 +1,6 @@
 #!/bin/bash
 # NAME=make-htb-wordlist
-# VERSION=1.0.3
+# VERSION=1.0.4
 # DESCRIPTION=Short one-line description du sript make-htb-wordlist
 
 set -euo pipefail
