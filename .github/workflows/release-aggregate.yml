@@ -38,24 +38,43 @@ jobs:
           sudo apt-get install -y jq curl coreutils
 
       # ------------------------------------------------------------------
-      # Détection des scripts modifiés (root/*.*), PAS de régénération globale
+      # Détection des scripts modifiés (root/*.*), BASE = github.event.before
       # ------------------------------------------------------------------
-      - name: Detect changed scripts (root/*.* only)
+      - name: Detect changed scripts (root/*.* only, push 'before' base)
         id: detect_changed
         shell: bash
         run: |
           set -euo pipefail
           IFS=$'\n\t'
 
-          # Base de comparaison (dernier commit commun avec origin/main si dispo)
-          git fetch origin main --depth=2 || true
-          base="$(git merge-base HEAD origin/main || git rev-parse HEAD^ || true)"
+          echo "event_name=${{ github.event_name }}"
+          echo "event.before=${{ github.event.before }}"
 
-          # Tous les fichiers modifiés dans ce push
-          changed_files="$(git diff --name-only ${base:+$base} HEAD || true)"
-          printf "Changed files:\n%s\n" "$changed_files"
+          # 1) Choisir une base fiable pour le diff
+          BASE=""
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            BASE="${{ github.event.before }}"
+            echo "Using BASE from push 'before': $BASE"
+          else
+            # Run manuel / 1er commit / fallback sur le parent si dispo
+            if git rev-parse HEAD^ >/dev/null 2>&1; then
+              BASE="$(git rev-parse HEAD^)"
+              echo "Using BASE=HEAD^ : $BASE"
+            else
+              BASE=""
+              echo "No parent commit; BASE empty (no diff possible)."
+            fi
+          fi
 
-          # Candidats = fichiers à la racine (quel que soit le nom), hors exclusions
+          # 2) Calculer la liste des fichiers modifiés
+          if [ -n "$BASE" ]; then
+            changed_files="$(git diff --name-only "$BASE" HEAD || true)"
+          else
+            changed_files=""
+          fi
+          printf "Changed files (BASE..HEAD):\n%s\n" "${changed_files:-<none>}"
+
+          # 3) Candidats = fichiers à la racine (quel que soit le nom), hors exclusions
           mapfile -t CANDIDATES < <(
             git ls-files \
               | grep -v -E '^(.github/|templates/|tools/)' \
@@ -63,8 +82,9 @@ jobs:
               | grep -v -E '\.sha256$' \
               | awk -F/ 'NF==1'
           )
+          printf "Root candidates:\n%s\n" "$(printf '%s\n' "${CANDIDATES[@]}")"
 
-          # Heuristique "script mes-scripts" : shebang + ligne '# VERSION='
+          # 4) Heuristique "script mes-scripts" : shebang + ligne '# VERSION='
           SCRIPTS=()
           for f in "${CANDIDATES[@]}"; do
             [ -f "$f" ] || continue
@@ -72,14 +92,17 @@ jobs:
             grep -q -m1 -E '^#\s*VERSION=' "$f" || continue
             SCRIPTS+=( "$f" )
           done
+          printf "Detected scripts:\n%s\n" "$(printf '%s\n' "${SCRIPTS[@]}")"
 
-          # Ne garder que les scripts MODIFIÉS (pas de régénération globale)
+          # 5) Ne garder que les scripts réellement MODIFIÉS
           : > .changed.list
-          for f in "${SCRIPTS[@]}"; do
-            if grep -qx "$f" <<< "$changed_files"; then
-              echo "$f" >> .changed.list
-            fi
-          done
+          if [ -n "${changed_files:-}" ]; then
+            for f in "${SCRIPTS[@]}"; do
+              if grep -qx "$f" <<< "$changed_files"; then
+                echo "$f" >> .changed.list
+              fi
+            done
+          fi
 
           echo "Changed scripts to process:"
           cat .changed.list || true
@@ -130,7 +153,7 @@ jobs:
 
             if command -v sha256sum >/dev/null 2>&1; then
               hash="$(sha256sum "$f" | awk '{print tolower($1)}')"
-            elif command -v shasum >/dev/null 2>&1; then
+            elif command -v shasum >/devnull 2>&1; then
               hash="$(shasum -a 256 "$f" | awk '{print $1}')"
             else
               hash="unknown"
