@@ -37,7 +37,52 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq curl coreutils
 
-      # Agrégation / publication de la release (inline)
+      # ------------------------------------------------------------------
+      # NEW : Détection des scripts modifiés (généralisation root/*.*)
+      # ------------------------------------------------------------------
+      - name: Detect changed scripts (root/*.* only)
+        id: detect_changed
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=$'\n\t'
+
+          # Base pour le diff (dernier commit commun avec origin/main si dispo)
+          git fetch origin main --depth=2 || true
+          base="$(git merge-base HEAD origin/main || git rev-parse HEAD^ || true)"
+
+          # Candidats = fichiers à la racine (quel que soit le nom), hors exclusions
+          mapfile -t CANDIDATES < <(
+            git ls-files \
+              | grep -v -E '^(.github/|templates/|tools/)' \
+              | grep -v -E '^(README|LICENSE)' \
+              | grep -v -E '\.sha256$' \
+              | awk -F/ 'NF==1'
+          )
+
+          # Heuristique "script mes-scripts" : shebang + ligne '# VERSION='
+          SCRIPTS=()
+          for f in "${CANDIDATES[@]}"; do
+            [ -f "$f" ] || continue
+            head -n1 "$f" | grep -q '^#!' || continue
+            grep -q -m1 -E '^#\s*VERSION=' "$f" || continue
+            SCRIPTS+=( "$f" )
+          done
+
+          # Liste des fichiers modifiés dans ce push
+          changed_files="$(git diff --name-only ${base:+$base} HEAD || true)"
+
+          : > .changed.list
+          for f in "${SCRIPTS[@]}"; do
+            if grep -qx "$f" <<< "$changed_files"; then
+              echo "$f" >> .changed.list
+            fi
+          done
+
+          echo "Changed scripts:"
+          cat .changed.list || true
+
+      # Agrégation / publication de la release (inline) — inchangé
       - name: Aggregate & publish release (inline)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -143,7 +188,7 @@ jobs:
 
           log "Done."
 
-      # Construction du payload pour hugo-demo (Dynamic execution + 'v' sur 1re ligne du help)
+      # Construction du payload pour hugo-demo (Dynamic execution + 'v' 1re ligne) — MODIFIÉ (filtrage)
       - name: Build payload for hugo site (dynamic execution)
         id: build_payload
         shell: bash
@@ -162,6 +207,24 @@ jobs:
 
           # Liste des scripts (sans les .sha256)
           SCRIPTS_JSON="$(echo "$ASSETS_JSON" | jq -r '[.[].name] | map(select(test("\\.sha256$")|not))')"
+
+          # --- NEW: Ne garder QUE les scripts réellement modifiés dans ce push ---
+          if [ -s .changed.list ]; then
+            CHANGED_JSON="$(jq -R -s -c 'split("\n")|map(select(length>0))' .changed.list)"
+            SCRIPTS_JSON="$(
+              jq -n --argjson all "$SCRIPTS_JSON" --argjson ch "$CHANGED_JSON" '
+                $all | map(select(. as $x | $ch | index($x)))
+              '
+            )"
+            if [ "$(echo "$SCRIPTS_JSON" | jq 'length')" -eq 0 ]; then
+              echo "Aucun script modifié → pas de payload à construire."
+              exit 0
+            fi
+          else
+            echo "Aucun script modifié → pas de payload à construire."
+            exit 0
+          fi
+          # --- /NEW ---
 
           # MAP initiale : nom -> {url, sha256}
           MAP="$(
@@ -184,17 +247,16 @@ jobs:
             ver="unknown"; desc=""; usage_block=""
 
             if [ -n "$url" ] && curl -sSL "$url" -o "$TMPDIR/$s"; then
-              # On garde le NOM d'origine: pas de préfixe run-
-              chmod +x "$TMPDIR/$s" || true
+              # On conserve TON mode d’exécution existant (Docker) ici
+              chmod -v +x "$TMPDIR/$s" || true
 
-              # Exécution isolée (réseau coupé) pour --version et -h/--help
               docker run --rm --network none -v "$TMPDIR":/work -w /work --memory=256m --cpus=0.5 \
                 ubuntu:22.04 bash -lc "\
                   set -e; \
                   apt-get update -qq >/dev/null 2>&1 || true; \
                   apt-get install -y -qq bash coreutils >/dev/null 2>&1 || true; \
                   ( timeout 6s bash /work/$s --version 2>&1 || timeout 6s bash /work/$s -V 2>&1 || true ) > /work/${s}.version.txt 2>&1 || true; \
-                  ( timeout 8s bash /work/$s -h 2>&1 || timeout 8s bash /work/$s --help 2>&1 || true ) > /work/${s}.help.txt 2>&1 || true" || true
+                  ( timeout 8s bash /work/$s -h 2弊1 || timeout 8s bash /work/$s --help 2>&1 || true ) > /work/${s}.help.txt 2>&1 || true" || true
 
               # VERSION : privilégier la sortie dynamique, fallback header
               if [ -s "$TMPDIR/${s}.version.txt" ]; then
@@ -203,10 +265,12 @@ jobs:
                 if [ -z "$ver" ]; then
                   ver="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
                   ver="${ver:-unknown}"
+                  ver="${s} v${ver}"
                 fi
               else
                 ver="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
                 ver="${ver:-unknown}"
+                ver="${s} v${ver}"
               fi
 
               # DESCRIPTION depuis header
@@ -214,7 +278,7 @@ jobs:
               desc="${desc:-}"
               desc="$(printf "%s" "$desc" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' | head -c 200)"
 
-              # USAGE depuis sortie dynamique + ajout du 'v' devant la version en 1re ligne
+              # USAGE depuis sortie dynamique + normalisation 'v' sur la 1re ligne
               if [ -s "$TMPDIR/${s}.help.txt" ]; then
                 help_txt="$(sed -E 's/\r$//g' "$TMPDIR/${s}.help.txt")"
 
@@ -255,6 +319,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          # NEW: si aucun script modifié, le step précédent a exit 0 sans payload
+          [ -f payload.json ] || { echo "Pas de payload (aucun script modifié) → skip dispatch."; exit 0; }
+
           OWNER="$(echo "$TARGET_HUGO_REPO" | cut -d/ -f1)"
           NAME="$(echo "$TARGET_HUGO_REPO" | cut -d/ -f2)"
           BODY=$(printf '{"event_type":"mes-scripts-release","client_payload":%s}' "$(cat payload.json)")
