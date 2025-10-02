@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # NAME=test-script-02
 # VERSION=0.8.0
-# DESCRIPTION=Nouveau test-script-02 v0.8.0
+# DESCRIPTION=Script de test du template avec v devant version
 # HOMEPAGE=https://github.com/NoelNac-HackEthical/mes-scripts
 #____________________________________________________________________________
 #
 # Bref résumé :
-#   Nouveau test-script-02 v0.8.0
+#   Script de test du template avec v devant version
 #
 # Template minimal pour scripts mes-scripts :
 # - contient usage() et examples() en heredoc (extraits par la pipeline)
@@ -28,7 +28,7 @@ _version_str(){
   local v
   v="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$_self_path" 2>/dev/null || true)"
   v="${v:-0.0.0}"
-  printf '%s %s\n' "$_self_base" "$v"
+  printf '%s v%s\n' "$_self_base" "$v"
 }
 _print_version_and_exit(){ _version_str; exit 0; }
 # ---------------------------------------------------------------------------
@@ -40,7 +40,7 @@ usage(){
 Usage: ${_self_base} [OPTIONS] <args>
 
 Short description:
-  Nouveau test-script-02 v0.8.0
+  Script de test du template avec v devant version
 
 Options:
   -h, --help     Show this help
