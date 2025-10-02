@@ -38,7 +38,7 @@ jobs:
           sudo apt-get install -y jq curl coreutils
 
       # ------------------------------------------------------------------
-      # NEW : Détection des scripts modifiés (généralisation root/*.*)
+      # Détection des scripts modifiés (root/*.*), PAS de régénération globale
       # ------------------------------------------------------------------
       - name: Detect changed scripts (root/*.* only)
         id: detect_changed
@@ -47,9 +47,13 @@ jobs:
           set -euo pipefail
           IFS=$'\n\t'
 
-          # Base pour le diff (dernier commit commun avec origin/main si dispo)
+          # Base de comparaison (dernier commit commun avec origin/main si dispo)
           git fetch origin main --depth=2 || true
           base="$(git merge-base HEAD origin/main || git rev-parse HEAD^ || true)"
+
+          # Tous les fichiers modifiés dans ce push
+          changed_files="$(git diff --name-only ${base:+$base} HEAD || true)"
+          printf "Changed files:\n%s\n" "$changed_files"
 
           # Candidats = fichiers à la racine (quel que soit le nom), hors exclusions
           mapfile -t CANDIDATES < <(
@@ -69,9 +73,7 @@ jobs:
             SCRIPTS+=( "$f" )
           done
 
-          # Liste des fichiers modifiés dans ce push
-          changed_files="$(git diff --name-only ${base:+$base} HEAD || true)"
-
+          # Ne garder que les scripts MODIFIÉS (pas de régénération globale)
           : > .changed.list
           for f in "${SCRIPTS[@]}"; do
             if grep -qx "$f" <<< "$changed_files"; then
@@ -79,7 +81,7 @@ jobs:
             fi
           done
 
-          echo "Changed scripts:"
+          echo "Changed scripts to process:"
           cat .changed.list || true
 
       # Agrégation / publication de la release (inline) — inchangé
@@ -188,7 +190,7 @@ jobs:
 
           log "Done."
 
-      # Construction du payload pour hugo-demo (Dynamic execution + 'v' 1re ligne) — MODIFIÉ (filtrage)
+      # Build payload Hugo (dynamic execution) — filtré sur scripts modifiés UNIQUEMENT
       - name: Build payload for hugo site (dynamic execution)
         id: build_payload
         shell: bash
@@ -208,7 +210,7 @@ jobs:
           # Liste des scripts (sans les .sha256)
           SCRIPTS_JSON="$(echo "$ASSETS_JSON" | jq -r '[.[].name] | map(select(test("\\.sha256$")|not))')"
 
-          # --- NEW: Ne garder QUE les scripts réellement modifiés dans ce push ---
+          # --- Filtrer sur les scripts réellement MODIFIÉS dans ce push ---
           if [ -s .changed.list ]; then
             CHANGED_JSON="$(jq -R -s -c 'split("\n")|map(select(length>0))' .changed.list)"
             SCRIPTS_JSON="$(
@@ -224,7 +226,7 @@ jobs:
             echo "Aucun script modifié → pas de payload à construire."
             exit 0
           fi
-          # --- /NEW ---
+          # --- /Filtre ---
 
           # MAP initiale : nom -> {url, sha256}
           MAP="$(
@@ -247,16 +249,16 @@ jobs:
             ver="unknown"; desc=""; usage_block=""
 
             if [ -n "$url" ] && curl -sSL "$url" -o "$TMPDIR/$s"; then
-              # On conserve TON mode d’exécution existant (Docker) ici
-              chmod -v +x "$TMPDIR/$s" || true
+              chmod +x "$TMPDIR/$s" || true
 
+              # Docker uniquement pour capter -h / --version des scripts modifiés
               docker run --rm --network none -v "$TMPDIR":/work -w /work --memory=256m --cpus=0.5 \
                 ubuntu:22.04 bash -lc "\
                   set -e; \
                   apt-get update -qq >/dev/null 2>&1 || true; \
                   apt-get install -y -qq bash coreutils >/dev/null 2>&1 || true; \
                   ( timeout 6s bash /work/$s --version 2>&1 || timeout 6s bash /work/$s -V 2>&1 || true ) > /work/${s}.version.txt 2>&1 || true; \
-                  ( timeout 8s bash /work/$s -h 2弊1 || timeout 8s bash /work/$s --help 2>&1 || true ) > /work/${s}.help.txt 2>&1 || true" || true
+                  ( timeout 8s bash /work/$s -h 2>&1 || timeout 8s bash /work/$s --help 2>&1 || true ) > /work/${s}.help.txt 2>&1 || true" || true
 
               # VERSION : privilégier la sortie dynamique, fallback header
               if [ -s "$TMPDIR/${s}.version.txt" ]; then
@@ -281,10 +283,7 @@ jobs:
               # USAGE depuis sortie dynamique + normalisation 'v' sur la 1re ligne
               if [ -s "$TMPDIR/${s}.help.txt" ]; then
                 help_txt="$(sed -E 's/\r$//g' "$TMPDIR/${s}.help.txt")"
-
-                # Pat pour matcher le nom exact du script au début de la ligne (échappé pour sed)
                 pat="$(printf '%s' "$s" | sed -e 's/[][(){}.^$*+?|\\/]/\\&/g')"
-
                 first="$(printf '%s\n' "$help_txt" | head -n 1)"
                 rest="$(printf '%s\n' "$help_txt" | tail -n +2 || true)"
                 norm_first="$(printf '%s\n' "$first" | sed -E "s/^(${pat})([[:space:]]+)v?([0-9][0-9A-Za-z._+-]*)([[:space:]].*)?$/\\1 v\\3\\4/")"
@@ -292,7 +291,6 @@ jobs:
                 if [ -n "$rest" ]; then
                   help_txt="${help_txt}"$'\n'"${rest}"
                 fi
-
                 usage_block="$(printf "%s" "$help_txt" | sed -e 's/^[[:space:]]*//; s/[[:space:]]*$//' | head -n 200)"
                 usage_block="$(printf "%s" "$usage_block" | head -c 2000)"
               else
@@ -320,7 +318,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # NEW: si aucun script modifié, le step précédent a exit 0 sans payload
+          # Si aucun script modifié, le step précédent a exit 0 sans payload
           [ -f payload.json ] || { echo "Pas de payload (aucun script modifié) → skip dispatch."; exit 0; }
 
           OWNER="$(echo "$TARGET_HUGO_REPO" | cut -d/ -f1)"
