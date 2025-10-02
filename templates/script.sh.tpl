@@ -28,7 +28,7 @@ _version_str(){
   local v
   v="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$_self_path" 2>/dev/null || true)"
   v="${v:-0.0.0}"
-  printf '%s %s\n' "$_self_base" "$v"
+  printf '%s v%s\n' "$_self_base" "$v"
 }
 _print_version_and_exit(){ _version_str; exit 0; }
 # ---------------------------------------------------------------------------
