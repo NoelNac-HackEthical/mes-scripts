@@ -70,7 +70,7 @@ jobs:
           SCRIPTS_INPUT="${{ github.event.inputs.scripts || '' }}"
           log "Run scope: $SCOPE"
 
-          # Catalogue complet
+          # Catalogue complet (tous les scripts versionnés exécutables)
           mapfile -t ALL_SCRIPTS < <(
             git ls-files \
               | grep -v -E '^(.github/|templates/|tools/|README|LICENSE)' \
@@ -84,7 +84,7 @@ jobs:
           )
           [ ${#ALL_SCRIPTS[@]} -gt 0 ] || die "No scripts detected."
 
-          # Fichiers modifiés
+          # Fichiers modifiés (pour scope=auto)
           mapfile -t CHANGED_FILES < <(
             if [ "${{ github.event_name }}" = "push" ]; then
               git diff --name-only "${{ github.event.before }}" HEAD
@@ -202,10 +202,9 @@ jobs:
 
           log "Done."
 
-          # ---- Docker EXÉCUTION (capture --version / --help) ----
+          # ---- Docker EXÉCUTION (capture --version / --help) + ligne de synthèse ----
           for f in "${SCRIPTS[@]}"; do
             name="$(basename "$f")"
-            echo ">>> Running Docker sandbox for $name"
             docker run --rm --network none -v "$PWD":/work -w /work --memory=256m --cpus=0.5 \
               ubuntu:22.04 bash -lc "\
                 set -e; \
@@ -213,6 +212,10 @@ jobs:
                 apt-get install -y -qq bash coreutils >/dev/null 2>&1 || true; \
                 ( timeout 6s bash /work/$f --version 2>&1 || timeout 6s bash /work/$f -V 2>&1 || true ) > /work/${f}.version.txt 2>&1 || true; \
                 ( timeout 8s bash /work/$f -h 2>&1 || timeout 8s bash /work/$f --help 2>&1 || true ) > /work/${f}.help.txt 2>&1 || true" || true
+
+            bytes=0
+            [ -f "${f}.help.txt" ] && bytes="$(wc -c < "${f}.help.txt" 2>/dev/null || echo 0)"
+            echo "USAGE bytes for ${name}: ${bytes}"
           done
 
           # ---- Sanity check latest/download (TOUS les scripts) ----
@@ -307,7 +310,7 @@ jobs:
               desc="$(printf "%s" "$desc" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' | head -c 200)"
             fi
 
-            # usage depuis *.help.txt (si dispo)
+            # usage depuis *.help.txt (si dispo) + normalisation 'v' 1ère ligne
             if [ -s "${s}.help.txt" ]; then
               help_txt="$(sed -E 's/\r$//g' "${s}.help.txt")"
               first="$(printf '%s\n' "$help_txt" | head -n 1)"
