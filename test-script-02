@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # NAME=test-script-02
 # VERSION=0.8.4
-# DESCRIPTION=Script de test du template avec v devant version
+# DESCRIPTION=Test de release-aggreagate avec lignes de docker
 # HOMEPAGE=https://github.com/NoelNac-HackEthical/mes-scripts
 #____________________________________________________________________________
 #
 # Bref résumé :
-#   Script de test du template avec v devant version
+#   Test de release-aggreagate avec lignes de docker dans bref résumé
 #
 # Template minimal pour scripts mes-scripts :
 # - contient usage() et examples() en heredoc (extraits par la pipeline)
