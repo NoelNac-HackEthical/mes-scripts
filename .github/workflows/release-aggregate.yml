@@ -203,7 +203,7 @@ jobs:
 
           log "Done."
 
-          # ---- Docker EXÉCUTION (logs visibles) ----
+          # ---- Docker EXÉCUTION ----
           for f in "${SCRIPTS[@]}"; do
             name="$(basename "$f")"
             echo ">>> Running Docker sandbox for $name"
@@ -234,3 +234,55 @@ jobs:
               fi
             done
           done
+
+      - name: Build payload for hugo site (dynamic execution)
+        id: build_payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=$'\n\t'
+          REPO="${{ github.repository }}"
+          API="https://api.github.com/repos/${REPO}/releases/latest"
+
+          JSON="$(curl -sSL -H "Accept: application/vnd.github+json" "$API")"
+          TAG="$(echo "$JSON" | jq -r '.tag_name')"
+          ASSETS_JSON="$(echo "$JSON" | jq -c '[.assets[] | {name: .name, url: .browser_download_url}]')"
+          SCRIPTS_JSON="$(echo "$ASSETS_JSON" | jq -r '[.[].name] | map(select(test("\\.sha256$")|not))')"
+
+          MAP="$(
+            jq -n --argjson assets "$ASSETS_JSON" '
+              ($assets | map(select(.name|test("\\.sha256$")|not))) as $bins
+              | ($assets | map(select(.name|test("\\.sha256$")))) as $hashes
+              | reduce $bins[] as $b ({}; .[$b.name] = {url: $b.url})
+              | reduce $hashes[] as $h (.;
+                  .[ ($h.name|sub("\\.sha256$";"")) ] += {sha256: $h.url}
+                )
+            '
+          )"
+
+          printf '{"source_repo":"%s","release_tag":"%s","scripts":%s,"assets":%s}\n' \
+            "$REPO" "$TAG" "$SCRIPTS_JSON" "$MAP" > payload.json
+
+          echo "Payload built (snippet):"
+          jq -c . payload.json | head -n 1
+
+      - name: Dispatch to hugo site (no clone)
+        env:
+          TARGET_HUGO_REPO: ${{ vars.TARGET_HUGO_REPO }}
+          HUGO_DEMO_TOKEN: ${{ secrets.HUGO_DEMO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          OWNER="$(echo "$TARGET_HUGO_REPO" | cut -d/ -f1)"
+          NAME="$(echo "$TARGET_HUGO_REPO" | cut -d/ -f2)"
+          BODY=$(printf '{"event_type":"mes-scripts-release","client_payload":%s}' "$(cat payload.json)")
+
+          HTTP_CODE="$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${HUGO_DEMO_TOKEN}" \
+            "https://api.github.com/repos/${OWNER}/${NAME}/dispatches" \
+            -d "$BODY")"
+
+          echo "Réponse HTTP: $HTTP_CODE"
+          cat /tmp/resp.json || true
+          [ "$HTTP_CODE" = "204" ] || { echo "::error ::Échec repository_dispatch"; exit 1; }
