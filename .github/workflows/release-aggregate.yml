@@ -51,7 +51,6 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq curl coreutils
 
-      # Agrégation / publication de la release (inline)
       - name: Aggregate & publish release (inline)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -66,13 +65,12 @@ jobs:
           OWNER_REPO="$(git config --get remote.origin.url | sed -E 's#.*github.com[:/](.+/.+)(\.git)?#\1#')"
           [ -n "${OWNER_REPO:-}" ] || die "Cannot determine owner/repo"
 
-          # Detect scope
+          # Scope
           SCOPE="${{ github.event.inputs.scope || 'auto' }}"
           SCRIPTS_INPUT="${{ github.event.inputs.scripts || '' }}"
           log "Run scope: $SCOPE"
-          [ -n "$SCOPE" ] || SCOPE="auto"
 
-          # ---- Catalogue complet (tous les scripts) : shebang + VERSION= ----
+          # Catalogue complet
           mapfile -t ALL_SCRIPTS < <(
             git ls-files \
               | grep -v -E '^(.github/|templates/|tools/|README|LICENSE)' \
@@ -84,9 +82,9 @@ jobs:
                   echo "$f"
                 done
           )
-          [ ${#ALL_SCRIPTS[@]} -gt 0 ] || die "No scripts detected (missing '# VERSION=' lines?)"
+          [ ${#ALL_SCRIPTS[@]} -gt 0 ] || die "No scripts detected."
 
-          # ---- Détection des fichiers modifiés (pour SCOPE=auto) ----
+          # Fichiers modifiés
           mapfile -t CHANGED_FILES < <(
             if [ "${{ github.event_name }}" = "push" ]; then
               git diff --name-only "${{ github.event.before }}" HEAD
@@ -97,49 +95,38 @@ jobs:
           declare -A changedSet=()
           for f in "${CHANGED_FILES[@]}"; do changedSet["$f"]=1; done
 
-          # ---- Sélection des scripts à EXÉCUTER (Docker, captures, etc.) ----
+          # Scripts sélectionnés
           SCRIPTS=()
           case "$SCOPE" in
-            none)
-              log "Manual run scope=none → no scripts will be processed."
-              ;;
-            all)
-              SCRIPTS=("${ALL_SCRIPTS[@]}")
-              ;;
-            auto)
-              for f in "${ALL_SCRIPTS[@]}"; do
-                [[ -n "${changedSet[$f]:-}" ]] && SCRIPTS+=("$f")
-              done
-              ;;
+            none) log "Manual run scope=none → no scripts will be processed." ;;
+            all)  SCRIPTS=("${ALL_SCRIPTS[@]}") ;;
+            auto) for f in "${ALL_SCRIPTS[@]}"; do [[ -n "${changedSet[$f]:-}" ]] && SCRIPTS+=("$f"); done ;;
             list)
               IFS=',' read -ra wanted <<<"$SCRIPTS_INPUT"
               for w in "${wanted[@]}"; do
-                w="$(echo "$w" | xargs)" # trim
+                w="$(echo "$w" | xargs)"
                 [ -n "$w" ] || continue
                 if [[ " ${ALL_SCRIPTS[*]} " == *" $w "* ]]; then
                   SCRIPTS+=("$w")
                 else
                   log "⚠ Script '$w' not found in repo"
                 fi
-              done
-              ;;
-            *)
-              die "Unknown scope: $SCOPE"
-              ;;
+              done ;;
+            *) die "Unknown scope: $SCOPE" ;;
           esac
 
           log "Changed files:"
           printf '%s\n' "${CHANGED_FILES[@]}" || true
-          log "Changed scripts to process (Docker run/metadata refresh):"
+          log "Scripts à exécuter (Docker):"
           printf '%s\n' "${SCRIPTS[@]}" || true
 
-          # >>> GARDE-FOU : si aucun script sélectionné → PAS de release (préserve la latest existante)
+          # Garde-fou
           if [ ${#SCRIPTS[@]} -eq 0 ]; then
             log "No scripts selected (scope=$SCOPE) → skipping release creation to preserve existing 'latest'."
             exit 0
           fi
 
-          # ---- Notes de release (table) : on liste TOUS les scripts de la release ----
+          # Notes
           NOTES="$(mktemp)"
           {
             echo "## Scripts et versions"
@@ -154,28 +141,25 @@ jobs:
             done
           } > "$NOTES"
 
-          # ---- Assets à publier : TOUS les scripts (latest complète) ----
+          # Assets à publier (TOUS les scripts)
           FILES_TO_UPLOAD=()
           for f in "${ALL_SCRIPTS[@]}"; do
             name="$(basename "$f")"
             if command -v sha256sum >/dev/null 2>&1; then
               hash="$(sha256sum "$f" | awk '{print tolower($1)}')"
-            elif command -v shasum >/dev/null 2>&1; then
-              hash="$(shasum -a 256 "$f" | awk '{print $1}')"
             else
-              hash="unknown"
+              hash="$(shasum -a 256 "$f" | awk '{print $1}')"
             fi
             printf "%s  %s\n" "$hash" "$name" > "$f.sha256"
             FILES_TO_UPLOAD+=( "$f" "$f.sha256" )
           done
 
-          # ---- Tag & titre ----
+          # Tag & titre
           year=$(date +%Y); month=$(date +%m); day=$(date +%d)
           hour=$(date +%H);  min=$(date +%M)
           moisNoms=( "" "janvier" "février" "mars" "avril" "mai" "juin" "juillet" "août" "septembre" "octobre" "novembre" "décembre" )
           moisIdx=$((10#$month))
           date_fr="${day} ${moisNoms[$moisIdx]} ${year} ${hour}h${min}"
-
           TAG="r-${year}-${month}-${day}-${hour}${min}"
           TITLE="Mes scripts au ${date_fr}"
 
@@ -187,7 +171,7 @@ jobs:
           echo "Scripts publiés  : ${#ALL_SCRIPTS[@]}"
           echo "---"
 
-          command -v gh >/dev/null 2>&1 || die "GitHub CLI (gh) is required on the runner"
+          command -v gh >/dev/null 2>&1 || die "GitHub CLI required"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             log "Tag $TAG already exists – deleting release and tag"
@@ -195,6 +179,7 @@ jobs:
             git push origin ":refs/tags/$TAG" || true
           fi
 
+          # Publication
           gh release create "$TAG" \
             --title "$TITLE" \
             --notes-file "$NOTES" \
@@ -203,7 +188,7 @@ jobs:
 
           log "Release $TAG published with ${#FILES_TO_UPLOAD[@]} assets."
 
-          # ---- Retention des anciennes releases ----
+          # Prune anciennes releases
           RETAIN="${RETAIN:-5}"
           log "Pruning releases beyond the most recent ${RETAIN}…"
           gh api -H "Accept: application/vnd.github+json" "/repos/${OWNER_REPO}/releases?per_page=100" \
@@ -218,16 +203,34 @@ jobs:
 
           log "Done."
 
-          # ---- Sanity check: latest/download pour TOUS les scripts ----
+          # ---- Docker EXÉCUTION (logs visibles) ----
+          for f in "${SCRIPTS[@]}"; do
+            name="$(basename "$f")"
+            echo ">>> Running Docker sandbox for $name"
+            docker run --rm --network none -v "$PWD":/work -w /work --memory=256m --cpus=0.5 \
+              ubuntu:22.04 bash -lc "\
+                set -e; \
+                apt-get update -qq >/dev/null 2>&1 || true; \
+                apt-get install -y -qq bash coreutils >/dev/null 2>&1 || true; \
+                ( timeout 6s bash /work/$f --version 2>&1 || timeout 6s bash /work/$f -V 2>&1 || true ) > /work/${f}.version.txt 2>&1 || true; \
+                ( timeout 8s bash /work/$f -h 2>&1 || timeout 8s bash /work/$f --help 2>&1 || true ) > /work/${f}.help.txt 2>&1 || true" || true
+          done
+
+          # ---- Sanity check avec retries ----
           SRC_REPO="$OWNER_REPO"
           for f in "${ALL_SCRIPTS[@]}"; do
             name="$(basename "$f")"
             for ext in "" ".sha256"; do
               url="https://github.com/${SRC_REPO}/releases/latest/download/${name}${ext}"
-              code=$(curl -sSI "$url" | awk 'toupper($1)=="HTTP/"{print $2; exit}')
+              code=""
+              for i in $(seq 1 6); do
+                code="$(curl -sS -o /dev/null -w '%{http_code}' -L "$url" || echo 000)"
+                [ "$code" = "200" ] || [ "$code" = "302" ] || [ "$code" = "206" ] && break
+                sleep 2
+              done
               echo "$code $url"
-              if [ "$code" != "200" ] && [ "$code" != "302" ]; then
-                echo "::warning ::Lien invalide: $url (HTTP $code)"
+              if [ "$code" != "200" ] && [ "$code" != "302" ] && [ "$code" != "206" ]; then
+                echo "::warning ::Lien invalide (après retries): $url (HTTP $code)"
               fi
             done
           done
