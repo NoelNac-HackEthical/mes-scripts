@@ -220,3 +220,17 @@ jobs:
               done
 
           log "Done."
+
+          # --- Sanity check des liens latest/download ---
+          SRC_REPO="$OWNER_REPO"
+          for f in "${SCRIPTS[@]}"; do
+            name="$(basename "$f")"
+            for ext in "" ".sha256"; do
+              url="https://github.com/${SRC_REPO}/releases/latest/download/${name}${ext}"
+              code=$(curl -sSI "$url" | awk 'toupper($1)=="HTTP/"{print $2; exit}')
+              echo "$code $url"
+              if [ "$code" != "200" ] && [ "$code" != "302" ]; then
+                echo "::warning ::Lien invalide: $url (HTTP $code)"
+              fi
+            done
+          done
