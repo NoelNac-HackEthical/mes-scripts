@@ -66,13 +66,13 @@ jobs:
           OWNER_REPO="$(git config --get remote.origin.url | sed -E 's#.*github.com[:/](.+/.+)(\.git)?#\1#')"
           [ -n "${OWNER_REPO:-}" ] || die "Cannot determine owner/repo"
 
-          # Detect scope (manual override supported)
+          # Detect scope
           SCOPE="${{ github.event.inputs.scope || 'auto' }}"
           SCRIPTS_INPUT="${{ github.event.inputs.scripts || '' }}"
           log "Run scope: $SCOPE"
           [ -n "$SCOPE" ] || SCOPE="auto"
 
-          # Candidate scripts = files with shebang + VERSION
+          # ---- Catalogue complet (tous les scripts) : shebang + VERSION= ----
           mapfile -t ALL_SCRIPTS < <(
             git ls-files \
               | grep -v -E '^(.github/|templates/|tools/|README|LICENSE)' \
@@ -86,7 +86,7 @@ jobs:
           )
           [ ${#ALL_SCRIPTS[@]} -gt 0 ] || die "No scripts detected (missing '# VERSION=' lines?)"
 
-          # Determine changed files
+          # ---- Détection des fichiers modifiés (pour SCOPE=auto) ----
           mapfile -t CHANGED_FILES < <(
             if [ "${{ github.event_name }}" = "push" ]; then
               git diff --name-only "${{ github.event.before }}" HEAD
@@ -97,7 +97,7 @@ jobs:
           declare -A changedSet=()
           for f in "${CHANGED_FILES[@]}"; do changedSet["$f"]=1; done
 
-          # Select scripts according to scope
+          # ---- Sélection des scripts à EXÉCUTER (Docker, captures, etc.) ----
           SCRIPTS=()
           case "$SCOPE" in
             none)
@@ -130,30 +130,34 @@ jobs:
 
           log "Changed files:"
           printf '%s\n' "${CHANGED_FILES[@]}" || true
-          log "Changed scripts to process:"
+          log "Changed scripts to process (Docker run/metadata refresh):"
           printf '%s\n' "${SCRIPTS[@]}" || true
 
-          # >>> GARDE-FOU : si aucun script sélectionné, on NE crée PAS de release
+          # >>> GARDE-FOU : si aucun script sélectionné → PAS de release (préserve la latest existante)
           if [ ${#SCRIPTS[@]} -eq 0 ]; then
             log "No scripts selected (scope=$SCOPE) → skipping release creation to preserve existing 'latest'."
             exit 0
           fi
 
+          # ---- Notes de release (table) : on liste TOUS les scripts de la release ----
           NOTES="$(mktemp)"
-          FILES_TO_UPLOAD=()
-
           {
             echo "## Scripts et versions"
             echo
             echo "| Script | Version |"
             echo "|-------:|:--------|"
+            for f in "${ALL_SCRIPTS[@]}"; do
+              name="$(basename "$f")"
+              ver="$(grep -m1 -E '^#\s*VERSION=' "$f" | sed -E 's/^#\s*VERSION=//')"
+              [ -n "$ver" ] || ver="inconnue"
+              printf "| \`%s\` | \`%s\` |\n" "$name" "$ver"
+            done
           } > "$NOTES"
 
-          for f in "${SCRIPTS[@]}"; do
+          # ---- Assets à publier : TOUS les scripts (latest complète) ----
+          FILES_TO_UPLOAD=()
+          for f in "${ALL_SCRIPTS[@]}"; do
             name="$(basename "$f")"
-            ver="$(grep -m1 -E '^#\s*VERSION=' "$f" | sed -E 's/^#\s*VERSION=//')"
-            [ -n "$ver" ] || ver="inconnue"
-
             if command -v sha256sum >/dev/null 2>&1; then
               hash="$(sha256sum "$f" | awk '{print tolower($1)}')"
             elif command -v shasum >/dev/null 2>&1; then
@@ -161,12 +165,11 @@ jobs:
             else
               hash="unknown"
             fi
-
             printf "%s  %s\n" "$hash" "$name" > "$f.sha256"
             FILES_TO_UPLOAD+=( "$f" "$f.sha256" )
-            printf "| \`%s\` | \`%s\` |\n" "$name" "$ver" >> "$NOTES"
           done
 
+          # ---- Tag & titre ----
           year=$(date +%Y); month=$(date +%m); day=$(date +%d)
           hour=$(date +%H);  min=$(date +%M)
           moisNoms=( "" "janvier" "février" "mars" "avril" "mai" "juin" "juillet" "août" "septembre" "octobre" "novembre" "décembre" )
@@ -180,7 +183,8 @@ jobs:
           echo "Tag      : $TAG"
           echo "Titre    : $TITLE"
           echo "Repo     : $OWNER_REPO"
-          echo "Scripts  : ${#SCRIPTS[@]}"
+          echo "Scripts exécutés : ${#SCRIPTS[@]}"
+          echo "Scripts publiés  : ${#ALL_SCRIPTS[@]}"
           echo "---"
 
           command -v gh >/dev/null 2>&1 || die "GitHub CLI (gh) is required on the runner"
@@ -199,9 +203,9 @@ jobs:
 
           log "Release $TAG published with ${#FILES_TO_UPLOAD[@]} assets."
 
+          # ---- Retention des anciennes releases ----
           RETAIN="${RETAIN:-5}"
           log "Pruning releases beyond the most recent ${RETAIN}…"
-
           gh api -H "Accept: application/vnd.github+json" "/repos/${OWNER_REPO}/releases?per_page=100" \
             | jq -r '.[].tag_name' | awk 'NF' | nl -ba \
             | while read -r idx tag; do
@@ -214,9 +218,9 @@ jobs:
 
           log "Done."
 
-          # --- Sanity check: latest/download links must resolve (200/302) ---
+          # ---- Sanity check: latest/download pour TOUS les scripts ----
           SRC_REPO="$OWNER_REPO"
-          for f in "${SCRIPTS[@]}"; do
+          for f in "${ALL_SCRIPTS[@]}"; do
             name="$(basename "$f")"
             for ext in "" ".sha256"; do
               url="https://github.com/${SRC_REPO}/releases/latest/download/${name}${ext}"
