@@ -95,7 +95,7 @@ jobs:
           declare -A changedSet=()
           for f in "${CHANGED_FILES[@]}"; do changedSet["$f"]=1; done
 
-          # Scripts sélectionnés
+          # Scripts sélectionnés (pour Docker/metadata)
           SCRIPTS=()
           case "$SCOPE" in
             none) log "Manual run scope=none → no scripts will be processed." ;;
@@ -120,13 +120,13 @@ jobs:
           log "Scripts à exécuter (Docker):"
           printf '%s\n' "${SCRIPTS[@]}" || true
 
-          # Garde-fou
+          # Garde-fou : si aucun script sélectionné → on ne touche pas à latest
           if [ ${#SCRIPTS[@]} -eq 0 ]; then
             log "No scripts selected (scope=$SCOPE) → skipping release creation to preserve existing 'latest'."
             exit 0
           fi
 
-          # Notes
+          # Notes de release (table pour TOUS les scripts)
           NOTES="$(mktemp)"
           {
             echo "## Scripts et versions"
@@ -141,7 +141,7 @@ jobs:
             done
           } > "$NOTES"
 
-          # Assets à publier (TOUS les scripts)
+          # Assets à publier (TOUS les scripts → latest complète)
           FILES_TO_UPLOAD=()
           for f in "${ALL_SCRIPTS[@]}"; do
             name="$(basename "$f")"
@@ -179,7 +179,6 @@ jobs:
             git push origin ":refs/tags/$TAG" || true
           fi
 
-          # Publication
           gh release create "$TAG" \
             --title "$TITLE" \
             --notes-file "$NOTES" \
@@ -203,7 +202,7 @@ jobs:
 
           log "Done."
 
-          # ---- Docker EXÉCUTION ----
+          # ---- Docker EXÉCUTION (capture --version / --help) ----
           for f in "${SCRIPTS[@]}"; do
             name="$(basename "$f")"
             echo ">>> Running Docker sandbox for $name"
@@ -216,7 +215,7 @@ jobs:
                 ( timeout 8s bash /work/$f -h 2>&1 || timeout 8s bash /work/$f --help 2>&1 || true ) > /work/${f}.help.txt 2>&1 || true" || true
           done
 
-          # ---- Sanity check avec retries ----
+          # ---- Sanity check latest/download (TOUS les scripts) ----
           SRC_REPO="$OWNER_REPO"
           for f in "${ALL_SCRIPTS[@]}"; do
             name="$(basename "$f")"
@@ -235,22 +234,49 @@ jobs:
             done
           done
 
+      # ===== Build payload ENRICHED (version/description/usage) =====
       - name: Build payload for hugo site (dynamic execution)
         id: build_payload
         shell: bash
         run: |
           set -euo pipefail
           IFS=$'\n\t'
+
           REPO="${{ github.repository }}"
           API="https://api.github.com/repos/${REPO}/releases/latest"
 
+          # 1) Dernière release et assets (URLs)
           JSON="$(curl -sSL -H "Accept: application/vnd.github+json" "$API")"
           TAG="$(echo "$JSON" | jq -r '.tag_name')"
           ASSETS_JSON="$(echo "$JSON" | jq -c '[.assets[] | {name: .name, url: .browser_download_url}]')"
-          SCRIPTS_JSON="$(echo "$ASSETS_JSON" | jq -r '[.[].name] | map(select(test("\\.sha256$")|not))')"
 
-          MAP="$(
-            jq -n --argjson assets "$ASSETS_JSON" '
+          # Scripts présents (sans .sha256), triés
+          mapfile -t ALL_SCRIPTS < <(echo "$ASSETS_JSON" | jq -r '.[].name' | grep -v '\.sha256$' | sort)
+
+          # 2) Recalcul des scripts changés (pour scope=auto)
+          mapfile -t CHANGED_FILES < <(
+            if [ "${{ github.event_name }}" = "push" ]; then
+              git diff --name-only "${{ github.event.before }}" HEAD
+            else
+              git diff --name-only HEAD^ HEAD
+            fi
+          )
+          declare -A changedSet=()
+          for f in "${CHANGED_FILES[@]}"; do changedSet["$f"]=1; done
+
+          CHANGED_SCRIPTS=()
+          for s in "${ALL_SCRIPTS[@]}"; do
+            [[ -n "${changedSet[$s]:-}" ]] && CHANGED_SCRIPTS+=( "$s" )
+          done
+          # Si rien détecté (ex. scope all/list), on enverra tout
+          if [ ${#CHANGED_SCRIPTS[@]} -eq 0 ]; then
+            CHANGED_SCRIPTS=( "${ALL_SCRIPTS[@]}" )
+          fi
+
+          # 3) MAP nom -> {url, sha256, version, description, usage}
+          TMP_ASSETS="$(mktemp)"; echo "$ASSETS_JSON" > "$TMP_ASSETS"
+          to_json_map() {
+            jq -n --argjson assets "$(cat "$TMP_ASSETS")" '
               ($assets | map(select(.name|test("\\.sha256$")|not))) as $bins
               | ($assets | map(select(.name|test("\\.sha256$")))) as $hashes
               | reduce $bins[] as $b ({}; .[$b.name] = {url: $b.url})
@@ -258,8 +284,49 @@ jobs:
                   .[ ($h.name|sub("\\.sha256$";"")) ] += {sha256: $h.url}
                 )
             '
-          )"
+          }
+          MAP="$(to_json_map)"
 
+          for s in "${ALL_SCRIPTS[@]}"; do
+            ver=""; desc=""; usage=""
+            # version dynamique (Docker) → *.version.txt
+            if [ -s "${s}.version.txt" ]; then
+              ver="$(sed -E 's/\r$//g' "${s}.version.txt" | head -n1 | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+              ver="$(printf "%s" "$ver" | head -c 128)"
+            fi
+            # fallback header
+            if [ -z "$ver" ] && [ -f "$s" ]; then
+              ver="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$s" 2>/dev/null || true)"
+            fi
+            [ -n "$ver" ] || ver="unknown"
+
+            # description depuis header
+            if [ -f "$s" ]; then
+              desc="$(awk -F= '/^# *DESCRIPTION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$s" 2>/dev/null || true)"
+              desc="${desc:-}"
+              desc="$(printf "%s" "$desc" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' | head -c 200)"
+            fi
+
+            # usage depuis *.help.txt (si dispo)
+            if [ -s "${s}.help.txt" ]; then
+              help_txt="$(sed -E 's/\r$//g' "${s}.help.txt")"
+              first="$(printf '%s\n' "$help_txt" | head -n 1)"
+              rest="$(printf '%s\n' "$help_txt" | tail -n +2 || true)"
+              pat="$(printf '%s' "$s" | sed -e 's/[][(){}.^$*+?|\\/]/\\&/g')"
+              norm_first="$(printf '%s\n' "$first" | sed -E "s/^(${pat})([[:space:]]+)v?([0-9][0-9A-Za-z._+-]*)([[:space:]].*)?$/\\1 \\2v\\3\\4/")"
+              usage="${norm_first}"
+              if [ -n "$rest" ]; then usage="${usage}"$'\n'"${rest}"; fi
+              usage="$(printf "%s" "$usage" | sed -e 's/^[[:space:]]*//; s/[[:space:]]*$//' | head -n 200 | head -c 2000)"
+            fi
+
+            MAP="$(echo "$MAP" | jq --arg s "$s" --arg v "$ver" --arg d "$desc" --arg u "$usage" \
+              '.[$s].version = $v | .[$s].description = $d | .[$s].usage = $u')"
+          done
+
+          # 4) Liste des scripts à regénérer côté hugo-demo
+          SCRIPTS_JSON="$(printf '%s\n' "${CHANGED_SCRIPTS[@]}" | jq -R . | jq -s .)"
+
+          # 5) Écrire payload.json
           printf '{"source_repo":"%s","release_tag":"%s","scripts":%s,"assets":%s}\n' \
             "$REPO" "$TAG" "$SCRIPTS_JSON" "$MAP" > payload.json
 
