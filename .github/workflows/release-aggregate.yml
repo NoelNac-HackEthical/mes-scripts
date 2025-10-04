@@ -10,7 +10,21 @@ on:
       - "!.github/**"
       - "!templates/**"
       - "!tools/**"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: "Scope of scripts to process (auto=changed only, all=all scripts, none=no scripts, list=explicit list)"
+        type: choice
+        default: auto
+        options:
+          - auto
+          - all
+          - none
+          - list
+      scripts:
+        description: "Comma-separated list of scripts (only if scope=list)"
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -37,77 +51,7 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq curl coreutils
 
-      # ------------------------------------------------------------------
-      # Détection des scripts modifiés (root/*.*), BASE = github.event.before
-      # ------------------------------------------------------------------
-      - name: Detect changed scripts (root/*.* only, push 'before' base)
-        id: detect_changed
-        shell: bash
-        run: |
-          set -euo pipefail
-          IFS=$'\n\t'
-
-          echo "event_name=${{ github.event_name }}"
-          echo "event.before=${{ github.event.before }}"
-
-          # 1) Choisir une base fiable pour le diff
-          BASE=""
-          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
-            BASE="${{ github.event.before }}"
-            echo "Using BASE from push 'before': $BASE"
-          else
-            # Run manuel / 1er commit / fallback sur le parent si dispo
-            if git rev-parse HEAD^ >/dev/null 2>&1; then
-              BASE="$(git rev-parse HEAD^)"
-              echo "Using BASE=HEAD^ : $BASE"
-            else
-              BASE=""
-              echo "No parent commit; BASE empty (no diff possible)."
-            fi
-          fi
-
-          # 2) Calculer la liste des fichiers modifiés
-          if [ -n "$BASE" ]; then
-            changed_files="$(git diff --name-only "$BASE" HEAD || true)"
-          else
-            changed_files=""
-          fi
-          printf "Changed files (BASE..HEAD):\n%s\n" "${changed_files:-<none>}"
-
-          # 3) Candidats = fichiers à la racine (quel que soit le nom), hors exclusions
-          mapfile -t CANDIDATES < <(
-            git ls-files \
-              | grep -v -E '^(.github/|templates/|tools/)' \
-              | grep -v -E '^(README|LICENSE)' \
-              | grep -v -E '\.sha256$' \
-              | awk -F/ 'NF==1'
-          )
-          printf "Root candidates:\n%s\n" "$(printf '%s\n' "${CANDIDATES[@]}")"
-
-          # 4) Heuristique "script mes-scripts" : shebang + ligne '# VERSION='
-          SCRIPTS=()
-          for f in "${CANDIDATES[@]}"; do
-            [ -f "$f" ] || continue
-            head -n1 "$f" | grep -q '^#!' || continue
-            grep -q -m1 -E '^#\s*VERSION=' "$f" || continue
-            SCRIPTS+=( "$f" )
-          done
-          printf "Detected scripts:\n%s\n" "$(printf '%s\n' "${SCRIPTS[@]}")"
-
-          # 5) Ne garder que les scripts réellement MODIFIÉS
-          : > .changed.list
-          if [ -n "${changed_files:-}" ]; then
-            for f in "${SCRIPTS[@]}"; do
-              if grep -qx "$f" <<< "$changed_files"; then
-                echo "$f" >> .changed.list
-              fi
-            done
-          fi
-
-          echo "Changed scripts to process:"
-          cat .changed.list || true
-
-      # Agrégation / publication de la release (inline) — inchangé
+      # Agrégation / publication de la release (inline)
       - name: Aggregate & publish release (inline)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -122,7 +66,14 @@ jobs:
           OWNER_REPO="$(git config --get remote.origin.url | sed -E 's#.*github.com[:/](.+/.+)(\.git)?#\1#')"
           [ -n "${OWNER_REPO:-}" ] || die "Cannot determine owner/repo"
 
-          mapfile -t SCRIPTS < <(
+          # Detect scope
+          SCOPE="${{ github.event.inputs.scope || 'auto' }}"
+          SCRIPTS_INPUT="${{ github.event.inputs.scripts || '' }}"
+          log "Run scope: $SCOPE"
+          [ -n "$SCOPE" ] || SCOPE="auto"
+
+          # Candidate scripts = all files with shebang + VERSION
+          mapfile -t ALL_SCRIPTS < <(
             git ls-files \
               | grep -v -E '^(.github/|templates/|tools/|README|LICENSE)' \
               | grep -v -E '\.sha256$' \
@@ -133,8 +84,58 @@ jobs:
                   echo "$f"
                 done
           )
+          [ ${#ALL_SCRIPTS[@]} -gt 0 ] || die "No scripts detected (missing '# VERSION=' lines?)"
 
-          [ ${#SCRIPTS[@]} -gt 0 ] || die "No scripts detected (missing '# VERSION=' lines?)"
+          # Determine changed scripts
+          mapfile -t CHANGED_FILES < <(
+            if [ "${{ github.event_name }}" = "push" ]; then
+              git diff --name-only "${{ github.event.before }}" HEAD
+            else
+              git diff --name-only HEAD^ HEAD
+            fi
+          )
+          declare -A changedSet=()
+          for f in "${CHANGED_FILES[@]}"; do
+            changedSet["$f"]=1
+          done
+
+          # Select scripts according to scope
+          SCRIPTS=()
+          case "$SCOPE" in
+            none)
+              log "Manual run scope=none → no scripts will be processed."
+              ;;
+            all)
+              SCRIPTS=("${ALL_SCRIPTS[@]}")
+              ;;
+            auto)
+              for f in "${ALL_SCRIPTS[@]}"; do
+                if [[ -n "${changedSet[$f]:-}" ]]; then
+                  SCRIPTS+=("$f")
+                fi
+              done
+              ;;
+            list)
+              IFS=',' read -ra wanted <<<"$SCRIPTS_INPUT"
+              for w in "${wanted[@]}"; do
+                w="$(echo "$w" | xargs)" # trim
+                [ -n "$w" ] || continue
+                if [[ " ${ALL_SCRIPTS[*]} " == *" $w "* ]]; then
+                  SCRIPTS+=("$w")
+                else
+                  log "⚠ Script '$w' not found in repo"
+                fi
+              done
+              ;;
+            *)
+              die "Unknown scope: $SCOPE"
+              ;;
+          esac
+
+          log "Changed files:"
+          printf '%s\n' "${CHANGED_FILES[@]}" || true
+          log "Changed scripts to process:"
+          printf '%s\n' "${SCRIPTS[@]}" || true
 
           NOTES="$(mktemp)"
           FILES_TO_UPLOAD=()
@@ -153,7 +154,7 @@ jobs:
 
             if command -v sha256sum >/dev/null 2>&1; then
               hash="$(sha256sum "$f" | awk '{print tolower($1)}')"
-            elif command -v shasum >/devnull 2>&1; then
+            elif command -v shasum >/dev/null 2>&1; then
               hash="$(shasum -a 256 "$f" | awk '{print $1}')"
             else
               hash="unknown"
@@ -190,11 +191,18 @@ jobs:
             git push origin ":refs/tags/$TAG" || true
           fi
 
-          gh release create "$TAG" \
-            --title "$TITLE" \
-            --notes-file "$NOTES" \
-            --latest \
-            "${FILES_TO_UPLOAD[@]}"
+          if [ ${#SCRIPTS[@]} -gt 0 ]; then
+            gh release create "$TAG" \
+              --title "$TITLE" \
+              --notes-file "$NOTES" \
+              --latest \
+              "${FILES_TO_UPLOAD[@]}"
+          else
+            gh release create "$TAG" \
+              --title "$TITLE" \
+              --notes-file "$NOTES" \
+              --latest
+          fi
 
           log "Release $TAG published with ${#FILES_TO_UPLOAD[@]} assets."
 
@@ -212,152 +220,3 @@ jobs:
               done
 
           log "Done."
-
-      # Build payload Hugo (dynamic execution) — filtré sur scripts modifiés UNIQUEMENT
-      - name: Build payload for hugo site (dynamic execution)
-        id: build_payload
-        shell: bash
-        run: |
-          set -euo pipefail
-          IFS=$'\n\t'
-
-          REPO="${{ github.repository }}"
-          API="https://api.github.com/repos/${REPO}/releases/latest"
-
-          JSON="$(curl -sSL -H "Accept: application/vnd.github+json" "$API")"
-          TAG="$(echo "$JSON" | jq -r '.tag_name')"
-
-          # Assets (name + url)
-          ASSETS_JSON="$(echo "$JSON" | jq -c '[.assets[] | {name: .name, url: .browser_download_url}]')"
-
-          # Liste des scripts (sans les .sha256)
-          SCRIPTS_JSON="$(echo "$ASSETS_JSON" | jq -r '[.[].name] | map(select(test("\\.sha256$")|not))')"
-
-          # --- Filtrer sur les scripts réellement MODIFIÉS dans ce push ---
-          if [ -s .changed.list ]; then
-            CHANGED_JSON="$(jq -R -s -c 'split("\n")|map(select(length>0))' .changed.list)"
-            SCRIPTS_JSON="$(
-              jq -n --argjson all "$SCRIPTS_JSON" --argjson ch "$CHANGED_JSON" '
-                $all | map(select(. as $x | $ch | index($x)))
-              '
-            )"
-            if [ "$(echo "$SCRIPTS_JSON" | jq 'length')" -eq 0 ]; then
-              echo "Aucun script modifié → pas de payload à construire."
-              exit 0
-            fi
-          else
-            echo "Aucun script modifié → pas de payload à construire."
-            exit 0
-          fi
-          # --- /Filtre ---
-
-          # MAP initiale : nom -> {url, sha256}
-          MAP="$(
-            jq -n --argjson assets "$ASSETS_JSON" '
-              ($assets | map(select(.name|test("\\.sha256$")|not))) as $bins
-              | ($assets | map(select(.name|test("\\.sha256$")))) as $hashes
-              | reduce $bins[] as $b ({}; .[$b.name] = {url: $b.url})
-              | reduce $hashes[] as $h (.;
-                  .[ ($h.name|sub("\\.sha256$";"")) ] += {sha256: $h.url}
-                )
-            '
-          )"
-
-          TMPDIR="$(mktemp -d)"
-          cleanup(){ rm -rf "$TMPDIR"; }
-          trap cleanup EXIT
-
-          for s in $(echo "$SCRIPTS_JSON" | jq -r '.[]'); do
-            url="$(echo "$MAP" | jq -r --arg s "$s" '.[$s].url')"
-            ver="unknown"; desc=""; usage_block=""
-
-            if [ -n "$url" ] && curl -sSL "$url" -o "$TMPDIR/$s"; then
-              chmod +x "$TMPDIR/$s" || true
-
-              # Docker uniquement pour capter -h / --version des scripts modifiés
-              docker run --rm --network none -v "$TMPDIR":/work -w /work --memory=256m --cpus=0.5 \
-                ubuntu:22.04 bash -lc "\
-                  set -e; \
-                  apt-get update -qq >/dev/null 2>&1 || true; \
-                  apt-get install -y -qq bash coreutils >/dev/null 2>&1 || true; \
-                  ( timeout 6s bash /work/$s --version 2>&1 || timeout 6s bash /work/$s -V 2>&1 || true ) > /work/${s}.version.txt 2>&1 || true; \
-                  ( timeout 8s bash /work/$s -h 2>&1 || timeout 8s bash /work/$s --help 2>&1 || true ) > /work/${s}.help.txt 2>&1 || true" || true
-
-              # VERSION : privilégier la sortie dynamique, fallback header
-              if [ -s "$TMPDIR/${s}.version.txt" ]; then
-                ver="$(sed -E 's/\r$//g' "$TMPDIR/${s}.version.txt" | head -n 1 | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
-                ver="$(printf "%s" "$ver" | head -c 128)"
-                if [ -z "$ver" ]; then
-                  ver="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
-                  ver="${ver:-unknown}"
-                  ver="${s} v${ver}"
-                fi
-              else
-                ver="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
-                ver="${ver:-unknown}"
-                ver="${s} v${ver}"
-              fi
-
-              # DESCRIPTION depuis header
-              desc="$(awk -F= '/^# *DESCRIPTION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$TMPDIR/$s" 2>/dev/null || true)"
-              desc="${desc:-}"
-              desc="$(printf "%s" "$desc" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' | head -c 200)"
-
-              # USAGE depuis sortie dynamique + normalisation 'v' sur la 1re ligne
-              if [ -s "$TMPDIR/${s}.help.txt" ]; then
-                help_txt="$(sed -E 's/\r$//g' "$TMPDIR/${s}.help.txt")"
-                pat="$(printf '%s' "$s" | sed -e 's/[][(){}.^$*+?|\\/]/\\&/g')"
-                first="$(printf '%s\n' "$help_txt" | head -n 1)"
-                rest="$(printf '%s\n' "$help_txt" | tail -n +2 || true)"
-                norm_first="$(printf '%s\n' "$first" | sed -E "s/^(${pat})([[:space:]]+)v?([0-9][0-9A-Za-z._+-]*)([[:space:]].*)?$/\\1 v\\3\\4/")"
-                help_txt="${norm_first}"
-                if [ -n "$rest" ]; then
-                  help_txt="${help_txt}"$'\n'"${rest}"
-                fi
-                usage_block="$(printf "%s" "$help_txt" | sed -e 's/^[[:space:]]*//; s/[[:space:]]*$//' | head -n 200)"
-                usage_block="$(printf "%s" "$usage_block" | head -c 2000)"
-              else
-                usage_block=""
-              fi
-            fi
-
-            echo "USAGE bytes for $s: $(printf "%s" "$usage_block" | wc -c)"
-
-            MAP="$(echo "$MAP" | jq --arg s "$s" --arg v "$ver" --arg d "$desc" --arg u "$usage_block" \
-              '.[$s].version = $v | .[$s].description = $d | .[$s].usage = $u')"
-          done
-
-          printf '{"source_repo":"%s","release_tag":"%s","scripts":%s,"assets":%s}\n' \
-            "$REPO" "$TAG" "$SCRIPTS_JSON" "$MAP" > payload.json
-
-          echo "Payload built (snippet):"
-          jq -c . payload.json | sed -n '1,3p' || cat payload.json
-
-      - name: Dispatch to hugo site (no clone)
-        env:
-          TARGET_HUGO_REPO: ${{ vars.TARGET_HUGO_REPO }}
-          HUGO_DEMO_TOKEN: ${{ secrets.HUGO_DEMO_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # Si aucun script modifié, le step précédent a exit 0 sans payload
-          [ -f payload.json ] || { echo "Pas de payload (aucun script modifié) → skip dispatch."; exit 0; }
-
-          OWNER="$(echo "$TARGET_HUGO_REPO" | cut -d/ -f1)"
-          NAME="$(echo "$TARGET_HUGO_REPO" | cut -d/ -f2)"
-          BODY=$(printf '{"event_type":"mes-scripts-release","client_payload":%s}' "$(cat payload.json)")
-
-          HTTP_CODE="$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X POST \
-            -H 'Accept: application/vnd.github+json' \
-            -H "Authorization: Bearer ${HUGO_DEMO_TOKEN}" \
-            "https://api.github.com/repos/${OWNER}/${NAME}/dispatches" \
-            -d "$BODY")"
-
-          echo "Réponse HTTP: $HTTP_CODE"
-          cat /tmp/resp.json || true
-
-          case "$HTTP_CODE" in
-            204) echo "repository_dispatch envoyé avec succès." ;;
-            *) echo "::error ::Échec repository_dispatch (HTTP $HTTP_CODE)"; exit 1 ;;
-          esac
