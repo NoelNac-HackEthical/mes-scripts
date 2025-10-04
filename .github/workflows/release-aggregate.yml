@@ -66,13 +66,13 @@ jobs:
           OWNER_REPO="$(git config --get remote.origin.url | sed -E 's#.*github.com[:/](.+/.+)(\.git)?#\1#')"
           [ -n "${OWNER_REPO:-}" ] || die "Cannot determine owner/repo"
 
-          # Detect scope
+          # Detect scope (manual override supported)
           SCOPE="${{ github.event.inputs.scope || 'auto' }}"
           SCRIPTS_INPUT="${{ github.event.inputs.scripts || '' }}"
           log "Run scope: $SCOPE"
           [ -n "$SCOPE" ] || SCOPE="auto"
 
-          # Candidate scripts = all files with shebang + VERSION
+          # Candidate scripts = files with shebang + VERSION
           mapfile -t ALL_SCRIPTS < <(
             git ls-files \
               | grep -v -E '^(.github/|templates/|tools/|README|LICENSE)' \
@@ -86,7 +86,7 @@ jobs:
           )
           [ ${#ALL_SCRIPTS[@]} -gt 0 ] || die "No scripts detected (missing '# VERSION=' lines?)"
 
-          # Determine changed scripts
+          # Determine changed files
           mapfile -t CHANGED_FILES < <(
             if [ "${{ github.event_name }}" = "push" ]; then
               git diff --name-only "${{ github.event.before }}" HEAD
@@ -95,9 +95,7 @@ jobs:
             fi
           )
           declare -A changedSet=()
-          for f in "${CHANGED_FILES[@]}"; do
-            changedSet["$f"]=1
-          done
+          for f in "${CHANGED_FILES[@]}"; do changedSet["$f"]=1; done
 
           # Select scripts according to scope
           SCRIPTS=()
@@ -110,9 +108,7 @@ jobs:
               ;;
             auto)
               for f in "${ALL_SCRIPTS[@]}"; do
-                if [[ -n "${changedSet[$f]:-}" ]]; then
-                  SCRIPTS+=("$f")
-                fi
+                [[ -n "${changedSet[$f]:-}" ]] && SCRIPTS+=("$f")
               done
               ;;
             list)
@@ -136,6 +132,12 @@ jobs:
           printf '%s\n' "${CHANGED_FILES[@]}" || true
           log "Changed scripts to process:"
           printf '%s\n' "${SCRIPTS[@]}" || true
+
+          # >>> GARDE-FOU : si aucun script sélectionné, on NE crée PAS de release
+          if [ ${#SCRIPTS[@]} -eq 0 ]; then
+            log "No scripts selected (scope=$SCOPE) → skipping release creation to preserve existing 'latest'."
+            exit 0
+          fi
 
           NOTES="$(mktemp)"
           FILES_TO_UPLOAD=()
@@ -181,9 +183,7 @@ jobs:
           echo "Scripts  : ${#SCRIPTS[@]}"
           echo "---"
 
-          if ! command -v gh >/dev/null 2>&1; then
-            die "GitHub CLI (gh) is required on the runner"
-          fi
+          command -v gh >/dev/null 2>&1 || die "GitHub CLI (gh) is required on the runner"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             log "Tag $TAG already exists – deleting release and tag"
@@ -191,18 +191,11 @@ jobs:
             git push origin ":refs/tags/$TAG" || true
           fi
 
-          if [ ${#SCRIPTS[@]} -gt 0 ]; then
-            gh release create "$TAG" \
-              --title "$TITLE" \
-              --notes-file "$NOTES" \
-              --latest \
-              "${FILES_TO_UPLOAD[@]}"
-          else
-            gh release create "$TAG" \
-              --title "$TITLE" \
-              --notes-file "$NOTES" \
-              --latest
-          fi
+          gh release create "$TAG" \
+            --title "$TITLE" \
+            --notes-file "$NOTES" \
+            --latest \
+            "${FILES_TO_UPLOAD[@]}"
 
           log "Release $TAG published with ${#FILES_TO_UPLOAD[@]} assets."
 
@@ -221,7 +214,7 @@ jobs:
 
           log "Done."
 
-          # --- Sanity check des liens latest/download ---
+          # --- Sanity check: latest/download links must resolve (200/302) ---
           SRC_REPO="$OWNER_REPO"
           for f in "${SCRIPTS[@]}"; do
             name="$(basename "$f")"
