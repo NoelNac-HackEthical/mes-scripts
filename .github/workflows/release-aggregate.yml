@@ -252,6 +252,29 @@ jobs:
           SCOPE="${{ github.event.inputs.scope || 'auto' }}"
           SCRIPTS_INPUT_RAW="${{ github.event.inputs.scripts || '' }}"
 
+          # --- AJOUT: helpers pour bloc Présentation -----------------------------------
+          has_presentation_block() {
+            awk '
+              /^# *PRESENTATION_START/ {on=1; found=1; next}
+              /^# *PRESENTATION_END/   {on=0; exit}
+              { if (on) { } }
+              END { exit (found?0:1) }
+            ' "$1"
+          }
+          extract_presentation_md() {
+            awk '
+              BEGIN{on=0}
+              /^# *PRESENTATION_START/ {on=1; next}
+              /^# *PRESENTATION_END/   {on=0; exit}
+              on {
+                sub(/^\r$/,"");     # CRLF -> LF
+                sub(/^# ?/,"");     # retire "# " en tête de ligne
+                print
+              }
+            ' "$1"
+          }
+          # ------------------------------------------------------------------------------
+
           # 1) Dernière release et assets (URLs)
           JSON="$(curl -sSL -H "Accept: application/vnd.github+json" "$API")"
           TAG="$(echo "$JSON" | jq -r '.tag_name')"
@@ -298,7 +321,7 @@ jobs:
               ;;
           esac
 
-          # 3) MAP nom -> {url, sha256, version, description, usage}
+          # 3) MAP nom -> {url, sha256, version, description, usage, presentation_md}
           TMP_ASSETS="$(mktemp)"; echo "$ASSETS_JSON" > "$TMP_ASSETS"
           to_json_map() {
             jq -n --argjson assets "$(cat "$TMP_ASSETS")" '
@@ -313,7 +336,8 @@ jobs:
           MAP="$(to_json_map)"
 
           for s in "${ALL_SCRIPTS[@]}"; do
-            ver=""; desc=""; usage=""
+            ver=""; desc=""; usage=""; pres_md=""
+
             # version dynamique (Docker) → *.version.txt
             if [ -s "${s}.version.txt" ]; then
               ver="$(sed -E 's/\r$//g' "${s}.version.txt" | head -n1 | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
@@ -344,8 +368,19 @@ jobs:
               usage="$(printf "%s" "$usage" | sed -e 's/^[[:space:]]*//; s/[[:space:]]*$//' | head -n 200 | head -c 2000)"
             fi
 
-            MAP="$(echo "$MAP" | jq --arg s "$s" --arg v "$ver" --arg d "$desc" --arg u "$usage" \
-              '.[$s].version = $v | .[$s].description = $d | .[$s].usage = $u')"
+            # --- AJOUT: présentation depuis bloc PRESENTATION_START/END ---
+            if [ -f "$s" ] && has_presentation_block "$s"; then
+              pres_md="$(extract_presentation_md "$s")"
+            else
+              pres_md=""
+            fi
+
+            MAP="$(echo "$MAP" | jq --arg s "$s" \
+                                     --arg v "$ver" \
+                                     --arg d "$desc" \
+                                     --arg u "$usage" \
+                                     --arg p "$pres_md" \
+              '.[$s].version=$v | .[$s].description=$d | .[$s].usage=$u | .[$s].presentation_md=$p')"
           done
 
           # 4) scripts à régénérer côté hugo-demo (selon SCOPE)
