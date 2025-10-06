@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # new-script.sh — Génère un nouveau script basé sur templates/script.sh.tpl
 # Usage: tools/new-script.sh <name> <version> <description>
-
 set -euo pipefail
 
 if [[ $# -lt 3 ]]; then
@@ -16,17 +15,20 @@ DESCRIPTION="$3"
 TPL="templates/script.sh.tpl"
 OUT="./$NAME"
 
-if [[ ! -f "$TPL" ]]; then
-  echo "Template introuvable: $TPL" >&2
-  exit 1
-fi
+[[ -f "$TPL" ]] || { echo "Template introuvable: $TPL" >&2; exit 1; }
+[[ -e "$OUT" ]] && { echo "Fichier déjà présent: $OUT" >&2; exit 2; }
 
-# Génération du script à partir du template
-sed \
-  -e "s/{{NAME}}/${NAME}/g" \
-  -e "s/{{VERSION}}/${VERSION}/g" \
-  -e "s/{{DESCRIPTION}}/${DESCRIPTION}/g" \
-  "$TPL" > "$OUT"
+# Échapper pour sed (on utilise | comme délimiteur + échappe &)
+esc() { printf '%s' "$1" | sed -e 's/[&|]/\\&/g'; }
+NAME_ESC=$(esc "$NAME")
+VER_ESC=$(esc "$VERSION")
+DESC_ESC=$(esc "$DESCRIPTION")
+
+# Remplacement robuste
+sed -e "s|{{NAME}}|$NAME_ESC|g" \
+    -e "s|{{VERSION}}|$VER_ESC|g" \
+    -e "s|{{DESCRIPTION}}|$DESC_ESC|g" \
+    "$TPL" > "$OUT"
 
 chmod +x "$OUT"
 
@@ -40,4 +42,4 @@ else
 fi
 
 echo "Created: $OUT and ${OUT}.sha256"
-echo "Try:   ./$NAME -h"
+echo "→ Pense à éditer le bloc PRESENTATION_START/END dans $OUT"
