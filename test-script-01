@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # NAME=test-script-01
 # VERSION=0.7.4
-# DESCRIPTION=test 2 version finale avec options dans release-aggregate
+# DESCRIPTION=modif pour test la PR autodétection avec run workflow auto et branch vide
 # PRESENTATION_START
 # Titre court de présentation (facultatif)
 #
