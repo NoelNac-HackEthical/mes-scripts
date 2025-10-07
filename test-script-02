@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # NAME=test-script-02
 # VERSION=0.8.4
-# DESCRIPTION=Test de release-aggreagate avec lignes de docker
+# DESCRIPTION=Test du commit des scripts modifiés uniquement
 # PRESENTATION_START
 # Titre court de présentation (facultatif)
 #
