@@ -55,24 +55,359 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq curl coreutils
 
-      # === Ton énorme bloc "Aggregate & publish release (inline)" inchangé ===
       - name: Aggregate & publish release (inline)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RETAIN: "5"
         run: |
-          # ... contenu inchangé ...
-          echo "Release published and sanity checked."
+          set -euo pipefail
+          IFS=$'\n\t'
 
+          die(){ echo "✖ $*" >&2; exit 1; }
+          log(){ echo "• $*"; }
+
+          OWNER_REPO="$(git config --get remote.origin.url | sed -E 's#.*github.com[:/](.+/.+)(\.git)?#\1#')"
+          [ -n "${OWNER_REPO:-}" ] || die "Cannot determine owner/repo"
+
+          # Scope
+          SCOPE="${{ github.event.inputs.scope || 'auto' }}"
+          SCRIPTS_INPUT="${{ github.event.inputs.scripts || '' }}"
+          log "Run scope: $SCOPE"
+
+          # Catalogue complet (tous les scripts versionnés exécutables)
+          mapfile -t ALL_SCRIPTS < <(
+            git ls-files \
+              | grep -v -E '^(.github/|templates/|tools/|README|LICENSE)' \
+              | grep -v -E '\.sha256$' \
+              | while read -r f; do
+                  [ -f "$f" ] || continue
+                  head -n1 "$f" | grep -q '^#!' || continue
+                  grep -q -m1 -E '^#\s*VERSION=' "$f" || continue
+                  echo "$f"
+                done
+          )
+          [ ${#ALL_SCRIPTS[@]} -gt 0 ] || die "No scripts detected."
+
+          # Fichiers modifiés (pour scope=auto)
+          mapfile -t CHANGED_FILES < <(
+            if [ "${{ github.event_name }}" = "push" ]; then
+              git diff --name-only "${{ github.event.before }}" HEAD
+            else
+              git diff --name-only HEAD^ HEAD
+            fi
+          )
+          declare -A changedSet=()
+          for f in "${CHANGED_FILES[@]}"; do changedSet["$f"]=1; done
+
+          # Scripts sélectionnés (pour Docker/metadata)
+          SCRIPTS=()
+          case "$SCOPE" in
+            none) log "Manual run scope=none → no scripts will be processed." ;;
+            all)  SCRIPTS=("${ALL_SCRIPTS[@]}") ;;
+            auto) for f in "${ALL_SCRIPTS[@]}"; do [[ -n "${changedSet[$f]:-}" ]] && SCRIPTS+=("$f"); done ;;
+            list)
+              IFS=',' read -ra wanted <<<"$SCRIPTS_INPUT"
+              for w in "${wanted[@]}"; do
+                w="$(echo "$w" | xargs)"
+                [ -n "$w" ] || continue
+                if [[ " ${ALL_SCRIPTS[*]} " == *" $w "* ]]; then
+                  SCRIPTS+=("$w")
+                else
+                  log "⚠ Script '$w' not found in repo"
+                fi
+              done ;;
+            *) die "Unknown scope: $SCOPE" ;;
+          esac
+
+          log "Changed files:"
+          printf '%s\n' "${CHANGED_FILES[@]}" || true
+          log "Scripts à exécuter (Docker):"
+          printf '%s\n' "${SCRIPTS[@]}" || true
+
+          # Garde-fou : si aucun script sélectionné → on ne touche pas à latest
+          if [ ${#SCRIPTS[@]} -eq 0 ]; then
+            log "No scripts selected (scope=$SCOPE) → skipping release creation to preserve existing 'latest'."
+          else
+            # Notes de release (table pour TOUS les scripts)
+            NOTES="$(mktemp)"
+            {
+              echo "## Scripts et versions"
+              echo
+              echo "| Script | Version |"
+              echo "|-------:|:--------|"
+              for f in "${ALL_SCRIPTS[@]}"; do
+                name="$(basename "$f")"
+                ver="$(grep -m1 -E '^#\s*VERSION=' "$f" | sed -E 's/^#\s*VERSION=//')"
+                [ -n "$ver" ] || ver="inconnue"
+                printf "| \`%s\` | \`%s\` |\n" "$name" "$ver"
+              done
+            } > "$NOTES"
+
+            # Assets à publier (TOUS les scripts → latest complète)
+            FILES_TO_UPLOAD=()
+            for f in "${ALL_SCRIPTS[@]}"; do
+              name="$(basename "$f")"
+              if command -v sha256sum >/dev/null 2>&1; then
+                hash="$(sha256sum "$f" | awk '{print tolower($1)}')"
+              else
+                hash="$(shasum -a 256 "$f" | awk '{print $1}')"
+              fi
+              printf "%s  %s\n" "$hash" "$name" > "$f.sha256"
+              FILES_TO_UPLOAD+=( "$f" "$f.sha256" )
+            done
+
+            # Tag & titre
+            year=$(date +%Y); month=$(date +%m); day=$(date +%d)
+            hour=$(date +%H);  min=$(date +%M)
+            moisNoms=( "" "janvier" "février" "mars" "avril" "mai" "juin" "juillet" "août" "septembre" "octobre" "novembre" "décembre" )
+            moisIdx=$((10#$month))
+            date_fr="${day} ${moisNoms[$moisIdx]} ${year} ${hour}h${min}"
+            TAG="r-${year}-${month}-${day}-${hour}${min}"
+            TITLE="Mes scripts au ${date_fr}"
+
+            echo -e "\n---"
+            echo "Tag      : $TAG"
+            echo "Titre    : $TITLE"
+            echo "Repo     : $OWNER_REPO"
+            echo "Scripts exécutés : ${#SCRIPTS[@]}"
+            echo "Scripts publiés  : ${#ALL_SCRIPTS[@]}"
+            echo "---"
+
+            command -v gh >/dev/null 2>&1 || die "GitHub CLI required"
+
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              log "Tag $TAG already exists – deleting release and tag"
+              gh release delete "$TAG" -y || true
+              git push origin ":refs/tags/$TAG" || true
+            fi
+
+            gh release create "$TAG" \
+              --title "$TITLE" \
+              --notes-file "$NOTES" \
+              --latest \
+              "${FILES_TO_UPLOAD[@]}"
+
+            log "Release $TAG published with ${#FILES_TO_UPLOAD[@]} assets."
+
+            # Prune anciennes releases
+            RETAIN="${RETAIN:-5}"
+            log "Pruning releases beyond the most recent ${RETAIN}…"
+            gh api -H "Accept: application/vnd.github+json" "/repos/${OWNER_REPO}/releases?per_page=100" \
+              | jq -r '.[].tag_name' | awk 'NF' | nl -ba \
+              | while read -r idx tag; do
+                  if [ "$idx" -gt "$RETAIN" ]; then
+                    log "  - deleting $tag"
+                    gh release delete "$tag" -y || true
+                    git push origin ":refs/tags/$tag" || true
+                  fi
+                done
+
+            log "Done."
+          fi
+
+          # ---- Docker EXÉCUTION (capture --version / --help) + ligne de synthèse ----
+          for f in "${SCRIPTS[@]}"; do
+            name="$(basename "$f")"
+            docker run --rm --network none -v "$PWD":/work -w /work --memory=256m --cpus=0.5 \
+              ubuntu:22.04 bash -lc "\
+                set -e; \
+                apt-get update -qq >/dev/null 2>&1 || true; \
+                apt-get install -y -qq bash coreutils >/dev/null 2>&1 || true; \
+                ( timeout 6s bash /work/$f --version 2>&1 || timeout 6s bash /work/$f -V 2>&1 || true ) > /work/${f}.version.txt 2>&1 || true; \
+                ( timeout 8s bash /work/$f -h 2>&1 || timeout 8s bash /work/$f --help 2>&1 || true ) > /work/${f}.help.txt 2>&1 || true" || true
+
+            bytes=0
+            [ -f "${f}.help.txt" ] && bytes="$(wc -c < "${f}.help.txt" 2>/dev/null || echo 0)"
+            echo "USAGE bytes for ${name}: ${bytes}"
+          done
+
+          # ---- Sanity check latest/download (TOUS les scripts) ----
+          SRC_REPO="$OWNER_REPO"
+          for f in "${ALL_SCRIPTS[@]}"; do
+            name="$(basename "$f")"
+            for ext in "" ".sha256"; do
+              url="https://github.com/${SRC_REPO}/releases/latest/download/${name}${ext}"
+              code=""
+              for i in $(seq 1 6); do
+                code="$(curl -sS -o /dev/null -w '%{http_code}' -L "$url" || echo 000)"
+                [ "$code" = "200" ] || [ "$code" = "302" ] || [ "$code" = "206" ] && break
+                sleep 2
+              done
+              echo "$code $url"
+              if [ "$code" != "200" ] && [ "$code" != "302" ] && [ "$code" != "206" ]; then
+                echo "::warning ::Lien invalide (après retries): $url (HTTP $code)"
+              fi
+            done
+          done
+
+      # ===== Build payload ENRICHED (version/description/usage) — respecte le scope =====
       - name: Build payload for hugo site (dynamic execution)
         id: build_payload
         shell: bash
         run: |
-          # ... contenu inchangé qui génère payload.json ...
-          echo "Payload built:"
-          jq -c '.' payload.json
+          set -euo pipefail
+          IFS=$'\n\t'
 
-      # === Ajout : résolution automatique de la branche cible ===
+          REPO="${{ github.repository }}"
+          API="https://api.github.com/repos/${REPO}/releases/latest"
+
+          # Reprendre le scope/inputs du run manuel (ou 'auto' par défaut)
+          SCOPE="${{ github.event.inputs.scope || 'auto' }}"
+          SCRIPTS_INPUT_RAW="${{ github.event.inputs.scripts || '' }}"
+
+          # --- AJOUT: helpers pour bloc Présentation -----------------------------------
+          has_presentation_block() {
+            awk '
+              /^# *PRESENTATION_START/ {on=1; found=1; next}
+              /^# *PRESENTATION_END/   {on=0; exit}
+              { if (on) { } }
+              END { exit (found?0:1) }
+            ' "$1"
+          }
+          extract_presentation_md() {
+            awk '
+              BEGIN{on=0}
+              /^# *PRESENTATION_START/ {on=1; next}
+              /^# *PRESENTATION_END/   {on=0; exit}
+              on {
+                sub(/^\r$/,"");     # CRLF -> LF
+                sub(/^# ?/,"");     # retire "# " en tête de ligne
+                print
+              }
+            ' "$1"
+          }
+          # ------------------------------------------------------------------------------
+
+          # 1) Dernière release et assets (URLs)
+          JSON="$(curl -sSL -H "Accept: application/vnd.github+json" "$API")"
+          TAG="$(echo "$JSON" | jq -r '.tag_name')"
+          ASSETS_JSON="$(echo "$JSON" | jq -c '[.assets[] | {name: .name, url: .browser_download_url}]')"
+
+          # Scripts présents (sans .sha256), triés
+          mapfile -t ALL_SCRIPTS < <(echo "$ASSETS_JSON" | jq -r '.[].name' | grep -v '\.sha256$' | sort)
+
+          # 2) Déterminer quels scripts envoyer à hugo (selon SCOPE)
+          mapfile -t CHANGED_FILES < <(
+            if [ "${{ github.event_name }}" = "push" ]; then
+              git diff --name-only "${{ github.event.before }}" HEAD
+            else
+              git diff --name-only HEAD^ HEAD
+            fi
+          )
+          declare -A changedSet=()
+          for f in "${CHANGED_FILES[@]}"; do changedSet["$f"]=1; done
+
+          pick_list=()
+          case "$SCOPE" in
+            all)
+              pick_list=( "${ALL_SCRIPTS[@]}" )
+              ;;
+            list)
+              IFS=',' read -ra wanted <<<"$SCRIPTS_INPUT_RAW"
+              for w in "${wanted[@]}"; do
+                w="$(echo "$w" | xargs)"
+                [ -n "$w" ] || continue
+                if printf '%s\n' "${ALL_SCRIPTS[@]}" | grep -qx -- "$w"; then
+                  pick_list+=( "$w" )
+                else
+                  echo "⚠ Script '$w' absent de la release latest" >&2
+                fi
+              done
+              ;;
+            none)
+              pick_list=()
+              ;;
+            auto|*)
+              for s in "${ALL_SCRIPTS[@]}"; do
+                [[ -n "${changedSet[$s]:-}" ]] && pick_list+=( "$s" )
+              done
+              ;;
+          esac
+
+          # 3) MAP nom -> {url, sha256, version, description, usage, presentation_md}
+          TMP_ASSETS="$(mktemp)"; echo "$ASSETS_JSON" > "$TMP_ASSETS"
+          to_json_map() {
+            jq -n --argjson assets "$(cat "$TMP_ASSETS")" '
+              ($assets | map(select(.name|test("\\.sha256$")|not))) as $bins
+              | ($assets | map(select(.name|test("\\.sha256$")))) as $hashes
+              | reduce $bins[] as $b ({}; .[$b.name] = {url: $b.url})
+              | reduce $hashes[] as $h (.;
+                  .[ ($h.name|sub("\\.sha256$";"")) ] += {sha256: $h.url}
+                )
+            '
+          }
+          MAP="$(to_json_map)"
+
+          for s in "${ALL_SCRIPTS[@]}"; do
+            ver=""; desc=""; usage=""; pres_md=""
+
+            # version dynamique (Docker) → *.version.txt
+            if [ -s "${s}.version.txt" ]; then
+              ver="$(sed -E 's/\r$//g' "${s}.version.txt" | head -n1 | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//')"
+              ver="$(printf "%s" "$ver" | head -c 128)"
+            fi
+            # fallback header
+            if [ -z "$ver" ] && [ -f "$s" ]; then
+              ver="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$s" 2>/dev/null || true)"
+            fi
+            [ -n "$ver" ] || ver="unknown"
+
+            # description depuis header
+            if [ -f "$s" ]; then
+              desc="$(awk -F= '/^# *DESCRIPTION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$s" 2>/dev/null || true)"
+              desc="${desc:-}"
+              desc="$(printf "%s" "$desc" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' | head -c 200)"
+            fi
+
+            # usage depuis *.help.txt (si dispo) + normalisation 'v' 1ère ligne
+            if [ -s "${s}.help.txt" ]; then
+              help_txt="$(sed -E 's/\r$//g' "${s}.help.txt")"
+              first="$(printf '%s\n' "$help_txt" | head -n 1)"
+              rest="$(printf '%s\n' "$help_txt" | tail -n +2 || true)"
+              pat="$(printf '%s' "$s" | sed -e 's/[][(){}.^$*+?|\\/]/\\&/g')"
+              norm_first="$(printf '%s\n' "$first" | sed -E "s/^(${pat})([[:space:]]+)v?([0-9][0-9A-Za-z._+-]*)([[:space:]].*)?$/\\1 \\2v\\3\\4/")"
+              usage="${norm_first}"
+              if [ -n "$rest" ]; then usage="${usage}"$'\n'"${rest}"; fi
+              usage="$(printf "%s" "$usage" | sed -e 's/^[[:space:]]*//; s/[[:space:]]*$//' | head -n 200 | head -c 2000)"
+            fi
+
+            # --- Présentation (bloc PRESENTATION_START/END) ---
+            if [ -f "$s" ] && has_presentation_block "$s"; then
+              pres_md="$(extract_presentation_md "$s")"
+            else
+              pres_md=""
+            fi
+
+            MAP="$(echo "$MAP" | jq --arg s "$s" \
+                                     --arg v "$ver" \
+                                     --arg d "$desc" \
+                                     --arg u "$usage" \
+                                     --arg p "$pres_md" \
+              '.[$s].version=$v | .[$s].description=$d | .[$s].usage=$u | .[$s].presentation_md=$p')"
+          done
+
+          # 4) scripts à régénérer côté hugo-demo (selon SCOPE)
+          SCRIPTS_JSON="$(printf '%s\n' "${pick_list[@]-}" | jq -R . | jq -s .)"
+
+          # 5) Écrire payload.json (+ trace du scope pour debug)
+          printf '{"source_repo":"%s","release_tag":"%s","scope":"%s","scripts":%s,"assets":%s}\n' \
+            "$REPO" "$TAG" "$SCOPE" "$SCRIPTS_JSON" "$MAP" > payload.json
+
+          echo "Payload built (snippet):"
+          if command -v jq >/dev/null 2>&1; then
+            jq -c '{scope, scripts, assets:(.assets|keys|length)}' payload.json || true
+          else
+            echo "jq not installed; skipping snippet."
+          fi
+
+          # --- GARDE-FOU : si rien n'a été produit (ex. scope=none), créer un payload minimal ---
+          if [ ! -s payload.json ]; then
+            echo "::warning ::payload.json absent, création d'un stub (scope=none)"
+            printf '{"source_repo":"%s","release_tag":"","scope":"none","scripts":[],"assets":{}}' \
+              "${{ github.repository }}" > payload.json
+          fi
+
+      # === Détection automatique de la branche cible hugo-demo (Option B) ===
       - name: Resolve target branch for hugo-demo
         id: resolve
         env:
@@ -111,7 +446,7 @@ jobs:
             exit 0
           fi
 
-          # Option B : choisir la PR la plus récente
+          # Option B : choisir la PR la plus récente (updated_at)
           BR=$(printf '%s' "$PULLS" | jq -r 'sort_by(.updated_at) | last(.).head.ref')
           echo "branch=${BR}" >> "$GITHUB_OUTPUT"
           echo "origin=latest-pr" >> "$GITHUB_OUTPUT"
