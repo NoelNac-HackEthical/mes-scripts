@@ -451,6 +451,10 @@ jobs:
           echo "branch=${BR}" >> "$GITHUB_OUTPUT"
           echo "origin=latest-pr" >> "$GITHUB_OUTPUT"
 
+      - name: Show resolved target branch
+        run: |
+          echo "Target branch for hugo-demo: ${{ steps.resolve.outputs.branch }} (source=${{ steps.resolve.outputs.origin }})"  
+
       - name: Inject branch into payload
         run: |
           jq --arg tb "${{ steps.resolve.outputs.branch }}" '. + {target_branch:$tb}' payload.json > payload.new
