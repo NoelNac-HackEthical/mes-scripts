@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # NAME=test-script-03
-# VERSION=0.0.1
-# DESCRIPTION=Petit script de test généré via template
+# VERSION=0.0.2
+# DESCRIPTION=test du front matter complet
 # PRESENTATION_START
 # Titre court de présentation (facultatif)
 #
