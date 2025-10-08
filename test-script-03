@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# NAME=test-script-02
-# VERSION=0.8.4
-# DESCRIPTION=Test du commit des scripts modifiés uniquement
+# NAME=test-script-03
+# VERSION=0.0.1
+# DESCRIPTION=Petit script de test généré via template
 # PRESENTATION_START
 # Titre court de présentation (facultatif)
 #
@@ -24,7 +24,7 @@
 #____________________________________________________________________________
 #
 # Bref résumé :
-#   Test de release-aggreagate avec lignes de docker dans bref résumé
+#   Petit script de test généré via template
 #
 # Template minimal pour scripts mes-scripts :
 # - contient usage() et examples() en heredoc (extraits par la pipeline)
@@ -58,7 +58,7 @@ usage(){
 Usage: ${_self_base} [OPTIONS] <args>
 
 Short description:
-  Script de test du template avec v devant version
+  Petit script de test généré via template
 
 Options:
   -h, --help     Show this help
