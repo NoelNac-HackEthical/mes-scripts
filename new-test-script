@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # NAME=new-test-script
 # VERSION=0.0.1
-# DESCRIPTION=Nouveau test script pour tout tester
+# DESCRIPTION=Nouveau test script pour tout tester le workflow
 # PRESENTATION_START
 # Titre court de présentation (facultatif)
 #
