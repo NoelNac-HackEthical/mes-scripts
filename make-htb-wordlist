@@ -81,7 +81,7 @@ ALLOW_DIGIT_START=0
 usage() {
   cat <<EOF
 Usage:
-  $0 [--out FILE] [--no-install] [--no-medium] [--minlen N] [--maxlen N] [--allow-digit-start] [-V|--version] [-h|--help]
+  make-htb-wordlist [--out FILE] [--no-install] [--no-medium] [--minlen N] [--maxlen N] [--allow-digit-start] [-V|--version] [-h|--help]
 
 Par défaut : --out $OUT
 
