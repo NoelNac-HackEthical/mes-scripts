@@ -3,7 +3,7 @@
 # VERSION=1.0.4
 # DESCRIPTION=Automatise la découverte de répertoires et fichiers web (whatweb + ffuf) et génère des résumés structurés pour les writeups.
 # PRESENTATION_START
-# mon-recoweb — Découverte web ciblée pour CTF / pentest
+# **mon-recoweb — Découverte web ciblée pour CTF / pentest**
 #
 # Ce script automatise la reconnaissance web d'une cible (ex. mon-site.htb) : il lance
 # d'abord une identification de surface avec WhatWeb, puis plusieurs passes de fuzzing

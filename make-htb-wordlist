@@ -3,7 +3,7 @@
 # VERSION=1.0.4
 # DESCRIPTION=Construit et installe une wordlist orientée HTB (vhost/subdomains) à partir de SecLists (+ seed FAST), normalisée et limitée à 5000 entrées.
 # PRESENTATION_START
-# make-htb-wordlist — Master DNS/VHOST orientée HTB (5000 entrées)
+# **make-htb-wordlist — Master DNS/VHOST orientée HTB (5000 entrées)**
 #
 # Ce script assemble une wordlist « maison » optimisée pour les CTF HTB afin d’alimenter
 # le vhost-fuzzing (ex. avec mon-subdomains). Il combine plusieurs sources SecLists et
