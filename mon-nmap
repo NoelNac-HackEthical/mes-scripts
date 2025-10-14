@@ -24,7 +24,6 @@
 #   summary.txt (brut), summary.md (version markdown et synthétique) ;
 # - usage type : `./mon-nmap mon-site.htb` ou `./mon-nmap --udp-all mon-site.htb`
 # PRESENTATION_END
-
 # mon-nmap — scan agressif (-A) + summary.txt et summary.md (Hugo, sans emojis)
 # Étapes : [1] TCP full -> [2] Aggressive (-A) -> [3] UDP (optionnel)
 # Règles : on ignore 'open|filtered' (on ne garde que 'udp ... open' strict)
