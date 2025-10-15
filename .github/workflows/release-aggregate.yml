@@ -99,6 +99,20 @@ jobs:
           declare -A changedSet=()
           for f in "${CHANGED_FILES[@]}"; do changedSet["$f"]=1; done
 
+          # --- NEW: détection de suppressions → forcer rebuild complet ---
+          mapfile -t DELETED_FILES < <(
+            if [ "${{ github.event_name }}" = "push" ]; then
+              git diff --diff-filter=D --name-only "${{ github.event.before }}" HEAD
+            else
+              git diff --diff-filter=D --name-only HEAD^ HEAD
+            fi
+          )
+          if [ ${#DELETED_FILES[@]} -gt 0 ]; then
+            log "Detected deleted files (${#DELETED_FILES[@]}) → forcing full rebuild (scope=all)"
+            SCOPE="all"
+          fi
+          # ----------------------------------------------------------------
+
           # Scripts sélectionnés (pour Docker/metadata)
           SCRIPTS=()
           case "$SCOPE" in
@@ -296,6 +310,20 @@ jobs:
           )
           declare -A changedSet=()
           for f in "${CHANGED_FILES[@]}"; do changedSet["$f"]=1; done
+
+          # --- NEW: détection de suppressions → forcer rebuild complet ---
+          mapfile -t DELETED_FILES < <(
+            if [ "${{ github.event_name }}" = "push" ]; then
+              git diff --diff-filter=D --name-only "${{ github.event.before }}" HEAD
+            else
+              git diff --diff-filter=D --name-only HEAD^ HEAD
+            fi
+          )
+          if [ ${#DELETED_FILES[@]} -gt 0 ]; then
+            echo "Detected deleted files (${#DELETED_FILES[@]}) → forcing full payload rebuild (scope=all)"
+            SCOPE="all"
+          fi
+          # ----------------------------------------------------------------
 
           pick_list=()
           case "$SCOPE" in
