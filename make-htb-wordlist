@@ -1,6 +1,6 @@
 #!/bin/bash
 # NAME=make-htb-wordlist
-# VERSION=1.0.4
+# VERSION=1.0.0
 # DESCRIPTION=Construit et installe une wordlist orientée HTB (vhost/subdomains) à partir de SecLists (+ seed FAST), normalisée et limitée à 5000 entrées.
 # PRESENTATION_START
 # **make-htb-wordlist — Master DNS/VHOST orientée HTB (5000 entrées)**

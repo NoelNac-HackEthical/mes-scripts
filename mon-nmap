@@ -1,6 +1,6 @@
 #!/bin/bash
 # NAME=mon-nmap
-# VERSION=1.0.4
+# VERSION=1.0.0
 # DESCRIPTION=Automatise une série de scans Nmap (TCP full, scan agressif, UDP) et génère des résumés texte et Markdown prêts pour les writeups CTF.
 # PRESENTATION_START
 # **Mon-Nmap — Outil d'énumération Nmap pour CTF / pentest**
