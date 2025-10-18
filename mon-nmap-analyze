@@ -1,0 +1,329 @@
+#!/usr/bin/env bash
+# NAME=mon-nmap-analyze
+# VERSION=1.0.5
+# DESCRIPTION=Analyse les sorties de mon-nmap et agrège les vulnérabilités/indicateurs en TXT/MD/JSON. Exclut les HIGH dont Evidence='VULNERABLE' (non exploitable).
+# PRESENTATION_START
+# Mon-Nmap-Analyze — agrégation des vulnérabilités détectées par Nmap/NSE
+#
+# Ce script lit les fichiers produits par `mon-nmap` (2-aggressive_scan.txt, 4-nse-*.txt)
+# et remonte les marqueurs typiques :
+# - blocs **VULNERABLE** (scripts --script=vuln) — Evidence normalisée en `VULNERABLE`,
+# - méthodes HTTP risquées (PUT/DELETE/TRACE/TRACK),
+# - indices de chiffrement SSL/TLS faibles (RC4/MD5/SHA1/SSLv2/SSLv3/3DES/SWEET32/weak/deprecated),
+# - vulnérabilité SMB **MS17-010 (EternalBlue)**.
+#
+# Génère (même ordre de tri pour les 3 formats) :
+# - `vulns.txt` (Count, Title, Severity, Evidence, Ports, Services, Sources),
+# - `vulns.md` (prêt pour Hugo),
+# - `vulns.json` (structuré).
+#
+# EXCLUSION : les entrées `HIGH` dont `Evidence` == "VULNERABLE" sont filtrées des trois sorties.
+#
+# Tri: Severity(HIGH>MEDIUM>LOW>INFO>autres) → Count(desc) → Title(asc)
+#
+# Exemple :
+#   mon-nmap 10.10.10.10 && mon-nmap-analyze 10.10.10.10
+#   mon-nmap-analyze --dir nmap_10.10.10.10
+# PRESENTATION_END
+# HOMEPAGE=https://github.com/NoelNac-HackEthical/mes-scripts
+#____________________________________________________________________________
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Helpers version (ne pas modifier)
+_self_path="${BASH_SOURCE[0]:-$0}"
+if command -v readlink >/dev/null 2>&1; then
+  _resolved="$(readlink -f -- "$_self_path" 2>/dev/null || true)"
+  [ -n "$_resolved" ] && _self_path="$_resolved"
+fi
+_self_base="$(basename "$_self_path")"
+
+_version_str(){
+  local v
+  v="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$_self_path" 2>/dev/null || true)"
+  v="${v:-0.0.0}"
+  printf '%s v%s\n' "$_self_base" "$v"
+}
+_print_version_and_exit(){ _version_str; exit 0; }
+# ---------------------------------------------------------------------------
+
+usage(){
+  cat <<USAGE
+Usage: ${_self_base} [OPTIONS] <IP> | --dir <DIR>
+
+Short description:
+  Analyse un dossier nmap_<IP>/ généré par mon-nmap et produit vulns.txt/md/json (triés).
+
+Options:
+  --dir DIR       Dossier à analyser (par défaut: nmap_<IP> si <IP> est fourni)
+  --txt-only      Ne générer que vulns.txt
+  --md-only       Ne générer que vulns.md
+  --json-only     Ne générer que vulns.json
+  --no-color      Sortie terminal sans couleurs
+  --debug         Debug mode (set -x)
+  -h, --help      Show this help
+  -V, --version   Show version
+USAGE
+}
+
+examples(){
+  cat <<EXAMPLES
+# Analyse standard après un scan :
+${_self_base} 10.129.147.115
+
+# Analyse sur un dossier précis :
+${_self_base} --dir nmap_10.129.147.115
+
+# Générer seulement le JSON :
+${_self_base} 10.129.147.115 --json-only
+EXAMPLES
+}
+
+# ---------------------------------------------------------------------------
+# Parsing CLI
+DEBUG=false
+NO_COLOR=false
+ONLY_TXT=false
+ONLY_MD=false
+ONLY_JSON=false
+DIR=""
+
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then _print_version_and_exit; fi
+if [[ "${1:-}" == "--help"    || "${1:-}" == "-h" ]]; then _version_str; usage; exit 0; fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dir)       DIR="${2:-}"; shift 2 ;;
+    --txt-only)  ONLY_TXT=true; shift ;;
+    --md-only)   ONLY_MD=true;  shift ;;
+    --json-only) ONLY_JSON=true; shift ;;
+    --no-color)  NO_COLOR=true; shift ;;
+    --debug)     DEBUG=true;    shift ;;
+    -V|--version) _print_version_and_exit ;;
+    -h|--help)    _version_str; usage; exit 0 ;;
+    --) shift; break ;;
+    -*) echo "Unknown option: $1" >&2; usage; exit 2 ;;
+    *)  [[ -z "$DIR" ]] && DIR="nmap_$1"; shift ;;
+  esac
+done
+
+_main(){
+  [[ "$DEBUG" == true ]] && set -x
+
+  # Couleurs
+  if [[ "$NO_COLOR" == true ]]; then
+    RED=""; GREEN=""; YELLOW=""; CYAN=""; BOLD=""; NC=""
+  else
+    RED=$'\033[1;31m'; GREEN=$'\033[1;32m'; YELLOW=$'\033[1;33m'
+    CYAN=$'\033[1;36m'; BOLD=$'\033[1m';   NC=$'\033[0m'
+  fi
+
+  if [[ -z "$DIR" ]]; then echo "Erreur: aucun <IP> ni --dir fourni." >&2; usage; return 2; fi
+  if [[ ! -d "$DIR" ]]; then echo "Dossier introuvable: $DIR" >&2; return 2; fi
+
+  local F2="$DIR/2-aggressive_scan.txt"
+  local OUT_TXT="$DIR/vulns.txt"
+  local OUT_MD="$DIR/vulns.md"
+  local OUT_JSON="$DIR/vulns.json"
+
+  local -a EXTRA_FILES=()
+  shopt -s nullglob
+  for f in "$DIR"/4-nse-*.txt; do EXTRA_FILES+=("$f"); done
+  shopt -u nullglob
+
+  # TMP global pour trap
+  TMP="$(mktemp)"
+  trap 'if [[ -n "${TMP:-}" && -f "${TMP:-}" ]]; then rm -f "$TMP"; fi' EXIT
+
+  add_row(){ printf "%s\t%s\t%s\t%s\t%s\t%s\n" "$1" "$2" "$3" "$4" "$5" "$6" >> "$TMP"; }
+
+  # parse file
+  scan_file_for_findings(){
+    local file="$1"
+    [[ -f "$file" ]] || return 0
+    local current_port="" current_service=""
+    while IFS= read -r line; do
+      if [[ "$line" =~ ^[[:space:]]*([0-9]+)/tcp[[:space:]]+open[[:space:]]+([[:alnum:]_+.-/]+) ]]; then
+        current_port="${BASH_REMATCH[1]}"
+        current_service="${BASH_REMATCH[2]}"
+        continue
+      fi
+      if [[ "$line" =~ ^[[:space:]]*[\|\_] ]]; then
+        local sub="${line#|_}"; sub="${sub#|}"; sub="${sub#" "}"
+
+        # VULNERABLE
+        if [[ "$sub" =~ [Vv][Uu][Ll][Nn][Ee]?[Rr][Aa]?[Bb][Ll][Ee] ]]; then
+          add_row "${current_port:-?}" "${current_service:-?}" "Vulnérabilité détectée" "HIGH" "$sub" "$(basename "$file")"
+          continue
+        fi
+        # HTTP methods risquées
+        if [[ "$sub" =~ ^Allowed[[:space:]]+[Mm]ethods?: ]]; then
+          local methods; methods="$(echo "$sub" | sed 's/.*:[[:space:]]*//; s/,/ /g')"
+          if echo "$methods" | grep -Eiq '\b(PUT|DELETE|TRACE|TRACK)\b'; then
+            add_row "${current_port:-?}" "${current_service:-http}" "Méthodes HTTP risquées" "MEDIUM" "Allowed: $(echo "$methods" | tr -s ' ')" "$(basename "$file")"
+          fi
+        fi
+        # SSL/TLS faibles
+        if echo "$sub" | grep -Eiq 'ssl|tls|cipher|rc4|md5|sha1|weak|insecure|obsolete|deprecated|sslv2|sslv3|3des|sweet32'; then
+          if echo "$sub" | grep -Eiq 'weak|insecure|deprecated|sslv2|sslv3|rc4|md5|sha1|3des|sweet32'; then
+            add_row "${current_port:-?}" "${current_service:-ssl}" "Chiffrement SSL/TLS faible" "MEDIUM" "$sub" "$(basename "$file")"
+          fi
+        fi
+        # SMB ms17-010
+        if echo "$sub" | grep -Eiq 'ms17-010|eternalblue'; then
+          add_row "${current_port:-445}" "smb" "MS17-010 (EternalBlue)" "HIGH" "$sub" "$(basename "$file")"
+        fi
+      fi
+    done < "$file"
+  }
+
+  [[ -f "$F2" ]] && scan_file_for_findings "$F2"
+  for f in "${EXTRA_FILES[@]}"; do scan_file_for_findings "$f"; done
+
+  # If no findings
+  if [[ ! -s "$TMP" ]]; then
+    echo "Aucune vulnérabilité explicite détectée par analyse heuristique." > "$OUT_TXT"
+    cat > "$OUT_MD" <<'MD'
+### Vulnérabilités détectées
+
+*(Aucun marqueur explicite détecté par l’analyse heuristique.)*
+
+> Conseil : essaye `--nse-vuln` et `--nse-ssl` pour enrichir la détection.
+MD
+    printf "[]\n" > "$OUT_JSON"
+    echo "${YELLOW}Aucun signal explicite relevé. Rapports générés (vides) dans ${BOLD}$DIR${NC}"
+    return 0
+  fi
+
+  # 1) Normalisation (canonisation Evidence VULNERABLE)
+  awk -F'\t' '{
+    ev=$5
+    if (ev ~ /Hosts are all up|not vulnerable|All hosts are up/) next
+    ev = gensub(/^[[:space:]]*State:[[:space:]]*VULNERABLE.*$/,"VULNERABLE",1,ev)
+    ev = gensub(/^[[:space:]]*VULNERABLE:.*$/,"VULNERABLE",1,ev)
+    key = $3 "\u0001" ev
+    printf("%s\t%s\t%s\t%s\t%s\n", key, $1, $2, $4, $6)
+  }' "$TMP" | sort > /tmp/mon_nmap_norm.$$
+
+  # 2) Agrégation
+  awk -F'\t' '
+    {
+      key=$1; port=$2; svc=$3; sev=$4; src=$5
+      if (key != cur_key && NR>1) { flush() }
+      cur_key=key
+      cnt[key]++
+      ports[key][port]=1
+      svcs[key][svc]=1
+      srcs[key][src]=1
+      pr=(sev=="HIGH"?3:(sev=="MEDIUM"?2:(sev=="LOW"?1:(sev=="INFO"?0:-1))))
+      if (pr > sev_pr[key]+0) { sev_pr[key]=pr; sev_max[key]=sev }
+    }
+    function join_map(m, k,   out,i){ out=""; for(i in m[k]) out=out?out "," i:i; return out }
+    function flush(   ports_str,svcs_str,srcs_str){
+      ports_str=join_map(ports,cur_key)
+      svcs_str =join_map(svcs, cur_key)
+      srcs_str =join_map(srcs, cur_key)
+      print cur_key "\t" cnt[cur_key] "\t" ports_str "\t" svcs_str "\t" srcs_str "\t" sev_max[cur_key]
+    }
+    END { if (NR>0) flush() }
+  ' /tmp/mon_nmap_norm.$$ > /tmp/mon_nmap_agg.$$
+
+  # 2.b) Filtrer les HIGH génériques 'VULNERABLE' (Evidence == "VULNERABLE" && sev == HIGH)
+  # On crée un fichier filtré et comptons combien d'entrées exclues
+  EXCLUDED_COUNT=0
+  awk -F'\t' '
+    BEGIN { OFS="\t" }
+    {
+      # key = title \x01 evidence
+      split($1, a, "\001")
+      title = a[1]; evidence = a[2]
+      sev = $6
+      # si Evidence est exactement "VULNERABLE" et severity est HIGH -> exclure
+      if (evidence == "VULNERABLE" && sev == "HIGH") { excluded++; next }
+      print $0
+    }
+    END { print excluded > "/tmp/mon_nmap_excluded_count.$$" }
+  ' /tmp/mon_nmap_agg.$$ > /tmp/mon_nmap_agg_filtered.$$
+
+  EXCLUDED_COUNT=$(cat /tmp/mon_nmap_excluded_count.$$ 2>/dev/null || echo 0)
+  rm -f /tmp/mon_nmap_excluded_count.$$ || true
+
+  # 3) Tri global (rank, count desc, title asc)
+  awk -F'\t' '
+    function rank(s){ return s=="HIGH"?3:(s=="MEDIUM"?2:(s=="LOW"?1:(s=="INFO"?0:-1))); }
+    {
+      split($1,a,"\001"); title=a[1]; evidence=a[2];
+      r=rank($6)
+      printf("%d\t%08d\t%s\t%s\t%s\t%s\t%s\t%s\n", r, $2, title, $6, evidence, $3, $4, $5)
+    }
+  ' /tmp/mon_nmap_agg_filtered.$$ \
+  | sort -t$'\t' -k1,1nr -k2,2nr -k3,3 \
+  > /tmp/mon_nmap_sorted.$$
+
+  # 4) Génération TXT / MD / JSON à partir du flux trié
+  # TXT
+  if [[ "$ONLY_MD" = false && "$ONLY_JSON" = false ]]; then
+    {
+      echo "==== Vulnerability Report ($(date '+%F %T')) ===="
+      echo -e "Count\tTitle\tSeverity\tEvidence\tPorts\tServices\tSources"
+      awk -F'\t' '{ printf("%d\t%s\t%s\t%s\t%s\t%s\t%s\n", $2+0, $3, $4, $5, $6, $7, $8) }' /tmp/mon_nmap_sorted.$$
+    } > "$OUT_TXT"
+  fi
+
+  # MD
+  if [[ "$ONLY_TXT" = false && "$ONLY_JSON" = false ]]; then
+    {
+      echo "### Vulnérabilités détectées"
+      echo
+      while IFS=$'\t' read -r r cnt title sev evid ports services sources; do
+        echo "- **${title}** — *${sev}*"
+        echo "  - Count: \`${cnt}\`"
+        echo "  - Evidence: \`${evid}\`"
+        echo "  - Ports: \`${ports}\`"
+        echo "  - Services: \`${services}\`"
+        echo "  - Sources: \`${sources}\`"
+        echo
+      done < /tmp/mon_nmap_sorted.$$
+    } > "$OUT_MD"
+  fi
+
+  # JSON
+  if [[ "$ONLY_TXT" = false && "$ONLY_MD" = false ]]; then
+    {
+      echo "["
+      first=1
+      while IFS=$'\t' read -r r cnt title sev evid ports services sources; do
+        esc_title=$(printf '%s' "$title" | sed 's/"/\\"/g')
+        esc_evid=$(printf '%s' "$evid" | sed 's/"/\\"/g')
+        esc_ports=$(printf '%s' "$ports" | sed 's/"/\\"/g')
+        esc_svcs=$(printf '%s' "$services" | sed 's/"/\\"/g')
+        esc_srcs=$(printf '%s' "$sources" | sed 's/"/\\"/g')
+        if [[ $first -eq 0 ]]; then echo ","; fi
+        printf '  {"count":%s,"title":"%s","severity":"%s","evidence":"%s","ports":"%s","services":"%s","sources":"%s"}' \
+               "$cnt" "$esc_title" "$sev" "$esc_evid" "$esc_ports" "$esc_svcs" "$esc_srcs"
+        first=0
+      done < /tmp/mon_nmap_sorted.$$
+      echo
+      echo "]"
+    } > "$OUT_JSON"
+  fi
+
+  # Cleanup temps
+  rm -f /tmp/mon_nmap_norm.$$ /tmp/mon_nmap_agg.$$ /tmp/mon_nmap_agg_filtered.$$ /tmp/mon_nmap_sorted.$$ || true
+
+  # Report excluded count
+  if [[ "${EXCLUDED_COUNT:-0}" -gt 0 ]]; then
+    echo -e "${YELLOW}⚠ ${EXCLUDED_COUNT} entrée(s) HIGH avec Evidence='VULNERABLE' ont été exclues des rapports (pas d'info exploitable).${NC}"
+  fi
+
+  echo "${GREEN}✔ Rapports générés (triés):${NC}"
+  [[ "$ONLY_MD" = false && "$ONLY_JSON" = false ]] && echo "  - $OUT_TXT"
+  [[ "$ONLY_TXT" = false && "$ONLY_JSON" = false ]] && echo "  - $OUT_MD"
+  [[ "$ONLY_TXT" = false && "$ONLY_MD"   = false ]] && echo "  - $OUT_JSON"
+
+  return 0
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  _main "$@"
+fi
