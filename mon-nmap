@@ -1,39 +1,45 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # NAME=mon-nmap
-# VERSION=1.0.0
-# DESCRIPTION=Automatise une série de scans Nmap (TCP full, scan agressif, UDP) et génère des résumés texte et Markdown prêts pour les writeups CTF.
+# VERSION=1.2.0
+# DESCRIPTION=Automatise scans Nmap (TCP full, -A, UDP) + passes NSE (web/ssl/vuln/smb) avec affichage de progression ; lance mon-nmap-analyze si demandé ; affiche toujours summary.txt en fin.
 # PRESENTATION_START
-# **Mon-Nmap — Outil d'énumération Nmap pour CTF / pentest**
+# Mon-Nmap — Outil d’énumération Nmap pour CTF / pentest
 #
-# Ce script automatise la séquence de scans que j'exécute systématiquement en phase
-# d'énumération d'un challenge HTB : scan TCP complet (1-65535), scan "aggressif" (-A)
-# sur les ports détectés, et scan UDP (top-20 ou complet via --udp-all).
+# Ce script automatise la séquence de scans systématiques en phase
+# d’énumération : scan TCP complet (1-65535), scan "agressif" (-A)
+# sur les ports détectés, scan UDP (top-20 ou complet), et passes NSE
+# ciblées (web/ssl/vuln/smb) avec affichage de la progression.
 #
-# Objectifs pédagogiques et pratiques :
-# - standardiser la collecte d'informations initiale afin d'avoir des résultats comparables
-#   d'une machine à l'autre ;
-# - produire des sorties synthétiques prêtes à être insérées dans un writeup
-#   (`summary.txt` brut + `summary.md` épuré pour Hugo) ;
-# - comportement conservateur : le script crée un dossier de résultats `nmap_<cible>`
-#   (ex. `nmap_mon-site.htb`) et y place tous les fichiers de sortie — il n'écrase
-#   rien en dehors de ce dossier.
+# - Génère des sorties prêtes pour les writeups : summary.txt et summary.md
+# - Peut lancer une analyse post-scan (mon-nmap-analyze) et injecter le
+#   résumé des vulnérabilités HIGH dans les summaries
+# - Comportement conservateur : résultats isolés dans nmap_<cible>/
 #
-# Points notables :
-# - option `--udp-all` : lance un scan UDP complet (-p-) au lieu du top 20 ;
-# - les fichiers produits : 1-port_scan.txt, 2-aggressive_scan.txt, 3-udp_scan.txt,
-#   summary.txt (brut), summary.md (version markdown et synthétique) ;
-# - usage type : `./mon-nmap mon-site.htb` ou `./mon-nmap --udp-all mon-site.htb`
+# 1. Lancer un scan complet : `mon-nmap target.htb`
+# 2. Ajouter tous les NSE et l’analyse : `mon-nmap --nse-all --analyze target.htb`
+# 3. Forcer l’UDP complet : `mon-nmap --udp-all target.htb`
+#
+# Exemple rapide :
+# `mon-nmap --nse-all --analyze 10.10.10.10`
+#
+# Astuce : adapter les passes NSE selon le contexte pour gagner du temps.
 # PRESENTATION_END
-# mon-nmap — scan agressif (-A) + summary.txt et summary.md (Hugo, sans emojis)
-# Étapes : [1] TCP full -> [2] Aggressive (-A) -> [3] UDP (optionnel)
-# Règles : on ignore 'open|filtered' (on ne garde que 'udp ... open' strict)
-
+# HOMEPAGE=https://github.com/NoelNac-HackEthical/mes-scripts
+#____________________________________________________________________________
+#
+# Bref résumé :
+#   Automatise les scans Nmap (TCP full, -A, UDP) et les passes NSE (web/ssl/vuln/smb),
+#   avec génération de résumés (txt/md) et analyse optionnelle des vulnérabilités HIGH.
+#
+# Template minimal pour scripts mes-scripts :
+# - contient usage() et examples() en heredoc (extraits par la pipeline)
+# - contient _version_str / _print_version_and_exit pour être cohérent
+#
 set -euo pipefail
 
-# --- version helpers ---
-# Usage: mettre ce bloc en tête du script. Appel: --version déclenche _print_version_and_exit
+# ---------------------------------------------------------------------------
+# Helpers version
 _self_path="${BASH_SOURCE[0]:-$0}"
-# si possible résoudre les symlinks pour afficher le nom réel du fichier
 if command -v readlink >/dev/null 2>&1; then
   _resolved="$(readlink -f -- "$_self_path" 2>/dev/null || true)"
   [ -n "$_resolved" ] && _self_path="$_resolved"
@@ -41,56 +47,82 @@ fi
 _self_base="$(basename "$_self_path")"
 
 _version_str() {
-  # récupère la première ligne '# VERSION=...' (tolère espaces autour de '=' et CRLF)
-  # awk lit le fichier et renvoie la partie droite de '=' ; gsub retire CR si présent
   local v
   v="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$_self_path" 2>/dev/null || true)"
-  [ -n "$v" ] || v="0.0.0"
-  printf '%s %s\n' "$_self_base" "$v"
+  v="${v:-0.0.0}"
+  printf '%s v%s\n' "$_self_base" "$v"
 }
-
-_print_version_and_exit() { _version_str; exit 0; }
-# -----------------------
+_print_version_and_exit(){ _version_str; exit 0; }
 
 usage(){
   cat <<USAGE
-Usage: $(basename "$0") [--udp-all] <IP_CIBLE>
+Usage: ${_self_base} [OPTIONS] <IP|HOST>
 
 Options:
-  --udp-all     Scan UDP complet (-p-) au lieu du top 20
-  -V, --version Afficher la version
-  -h, --help    Afficher cette aide
+  --udp-all       Scan UDP complet (-p-) au lieu du top 20
+  --nse-web       Lancer scripts NSE web (http-*)
+  --nse-ssl       Lancer scripts NSE ssl (ssl-*)
+  --nse-vuln      Lancer scripts NSE vuln (vuln-*)
+  --nse-smb       Lancer scripts NSE SMB (smb-*, smb2-*)
+  --nse-all       Lancer NSE web + ssl + vuln + smb (affiche progression)
+  --analyze       Lancer mon-nmap-analyze (PATH puis ./) et injecter résumé HIGH dans summary
+  -V, --version   Afficher la version
+  -h, --help      Afficher cette aide
+
+Exemples:
+  ${_self_base} valentine.htb
+  ${_self_base} --udp-all --nse-all --analyze 10.10.10.10
 USAGE
 }
 
+# ---------------------------------------------------------------------------
+# Couleurs
+RED=$'\033[1;31m'; GREEN=$'\033[1;32m'; YELLOW=$'\033[1;33m'
+CYAN=$'\033[1;36m'; BLUE=$'\033[1;34m'; BOLD=$'\033[1m'; NC=$'\033[0m'
 
-if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
-  _print_version_and_exit
-fi
-
-if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  _version_str
-  usage
-  exit 0
-fi
-
-# Couleurs (terminal)
-RED='\033[1;31m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'
-CYAN='\033[1;36m'; BLUE='\033[1;34m'; BOLD='\033[1m'; NC='\033[0m'
-
-# Option : --udp-all
+# Defaults
 FULL_UDP=false
-if [[ "${1:-}" == "--udp-all" ]]; then FULL_UDP=true; shift; fi
+NSE_WEB=false
+NSE_SSL=false
+NSE_VULN=false
+NSE_SMB=false
+DO_ANALYZE=false
+TARGET=""
+SHOW_INTERACTIVE=true
 
-# IP cible
-if [ "$#" -ne 1 ]; then
-  echo -e "${RED}❌ Usage: ${BOLD}$(basename "$0") [--udp-all] <IP_CIBLE>${NC}"
+# ---------------------------------------------------------------------------
+# Parse args
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then _print_version_and_exit; fi
+if [[ "${1:-}" == "--help"    || "${1:-}" == "-h" ]]; then _version_str; usage; exit 0; fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --udp-all) FULL_UDP=true; shift ;;
+    --nse-web) NSE_WEB=true; shift ;;
+    --nse-ssl) NSE_SSL=true; shift ;;
+    --nse-vuln) NSE_VULN=true; shift ;;
+    --nse-smb) NSE_SMB=true; shift ;;
+    --nse-all) NSE_WEB=true; NSE_SSL=true; NSE_VULN=true; NSE_SMB=true; shift ;;
+    --analyze) DO_ANALYZE=true; shift ;;
+    -V|--version) _print_version_and_exit ;;
+    -h|--help) _version_str; usage; exit 0 ;;
+    --) shift; break ;;
+    -*) echo "Unknown option: $1" >&2; usage; exit 2 ;;
+    *) TARGET="$1"; shift ;;
+  esac
+done
+
+if [[ -z "$TARGET" ]]; then
+  echo -e "${RED} Usage: ${BOLD}${_self_base} [OPTIONS] <IP|HOST>${NC}"
   exit 1
 fi
-IP=$1
 
+# Si analyse demandée, on coupe l'affichage live détaillé (on montrera summary.txt à la fin)
+if $DO_ANALYZE; then SHOW_INTERACTIVE=false; fi
+
+# ---------------------------------------------------------------------------
 # Dossiers/fichiers
-DOSSIER="nmap_$IP"
+DOSSIER="nmap_${TARGET}"
 mkdir -p "$DOSSIER"
 F1="$DOSSIER/1-port_scan.txt"
 F2="$DOSSIER/2-aggressive_scan.txt"
@@ -99,73 +131,123 @@ FSUM_TXT="$DOSSIER/summary.txt"
 FSUM_MD="$DOSSIER/summary.md"
 
 START_TIME=$SECONDS
-echo -e "${BLUE}🔍 Initialisation du scan Nmap sur ${BOLD}$IP${NC}"
+echo -e "${BLUE} Initialisation du scan Nmap sur ${BOLD}$TARGET${NC}"
 
+# ---------------------------------------------------------------------------
 # [1] TCP full port scan
 echo -e "${YELLOW}[1] Scan de tous les ports TCP (1-65535)...${NC}"
-nmap -p- --min-rate 10000 -T4 --max-retries 3 -oN "$F1" "$IP" > /dev/null 2>&1
+nmap -p- --min-rate 10000 -T4 --max-retries 3 -oN "$F1" "$TARGET" > /dev/null 2>&1 || true
+
 TCP_OPEN_LINES="$(LC_ALL=C grep -E '^[[:space:]]*[0-9]+/tcp[[:space:]]+open([[:space:]]|$)' "$F1" || true)"
 PORTS="$(printf '%s\n' "$TCP_OPEN_LINES" | cut -d'/' -f1 | paste -sd, - 2>/dev/null || true)"
-if [[ -z "${PORTS:-}" ]]; then
-  echo -e "${RED}❌ Aucun port TCP ouvert détecté.${NC}"
+if [[ -z "${PORTS}" ]]; then
+  echo -e "${RED} Aucun port TCP ouvert détecté.${NC}"
+  # Minimal summary
+  {
+    echo "==== Résumé $TARGET ($(date '+%F %T')) ===="
+    echo
+    echo "Aucun port TCP ouvert détecté par le scan initial."
+  } > "$FSUM_TXT"
+  {
+    echo "### Scan initial"
+    echo
+    echo "#### Services détectés"
+    echo "- *(aucun port TCP ouvert détecté)*"
+  } > "$FSUM_MD"
+  # Affichage summary.txt dans tous les cas
+  echo -e "\n${CYAN}${BOLD} SUMMARY (Texte) — ${DOSSIER}/summary.txt${NC}\n"
+  cat "$FSUM_TXT"
   exit 1
 fi
-echo -e "${GREEN}✔ Ports TCP détectés : ${BOLD}$PORTS${NC}"
+echo -e "${GREEN} Ports TCP détectés : ${BOLD}$PORTS${NC}"
 
+# ---------------------------------------------------------------------------
 # [2] Aggressive (-A)
-echo -e "${YELLOW}[2] Scan agressif avec détection OS (-A)...${NC}"
-nmap -A -T4 -p"$PORTS" --max-retries 3 -oN "$F2" "$IP" > /dev/null 2>&1
+echo -e "${YELLOW}[2] Scan agressif avec détection OS (-A) sur ports détectés...${NC}"
+nmap -A -T4 -p"$PORTS" --max-retries 3 -oN "$F2" "$TARGET" > /dev/null 2>&1 || true
 
+# ---------------------------------------------------------------------------
 # [3] UDP
 if $FULL_UDP; then
   echo -e "${YELLOW}[3] Scan UDP complet (-p-)...${NC}"
-  nmap -sU -p- -T4 --max-retries 3 --scan-delay 5ms --host-timeout 20m -oN "$F3" "$IP"
+  nmap -sU -p- -T4 --max-retries 3 --scan-delay 5ms --host-timeout 20m -oN "$F3" "$TARGET" > /dev/null 2>&1 || true
 else
   echo -e "${YELLOW}[3] Scan UDP top 20...${NC}"
-  nmap -sU --top-ports 20 -T4 --max-retries 2 --host-timeout 10m -oN "$F3" "$IP" > /dev/null 2>&1
+  nmap -sU --top-ports 20 -T4 --max-retries 2 --host-timeout 10m -oN "$F3" "$TARGET" > /dev/null 2>&1 || true
 fi
-echo -e "${GREEN}✔ Scan UDP terminé.${NC}"
-echo -e "${GREEN}${BOLD}✔ Tous les scans sont terminés !${NC}"
+echo -e "${GREEN} Scan UDP terminé.${NC}"
 
-# Extractions
-OS_LINE="$(grep -i 'OS details:' "$F2" | head -n1 | sed 's/OS details:[[:space:]]*//I')"
+# ---------------------------------------------------------------------------
+# NSE passes (par famille) avec progression + ciblage ports pertinents
+SSL_PORTS=""; SMB_PORTS=""
+# Détecter ports SSL pertinents depuis F2 + ajouter ports connus
+if [[ -f "$F2" ]]; then
+  SSL_DETECTED="$(awk '/^[[:space:]]*[0-9]+\/tcp[[:space:]]+open[[:space:]]+ssl\//{split($1,a,"/"); print a[1]}' "$F2" | paste -sd, -)"
+fi
+KNOWN_SSL="443,8443,9443,10443"
+# Fusion unique (detected + known)
+SSL_PORTS="$(printf "%s,%s" "${SSL_DETECTED:-}" "${KNOWN_SSL}" | awk -F, '{for(i=1;i<=NF;i++) if($i!="" && !seen[$i]++) out=out?out","$i:$i} END{print out}')"
+# Restreindre à des ports réellement ouverts si possible (intersection avec PORTS)
+if [[ -n "$SSL_PORTS" ]]; then
+  SSL_PORTS="$(awk -v a="$SSL_PORTS" -v b="$PORTS" 'BEGIN{
+    n=split(a,A,","); m=split(b,B,","); for(i=1;i<=m;i++) seen[B[i]]=1;
+    for(i=1;i<=n;i++) if(A[i] in seen) { out=out?out","A[i]:A[i] }
+    print out
+  }')"
+fi
+# Ports SMB (139/445) si ouverts
+if echo "$PORTS" | tr ',' '\n' | grep -Eq '^(139|445)$'; then
+  SMB_PORTS="$(echo "$PORTS" | tr ',' '\n' | grep -E '^(139|445)$' | paste -sd, -)"
+fi
+
+if $NSE_WEB || $NSE_SSL || $NSE_VULN || $NSE_SMB; then
+  echo -e "${YELLOW} Lancement des passes NSE sélectionnées...${NC}"
+
+  if $NSE_WEB; then
+    echo -e "${CYAN}[NSE] web: http-* sur ports ${BOLD}$PORTS${NC}"
+    nmap -sV -p"$PORTS" --script="http-title,http-enum,http-methods,http-headers,http-vhosts,http-server-header" -T4 -oN "${DOSSIER}/4-nse-web.txt" "$TARGET" > /dev/null 2>&1 || true
+    echo -e "${GREEN}   OK: ${DOSSIER}/4-nse-web.txt${NC}"
+  fi
+
+  if $NSE_SSL; then
+    if [[ -n "$SSL_PORTS" ]]; then
+      echo -e "${CYAN}[NSE] ssl: ssl-* sur ports ${BOLD}$SSL_PORTS${NC}"
+      nmap -sV -p"$SSL_PORTS" --script="ssl-enum-ciphers,ssl-cert,ssl-heartbleed,ssl-dh-params" -T4 -oN "${DOSSIER}/4-nse-ssl.txt" "$TARGET" > /dev/null 2>&1 || true
+      echo -e "${GREEN}   OK: ${DOSSIER}/4-nse-ssl.txt${NC}"
+    else
+      echo -e "${YELLOW}[NSE] ssl: aucun port SSL pertinent détecté — passe sautée.${NC}"
+    fi
+  fi
+
+  if $NSE_VULN; then
+    echo -e "${CYAN}[NSE] vuln: vuln-* sur ports ${BOLD}$PORTS${NC}"
+    nmap -sV -p"$PORTS" --script="vuln*" -T4 -oN "${DOSSIER}/4-nse-vuln.txt" "$TARGET" > /dev/null 2>&1 || true
+    echo -e "${GREEN}   OK: ${DOSSIER}/4-nse-vuln.txt${NC}"
+  fi
+
+  if $NSE_SMB; then
+    if [[ -n "$SMB_PORTS" ]]; then
+      echo -e "${CYAN}[NSE] smb: smb-*/smb2-* sur ports ${BOLD}$SMB_PORTS${NC}"
+      nmap -sV -p"$SMB_PORTS" --script="smb-enum-shares,smb-enum-users,smb2-capabilities,smb2-time,smb2-security-mode,smb-vuln-ms17-010" -T4 -oN "${DOSSIER}/4-nse-smb.txt" "$TARGET" > /dev/null 2>&1 || true
+      echo -e "${GREEN}   OK: ${DOSSIER}/4-nse-smb.txt${NC}"
+    else
+      echo -e "${YELLOW}[NSE] smb: aucun port 139/445 ouvert — passe sautée.${NC}"
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# Extractions & summary files
+OS_LINE="$(grep -i 'OS details:' "$F2" 2>/dev/null | head -n1 | sed 's/OS details:[[:space:]]*//I' || true)"
 UDP_OPEN_ONLY="$(LC_ALL=C grep -E '^[[:space:]]*[0-9]+/udp[[:space:]]+open([[:space:]]|$)' "$F3" || true)"
 TCP_OPEN_FROM_F2="$(LC_ALL=C grep -E '^[[:space:]]*[0-9]+/tcp[[:space:]]+open([[:space:]]|$)' "$F2" || true)"
 TCP_CSV="$(printf '%s\n' "$TCP_OPEN_FROM_F2" | cut -d'/' -f1 | paste -sd, - 2>/dev/null || true)"
 UDP_CSV=""
 [[ -n "$UDP_OPEN_ONLY" ]] && UDP_CSV="$(printf '%s\n' "$UDP_OPEN_ONLY" | cut -d'/' -f1 | paste -sd, - 2>/dev/null || true)"
 
-# Affichage terminal (inchangé)
-echo -e "\n${CYAN}${BOLD}📄 RÉSUMÉ DES SERVICES TCP DÉTECTÉS :${NC}\n"
-i=1; inside_block=false
-while IFS= read -r line; do
-  if [[ "$line" =~ ^[0-9]+/tcp[[:space:]]+open([[:space:]]|$) ]]; then
-    printf "  [#%d] %s\n" "$i" "$line"
-    i=$((i+1)); inside_block=true
-  elif [[ "$inside_block" == true && "$line" =~ ^[\|_] ]]; then
-    line=${line#|_}; line=${line#|}; printf "      → %s\n" "$line"
-  else
-    inside_block=false
-  fi
-done < "$F2"
-
-if [[ -n "$UDP_OPEN_ONLY" ]]; then
-  echo -e "\n${CYAN}${BOLD}📄 RÉSUMÉ DES SERVICES UDP DÉTECTÉS :${NC}\n"
-  echo "$UDP_OPEN_ONLY" | nl -w2 -s'. ' | while read -r line; do
-    NUM=$(echo "$line" | cut -d'.' -f1)
-    printf "  [#%s] %s\n" "$NUM" "$(echo "$line" | cut -d' ' -f2-)"
-  done
-fi
-
-if [[ -n "$OS_LINE" ]]; then
-  echo -e "\n${BLUE}${BOLD}🖥️  Détection du système d’exploitation :${NC} $OS_LINE"
-else
-  echo -e "\n${BLUE}🖥️  OS non identifié par Nmap.${NC}"
-fi
-
-# summary.txt (brut, inchangé)
+# summary.txt (brut)
 {
-  echo "==== Résumé $IP ($(date '+%F %T')) ===="
+  echo "==== Résumé $TARGET ($(date '+%F %T')) ===="
   echo
   echo "[1-port_scan] TCP open :"
   [[ -n "$TCP_OPEN_LINES" ]] && echo "$TCP_OPEN_LINES"
@@ -199,39 +281,26 @@ fi
   [[ -n "$UDP_CSV" ]] && { echo "UDP open (CSV) : $UDP_CSV"; echo; }
 } > "$FSUM_TXT"
 
-# summary.md (Hugo) — épuré (info non redondante)
+# summary.md (épuré)
 {
   echo "### Scan initial"
   echo
-
-  # ---- Services détectés (TCP) épurés ----
   echo "#### Services détectés"
-  # On parcourt F2 et on synthétise par port: ligne principale + détails utiles condensés
   i=1
   in_block=false
-  have_sshhk=0; ssh_types=""
   http_title=""; server_hdr=""; ssl_cn=""
   current_main=""
-
-  flush_item() {
+  flush_item(){
     if [[ -n "${current_main:-}" ]]; then
       echo "$i. **$current_main**"
       [[ -n "$http_title" ]] && echo "   → http-title: $http_title  "
       [[ -n "$server_hdr" ]] && echo "   → http-server-header: $server_hdr  "
       [[ -n "$ssl_cn"    ]] && echo "   → ssl-cert CN: $ssl_cn  "
-      if [[ $have_sshhk -eq 1 ]]; then
-        ssh_types_clean="$(echo "$ssh_types" | tr '[:lower:]' '[:upper:]' | sed 's/ \{1,\}/ /g; s/^, *//; s/, *,/, /g')"
-        echo "   → ssh-hostkey: $ssh_types_clean  "
-      fi
       echo
       i=$((i+1))
     fi
-    current_main=""
-    in_block=false
-    have_sshhk=0; ssh_types=""
-    http_title=""; server_hdr=""; ssl_cn=""
+    current_main=""; in_block=false; http_title=""; server_hdr=""; ssl_cn=""
   }
-
   while IFS= read -r line; do
     if [[ "$line" =~ ^[0-9]+/tcp[[:space:]]+open([[:space:]]|$) ]]; then
       flush_item
@@ -241,23 +310,11 @@ fi
     fi
     if $in_block && [[ "$line" =~ ^[\|_] ]]; then
       sub="${line#|_}"; sub="${sub#|}"; sub="${sub#" "}"
-      if [[ "$sub" =~ ^ssh-hostkey: ]]; then
-        have_sshhk=1
-      elif [[ $have_sshhk -eq 1 ]]; then
-        if [[ "$sub" =~ \(RSA\) ]]; then ssh_types="$ssh_types, RSA"; fi
-        if [[ "$sub" =~ \(ECDSA\) ]]; then ssh_types="$ssh_types, ECDSA"; fi
-        if [[ "$sub" =~ \(ED25519\) ]]; then ssh_types="$ssh_types, ED25519"; fi
-      elif [[ "$sub" =~ ^http-title: ]]; then
+      if [[ "$sub" =~ ^http-title: ]]; then
         http_title="$(echo "$sub" | sed 's/^http-title:[[:space:]]*//')"
       elif [[ "$sub" =~ ^http-server-header: ]]; then
         server_hdr="$(echo "$sub" | sed 's/^http-server-header:[[:space:]]*//')"
       elif [[ "$sub" =~ ^ssl-cert: ]]; then
-        if [[ "$sub" =~ commonName=([^/[:space:]]+) ]]; then
-          ssl_cn="${BASH_REMATCH[1]}"
-        elif [[ "$sub" =~ CN=([^/[:space:]]+) ]]; then
-          ssl_cn="${BASH_REMATCH[1]}"
-        fi
-      elif [[ "$sub" =~ ^Subject: ]]; then
         if [[ "$sub" =~ commonName=([^/[:space:]]+) ]]; then
           ssl_cn="${BASH_REMATCH[1]}"
         elif [[ "$sub" =~ CN=([^/[:space:]]+) ]]; then
@@ -300,7 +357,200 @@ fi
 } > "$FSUM_MD"
 
 ELAPSED=$((SECONDS - START_TIME)); MINS=$((ELAPSED/60)); SECS=$((ELAPSED%60))
-echo -e "\n${CYAN}🧾  Résumé texte :${NC} ${BOLD}$FSUM_TXT${NC}"
-echo -e "${CYAN}🧾  Résumé Markdown :${NC} ${BOLD}$FSUM_MD${NC}"
-echo -e "${BLUE}📁 Résultats complets : ${BOLD}$DOSSIER/${NC}"
-echo -e "${GREEN}⏱️  Durée totale du scan : ${BOLD}${MINS}m ${SECS}s${NC}"
+
+# Affichage live seulement si pas d'analyse (sinon on montre summary.txt à la fin)
+if [[ "$SHOW_INTERACTIVE" == true ]]; then
+  echo -e "\n${CYAN}${BOLD} RÉSUMÉ DES SERVICES TCP DÉTECTÉS :${NC}\n"
+  i=1; inside_block=false
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^[0-9]+/tcp[[:space:]]+open([[:space:]]|$) ]]; then
+      printf "  [#%d] %s\n" "$i" "$line"
+      i=$((i+1)); inside_block=true
+    elif [[ "$inside_block" == true && "$line" =~ ^[\|_] ]]; then
+      line=${line#|_}; line=${line#|}; printf "      → %s\n" "$line"
+    else
+      inside_block=false
+    fi
+  done < "$F2"
+
+  if [[ -n "$UDP_OPEN_ONLY" ]]; then
+    echo -e "\n${CYAN}${BOLD} RÉSUMÉ DES SERVICES UDP DÉTECTÉS :${NC}\n"
+    echo "$UDP_OPEN_ONLY" | nl -w2 -s'. ' | while read -r line; do
+      NUM=$(echo "$line" | cut -d'.' -f1)
+      printf "  [#%s] %s\n" "$NUM" "$(echo "$line" | cut -d' ' -f2-)"
+    done
+  fi
+
+  if [[ -n "$OS_LINE" ]]; then
+    echo -e "\n${BLUE}${BOLD} Détection du système d’exploitation :${NC} $OS_LINE"
+  else
+    echo -e "\n${BLUE}${BOLD} OS non identifié par Nmap.${NC}"
+  fi
+fi
+
+echo -e "\n${CYAN} Résumé texte :${NC} ${BOLD}$FSUM_TXT${NC}"
+echo -e "${CYAN} Résumé Markdown :${NC} ${BOLD}$FSUM_MD${NC}"
+echo -e "${BLUE} Dossiers des résultats : ${BOLD}$DOSSIER/${NC}"
+echo -e "${GREEN} Durée totale du scan : ${BOLD}${MINS}m ${SECS}s${NC}"
+
+# ---------------------------------------------------------------------------
+# Analyse optionnelle via mon-nmap-analyze
+if $DO_ANALYZE; then
+  ANALYZER=""
+  if command -v mon-nmap-analyze >/dev/null 2>&1; then
+    ANALYZER="$(command -v mon-nmap-analyze)"
+  elif [[ -x "./mon-nmap-analyze" ]]; then
+    ANALYZER="./mon-nmap-analyze"
+  elif [[ -x "./mon-nmap-analyze.sh" ]]; then
+    ANALYZER="./mon-nmap-analyze.sh"
+  fi
+
+  if [[ -n "$ANALYZER" ]]; then
+    echo -e "${CYAN} Analyse post-scan via: ${BOLD}${ANALYZER}${NC}"
+    "$ANALYZER" --dir "$DOSSIER" || true
+  else
+    echo -e "${YELLOW} --analyze demandé mais aucun 'mon-nmap-analyze' trouvé dans le PATH ou le dossier courant.${NC}"
+    echo -e "${YELLOW}   Ajoute ~/.local/bin/mes-scripts à ton PATH ou place l'analyzer à côté de ce script.${NC}"
+  fi
+
+  # Intégrer le résumé des HIGH dans summary.txt / summary.md (Evidence intacte)
+  VULNS_TXT="$DOSSIER/vulns.txt"
+  if [[ -f "$VULNS_TXT" ]]; then
+    {
+      echo ""
+      echo "==== Vulnérabilités HIGH (résumé) ===="
+      awk -F'\t' '
+        NR==1 { next }
+        $3=="HIGH" {
+          count=$1; title=$2; ev=$4; ports=$5; srcs=$7
+          gsub(/^[ \t]+|[ \t]+$/,"",ports); gsub(/^[ \t]+|[ \t]+$/,"",srcs)
+          printf "- [%s×] %s\n", count, title
+          printf "  Evidence: %s\n", ev
+          printf "  Ports: %s\n", ports
+          printf "  Sources: %s\n\n", srcs
+        }' "$VULNS_TXT" |
+      awk 'BEGIN{printed=0}{print;printed=1}END{if(!printed)print"(aucune entrée HIGH)"}'
+    } >> "$FSUM_TXT"
+
+    {
+      echo ""
+      echo "### Vulnérabilités HIGH (résumé)"
+      awk -F'\t' '
+        NR==1 { next }
+        $3=="HIGH" {
+          count=$1; title=$2; ev=$4; ports=$5; srcs=$7
+          gsub(/^[ \t]+|[ \t]+$/,"",ports); gsub(/^[ \t]+|[ \t]+$/,"",srcs)
+          printf "1. **%s** — *HIGH* (count: `%s`)\n", title, count
+          printf "   - Evidence: `%s`\n", ev
+          printf "   - Ports: `%s`\n", ports
+          printf "   - Sources: `%s`\n\n", srcs
+        }' "$VULNS_TXT" |
+      awk 'BEGIN{printed=0}{print;printed=1}END{if(!printed)print"- *(aucune entrée HIGH)*"}'
+    } >> "$FSUM_MD"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# AFFICHAGE FINAL : rendu harmonisé et robuste de summary.txt (fichier inchangé)
+echo -e "\n${CYAN}${BOLD} SUMMARY (Texte — rendu) — ${DOSSIER}/summary.txt${NC}\n"
+if [[ -f "$FSUM_TXT" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # Trim trailing CR (au cas où)
+    line="${line%$'\r'}"
+
+    case "$line" in
+      ====\ Résumé\ *====)
+        # Extrait le contenu entre "==== Résumé " et " ===="
+        title="${line#==== Résumé }"
+        title="${title% ====}"
+        echo -e "${CYAN}${BOLD}# Résumé ${title}${NC}"
+        echo
+        ;;
+
+      "[1-port_scan]"*)
+        echo -e "${CYAN}${BOLD} 1) TCP open${NC}"
+        ;;
+
+      "[2-aggressive_scan]"*)
+        echo -e "${CYAN}${BOLD} 2) Détails (open)${NC}"
+        ;;
+
+      "[3-udp_scan]"*)
+        echo -e "${CYAN}${BOLD} 3) UDP${NC}"
+        ;;
+
+      "Résumé des services détectés"* )
+        echo
+        echo -e "${CYAN}${BOLD} Services TCP détectés${NC}"
+        ;;
+
+      OS:* )
+        os_text="${line#OS: }"
+        echo -e "${BLUE}${BOLD} OS détecté:${NC} ${os_text}"
+        echo
+        ;;
+
+      TCP\ open\ \(CSV\)\ :* )
+        tcpcsv="${line#TCP open (CSV) : }"
+        echo
+        echo -e "${YELLOW} **TCP ouverts (CSV)**:${NC} \`${tcpcsv}\`"
+        ;;
+
+      UDP\ open\ \(CSV\)\ :* )
+        udpcsv="${line#UDP open (CSV) : }"
+        echo -e "${YELLOW} **UDP ouverts (CSV)**:${NC} \`${udpcsv}\`"
+        ;;
+
+      ====\ Vulnérabilités\ HIGH* )
+        echo
+        echo -e "${RED}${BOLD} Vulnérabilités HIGH (résumé)${NC}"
+        echo
+        ;;
+
+      -\ \[* )
+        # ligne de vulnérabilité qui commence par "- ["
+        # on l'affiche telle quelle mais en gras léger
+        vtitle="${line#- }"
+        echo -e "  - ${BOLD}${vtitle}${NC}"
+        ;;
+
+      Evidence:* )
+        evid="${line#Evidence: }"
+        printf "      ${YELLOW}Evidence:${NC} %s\n" "$evid"
+        ;;
+
+      Ports:* )
+        ports="${line#Ports: }"
+        printf "      ${CYAN}Ports:${NC} \`%s\`\n" "$ports"
+        ;;
+
+      Sources:* )
+        srcs="${line#Sources: }"
+        printf "      ${CYAN}Sources:${NC} \`%s\`\n\n" "$srcs"
+        ;;
+
+      "" )
+        # ligne vide -> afficher une ligne vide pour espacement
+        echo
+        ;;
+
+      * )
+        # Cas généraux où il s'agit probablement d'une ligne de port/service ou d'un détail
+        # Détecte lignes "123/tcp  open" via grep (plus tolérant que [[ =~ ]])
+        if printf '%s\n' "$line" | grep -Eq '^[[:space:]]*[0-9]+/(tcp|udp)[[:space:]]+open'; then
+          printf "  • \`%s\`\n" "$(echo "$line" | sed -e 's/^[[:space:]]*//')"
+        elif printf '%s\n' "$line" | grep -Eq '→'; then
+          # détail indenté (contient une flèche)
+          # normaliser la flèche et afficher avec indentation
+          detail="$(echo "$line" | sed -E 's/^[[:space:]]*[\|_]*[[:space:]]*→[[:space:]]*//; s/^[[:space:]]*→[[:space:]]*//')"
+          printf "      → %s\n" "$detail"
+        else
+          # par défaut, afficher la ligne brute (utile pour lignes inattendues)
+          echo "$line"
+        fi
+        ;;
+    esac
+  done < "$FSUM_TXT"
+else
+  echo "(summary.txt introuvable)"
+fi
