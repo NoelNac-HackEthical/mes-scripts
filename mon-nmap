@@ -1,6 +1,6 @@
 #!/bin/bash
 # NAME=mon-nmap
-# VERSION=1.0.0
+# VERSION=2.0.0
 # DESCRIPTION=Automatise une série de scans Nmap (TCP full, scan agressif, UDP) et génère des résumés texte et Markdown prêts pour les writeups CTF.
 # PRESENTATION_START
 # **Mon-Nmap — Outil d'énumération Nmap pour CTF / pentest**
@@ -9,31 +9,32 @@
 # d'énumération d'un challenge HTB : scan TCP complet (1-65535), scan "aggressif" (-A)
 # sur les ports détectés, et scan UDP (top-20 ou complet via --udp-all).
 #
+# Ajouts version 1.0.2 :
+# - options NSE ciblées (activables) : --nse-web, --nse-smb, --nse-vuln, --nse-brute, --nse-all, --nse-ssl
+# - option --analyze : lance le script compagnon mon-nmap-analyze.sh si présent
+#
 # Objectifs pédagogiques et pratiques :
 # - standardiser la collecte d'informations initiale afin d'avoir des résultats comparables
 #   d'une machine à l'autre ;
 # - produire des sorties synthétiques prêtes à être insérées dans un writeup
 #   (`summary.txt` brut + `summary.md` épuré pour Hugo) ;
-# - comportement conservateur : le script crée un dossier de résultats `nmap_<cible>`
-#   (ex. `nmap_mon-site.htb`) et y place tous les fichiers de sortie — il n'écrase
-#   rien en dehors de ce dossier.
+# - comportement conservateur : le script crée un dossier de résultats `nmap_<cible>` (ex. `nmap_mon-site.htb`)
+#   et y place tous les fichiers de sortie — il n'écrase rien en dehors de ce dossier.
 #
 # Points notables :
 # - option `--udp-all` : lance un scan UDP complet (-p-) au lieu du top 20 ;
 # - les fichiers produits : 1-port_scan.txt, 2-aggressive_scan.txt, 3-udp_scan.txt,
-#   summary.txt (brut), summary.md (version markdown et synthétique) ;
-# - usage type : `./mon-nmap mon-site.htb` ou `./mon-nmap --udp-all mon-site.htb`
+#   4-nse-web.txt, 4-nse-smb.txt, 4-nse-vuln.txt, 4-nse-ssl.txt, 4-nse-brute.txt, summary.txt (brut), summary.md (version markdown et synthétique) ;
+# - usage type : `./mon-nmap mon-site.htb` ou `./mon-nmap --udp-all --nse-web mon-site.htb`
 # PRESENTATION_END
 # mon-nmap — scan agressif (-A) + summary.txt et summary.md (Hugo, sans emojis)
-# Étapes : [1] TCP full -> [2] Aggressive (-A) -> [3] UDP (optionnel)
+# Étapes : [1] TCP full -> [2] Aggressive (-A) -> [3] UDP (optionnel) -> [4] NSE ciblés (optionnel)
 # Règles : on ignore 'open|filtered' (on ne garde que 'udp ... open' strict)
 
 set -euo pipefail
 
 # --- version helpers ---
-# Usage: mettre ce bloc en tête du script. Appel: --version déclenche _print_version_and_exit
 _self_path="${BASH_SOURCE[0]:-$0}"
-# si possible résoudre les symlinks pour afficher le nom réel du fichier
 if command -v readlink >/dev/null 2>&1; then
   _resolved="$(readlink -f -- "$_self_path" 2>/dev/null || true)"
   [ -n "$_resolved" ] && _self_path="$_resolved"
@@ -41,8 +42,6 @@ fi
 _self_base="$(basename "$_self_path")"
 
 _version_str() {
-  # récupère la première ligne '# VERSION=...' (tolère espaces autour de '=' et CRLF)
-  # awk lit le fichier et renvoie la partie droite de '=' ; gsub retire CR si présent
   local v
   v="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$_self_path" 2>/dev/null || true)"
   [ -n "$v" ] || v="0.0.0"
@@ -54,15 +53,25 @@ _print_version_and_exit() { _version_str; exit 0; }
 
 usage(){
   cat <<USAGE
-Usage: $(basename "$0") [--udp-all] <IP_CIBLE>
+Usage: $(basename "$0") [OPTIONS] <IP_CIBLE>
 
 Options:
-  --udp-all     Scan UDP complet (-p-) au lieu du top 20
-  -V, --version Afficher la version
-  -h, --help    Afficher cette aide
+  --udp-all       Scan UDP complet (-p-) au lieu du top 20
+  --nse-web       Lancer scripts NSE HTTP utiles (http-title,http-enum,http-methods,http-headers,http-vhosts,ssl-cert)
+  --nse-smb       Lancer scripts NSE SMB (smb-enum-shares,smb-os-discovery,smb-enum-users)
+  --nse-vuln      Lancer --script=vuln (potentiellement intrusif / lent)
+  --nse-brute     Lancer scripts brute (ssh-brute,http-brute,ftp-brute,smb-brute) — utilisé uniquement en lab/CTF
+  --nse-all       Équivaut à --nse-web --nse-smb --nse-vuln
+  --nse-ssl       Lancer scripts SSL/TLS (pattern "ssl*") sur les ports détectés comme SSL/HTTPS
+  --analyze       Lancer le script compagnon mon-nmap-analyze.sh sur le dossier de résultats si présent
+  -V, --version   Afficher la version
+  -h, --help      Afficher cette aide
+
+Exemples:
+  $(basename "$0") --nse-web target.htb
+  $(basename "$0") --udp-all --nse-all --nse-ssl --analyze 10.129.147.115
 USAGE
 }
-
 
 if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
   _print_version_and_exit
@@ -78,13 +87,35 @@ fi
 RED='\033[1;31m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'
 CYAN='\033[1;36m'; BLUE='\033[1;34m'; BOLD='\033[1m'; NC='\033[0m'
 
-# Option : --udp-all
+# Options par défaut
 FULL_UDP=false
-if [[ "${1:-}" == "--udp-all" ]]; then FULL_UDP=true; shift; fi
+NSE_WEB=false
+NSE_SMB=false
+NSE_VULN=false
+NSE_BRUTE=false
+NSE_SSL=false
+DO_ANALYZE=false
+
+# Parse options simples (positionnelles limitées) - accepte plusieurs options avant la cible
+while [[ "${1:-}" =~ ^- ]]; do
+  case "$1" in
+    --udp-all) FULL_UDP=true; shift ;;
+    --nse-web) NSE_WEB=true; shift ;;
+    --nse-smb) NSE_SMB=true; shift ;;
+    --nse-vuln) NSE_VULN=true; shift ;;
+    --nse-brute) NSE_BRUTE=true; shift ;;
+    --nse-all) NSE_WEB=true; NSE_SMB=true; NSE_VULN=true; shift ;;
+    --nse-ssl) NSE_SSL=true; shift ;;
+    --analyze) DO_ANALYZE=true; shift ;;
+    -V|--version) _print_version_and_exit ;;
+    -h|--help) _version_str; usage; exit 0 ;;
+    *) echo -e "${RED}Option inconnue: $1${NC}"; usage; exit 1 ;;
+  esac
+done
 
 # IP cible
 if [ "$#" -ne 1 ]; then
-  echo -e "${RED}❌ Usage: ${BOLD}$(basename "$0") [--udp-all] <IP_CIBLE>${NC}"
+  echo -e "${RED}❌ Usage: ${BOLD}$(basename "$0") [options] <IP_CIBLE>${NC}"
   exit 1
 fi
 IP=$1
@@ -95,6 +126,12 @@ mkdir -p "$DOSSIER"
 F1="$DOSSIER/1-port_scan.txt"
 F2="$DOSSIER/2-aggressive_scan.txt"
 F3="$DOSSIER/3-udp_scan.txt"
+# fichiers NSE (éventuels)
+F4_WEB="$DOSSIER/4-nse-web.txt"
+F4_SMB="$DOSSIER/4-nse-smb.txt"
+F4_VULN="$DOSSIER/4-nse-vuln.txt"
+F4_SSL="$DOSSIER/4-nse-ssl.txt"
+F4_BRUTE="$DOSSIER/4-nse-brute.txt"
 FSUM_TXT="$DOSSIER/summary.txt"
 FSUM_MD="$DOSSIER/summary.md"
 
@@ -116,6 +153,58 @@ echo -e "${GREEN}✔ Ports TCP détectés : ${BOLD}$PORTS${NC}"
 echo -e "${YELLOW}[2] Scan agressif avec détection OS (-A)...${NC}"
 nmap -A -T4 -p"$PORTS" --max-retries 3 -oN "$F2" "$IP" > /dev/null 2>&1
 
+# Fonction utilitaire : lancer un nmap --script ciblé si la variable est vraie
+run_nse_if() {
+  local flag="$1"; shift
+  local scripts="$1"; shift
+  local out="$1"; shift
+  if $flag; then
+    echo -e "${YELLOW}[4] Lancement NSE: ${scripts} ...${NC}"
+    if [[ -n "${PORTS:-}" ]]; then
+      nmap -sV -p"$PORTS" --script "$scripts" -T4 --max-retries 2 -oN "$out" "$IP" > /dev/null 2>&1 || true
+      echo -e "${GREEN}✔ NSE terminé : ${out}${NC}"
+    else
+      echo -e "${YELLOW}⚠ Pas de ports connus pour lancer les scripts NSE.${NC}"
+    fi
+  fi
+}
+
+# Fonction spécifique SSL
+run_nse_ssl_if() {
+  $NSE_SSL || return 0
+
+  mapfile -t ports_by_service < <(awk '
+    /^[[:space:]]*[0-9]+\/tcp[[:space:]]+open/ {
+      port=$1;
+      svc=$3;
+      gsub(/\/tcp/,"",port);
+      if (svc ~ /^https$/ || svc ~ /^ssl\//) {
+        print port
+      }
+    }' "$F2" 2>/dev/null | sort -n | uniq)
+
+  declare -A open_tcp
+  while read -r line; do
+    p="${line%%/*}"
+    [[ -n "$p" ]] && open_tcp["$p"]=1
+  done < <(LC_ALL=C grep -E '^[[:space:]]*[0-9]+/tcp[[:space:]]+open([[:space:]]|$)' "$F1" 2>/dev/null || true)
+
+  for p in 443 8443 9443 10443 4443; do
+    if [[ ${open_tcp[$p]+x} ]]; then
+      ports_by_service+=("$p")
+    fi
+  done
+
+  if [[ ${#ports_by_service[@]} -eq 0 ]]; then
+    echo -e "${YELLOW}⚠ Aucun port explicitement SSL/HTTPS détecté — passe ssl* sautée.${NC}"
+    return 0
+  fi
+  SSL_PORTS="$(printf "%s\n" "${ports_by_service[@]}" | sort -n | uniq | paste -sd, -)"
+  echo -e "${YELLOW}[4] Lancement NSE (SSL/TLS) sur ports: ${BOLD}${SSL_PORTS}${NC}"
+  nmap -sV -p"$SSL_PORTS" --script "ssl*" -T4 --max-retries 2 -oN "$F4_SSL" "$IP" > /dev/null 2>&1 || true
+  echo -e "${GREEN}✔ NSE SSL/TLS terminé : ${F4_SSL}${NC}"
+}
+
 # [3] UDP
 if $FULL_UDP; then
   echo -e "${YELLOW}[3] Scan UDP complet (-p-)...${NC}"
@@ -127,8 +216,15 @@ fi
 echo -e "${GREEN}✔ Scan UDP terminé.${NC}"
 echo -e "${GREEN}${BOLD}✔ Tous les scans sont terminés !${NC}"
 
-# Extractions
-OS_LINE="$(grep -i 'OS details:' "$F2" | head -n1 | sed 's/OS details:[[:space:]]*//I')"
+# [4] Scans NSE optionnels (exécutés seulement si demandé)
+run_nse_if $NSE_WEB "http-title,http-enum,http-methods,http-headers,http-vhosts,ssl-cert" "$F4_WEB"
+run_nse_if $NSE_SMB "smb-enum-shares,smb-os-discovery,smb-enum-users" "$F4_SMB"
+run_nse_if $NSE_VULN "vuln" "$F4_VULN"
+run_nse_if $NSE_BRUTE "ssh-brute,http-brute,ftp-brute,smb-brute" "$F4_BRUTE"
+run_nse_ssl_if
+
+# Extractions (inchangées)
+OS_LINE="$(grep -i 'OS details:' "$F2" | head -n1 | sed 's/OS details:[[:space:]]*//I' || true)"
 UDP_OPEN_ONLY="$(LC_ALL=C grep -E '^[[:space:]]*[0-9]+/udp[[:space:]]+open([[:space:]]|$)' "$F3" || true)"
 TCP_OPEN_FROM_F2="$(LC_ALL=C grep -E '^[[:space:]]*[0-9]+/tcp[[:space:]]+open([[:space:]]|$)' "$F2" || true)"
 TCP_CSV="$(printf '%s\n' "$TCP_OPEN_FROM_F2" | cut -d'/' -f1 | paste -sd, - 2>/dev/null || true)"
@@ -199,14 +295,12 @@ fi
   [[ -n "$UDP_CSV" ]] && { echo "UDP open (CSV) : $UDP_CSV"; echo; }
 } > "$FSUM_TXT"
 
-# summary.md (Hugo) — épuré (info non redondante)
+# summary.md (Hugo) — inchangé
 {
   echo "### Scan initial"
   echo
 
-  # ---- Services détectés (TCP) épurés ----
   echo "#### Services détectés"
-  # On parcourt F2 et on synthétise par port: ligne principale + détails utiles condensés
   i=1
   in_block=false
   have_sshhk=0; ssh_types=""
@@ -226,10 +320,7 @@ fi
       echo
       i=$((i+1))
     fi
-    current_main=""
-    in_block=false
-    have_sshhk=0; ssh_types=""
-    http_title=""; server_hdr=""; ssl_cn=""
+    current_main=""; in_block=false; have_sshhk=0; ssh_types=""; http_title=""; server_hdr=""; ssl_cn=""
   }
 
   while IFS= read -r line; do
@@ -304,3 +395,13 @@ echo -e "\n${CYAN}🧾  Résumé texte :${NC} ${BOLD}$FSUM_TXT${NC}"
 echo -e "${CYAN}🧾  Résumé Markdown :${NC} ${BOLD}$FSUM_MD${NC}"
 echo -e "${BLUE}📁 Résultats complets : ${BOLD}$DOSSIER/${NC}"
 echo -e "${GREEN}⏱️  Durée totale du scan : ${BOLD}${MINS}m ${SECS}s${NC}"
+
+# Lancement optionnel de l'analyse compagnon si demandé
+if $DO_ANALYZE; then
+  if command -v ./mon-nmap-analyze.sh >/dev/null 2>&1; then
+    echo -e "${CYAN}🔎 Analyse post-scan (heuristique vulnérabilités)...${NC}"
+    ./mon-nmap-analyze.sh --dir "$DOSSIER" || true
+  else
+    echo -e "${YELLOW}⚠ --analyze demandé mais mon-nmap-analyze.sh introuvable dans le dossier courant.${NC}"
+  fi
+fi
