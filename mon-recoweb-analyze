@@ -17,6 +17,33 @@
 
 set -euo pipefail
 
+# --- [AJOUT] Helpers version/usage compatibles template (sans rien casser) ---
+__ms_self="${BASH_SOURCE[0]:-$0}"
+if command -v readlink >/dev/null 2>&1; then
+  __ms_resolved="$(readlink -f -- "$__ms_self" 2>/dev/null || true)"
+  [ -n "$__ms_resolved" ] && __ms_self="$__ms_resolved"
+fi
+__ms_version_str(){
+  # Lit '# VERSION=' dans CE fichier, format "<basename> vX.Y.Z" (1 ligne)
+  local v b
+  v="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$__ms_self" 2>/dev/null || true)"
+  v="${v:-0.0.0}"
+  b="$(basename "$__ms_self")"
+  printf '%s v%s\n' "$b" "$v"
+}
+__ms_print_version_and_exit(){ __ms_version_str; exit 0; }
+__ms_print_help_and_exit(){
+  __ms_version_str
+  usage
+  exit 0
+}
+# Interception TÔT des options standard (avant toute I/O sur OUTDIR)
+case "${1:-}" in
+  -V|--version) __ms_print_version_and_exit ;;
+  -h|--help)    __ms_print_help_and_exit   ;;
+esac
+# ---------------------------------------------------------------------------
+
 _self="${BASH_SOURCE[0]:-$0}"
 _self_base="$(basename "$_self")"
 now_ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
@@ -34,7 +61,7 @@ OUTDIR=""
 if [[ $# -gt 0 ]]; then
   case "$1" in
     --target) OUTDIR="${2:-}"; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
+    -h|--help) usage; exit 0 ;;          # (conserve ton comportement existant)
     *) OUTDIR="$1"; shift ;;
   esac
 fi
@@ -181,7 +208,7 @@ parse_summary_lines(){
   echo "*Fichier généré automatiquement par mon-recoweb-analyze.*"
 } > "$OUT_MD"
 
-# --- Final report (affichage clair, sans \\n littéraux) ---
+# --- Final report (affichage clair, sans \n littéraux) ---
 echo "OK — analyses enregistrées dans :"
 echo "$OUTDIR"
 echo
