@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # NAME=mon-recoweb-analyse
-# VERSION=1.0.1
+# VERSION=1.0.0
 # DESCRIPTION=Analyse les sorties de mon-recoweb et produit summary.txt et summary.md
 # PRESENTATION_START
 # mon-recoweb-analyse — Agrège whatweb.txt + summary_dirs.txt + summary_files.txt
