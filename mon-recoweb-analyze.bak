@@ -51,7 +51,7 @@ now_ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 usage(){
   cat <<EOF
 Usage: $_self_base [--target <outdir>] | [<outdir>]
-Si aucun outdir n'est fourni, le script tente de trouver le dossier recoweb_* (puis mon-recoweb_* en fallback) le plus récent dans le répertoire courant.
+Si aucun outdir n'est fourni, le script tente de trouver le dossier mon-recoweb_* le plus récent dans le répertoire courant.
 Produit: <outdir>/summary.txt et <outdir>/summary.md
 EOF
 }
@@ -66,23 +66,14 @@ if [[ $# -gt 0 ]]; then
   esac
 fi
 
-# infer outdir if empty — prefer recoweb_*, fallback to mon-recoweb_* for compatibility
+# infer outdir if empty
 if [[ -z "$OUTDIR" ]]; then
-  OUTDIR="$(ls -1dt recoweb_* 2>/dev/null | head -n1 || true)"
+  OUTDIR="$(ls -1dt mon-recoweb_* 2>/dev/null | head -n1 || true)"
   if [[ -z "$OUTDIR" ]]; then
-    # fallback to legacy name
-    OUTDIR="$(ls -1dt mon-recoweb_* 2>/dev/null | head -n1 || true)"
-    if [[ -n "$OUTDIR" ]]; then
-      echo "Note : dossier legacy trouvé: ${OUTDIR}. Utilisation (compat)." >&2
-    fi
-  fi
-
-  if [[ -z "$OUTDIR" ]]; then
-    echo "Aucun dossier recoweb_* ni mon-recoweb_* trouvé dans $(pwd). Passez --target <outdir>." >&2
+    echo "Aucun dossier mon-recoweb_* trouvé dans $(pwd). Passez --target <outdir>." >&2
     exit 1
   fi
 fi
-
 
 # normalize
 OUTDIR="${OUTDIR%/}"
@@ -168,7 +159,7 @@ parse_summary_lines(){
 
 # --- Build Markdown summary ---
 {
-  echo "# Résumé recoweb — $(basename "$OUTDIR")"
+  echo "# Résumé mon-recoweb — $(basename "$OUTDIR")"
   echo
   echo "_Généré : $(now_ts)_"
   echo
