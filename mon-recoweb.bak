@@ -19,7 +19,7 @@
 # Comportement concret :
 # - filtres automatiques : le script essaie de déduire des tailles de pages d'erreur et
 #   applique -fs / -fc 404 par défaut ; tu peux désactiver via --no-filters ;
-# - sorties : tout est écrit dans un dossier dédié `recoweb_<cible>` (ex. mon-recoweb_mon-site.htb)
+# - sorties : tout est écrit dans un dossier dédié `mon-recoweb_<cible>` (ex. mon-recoweb_mon-site.htb)
 #   avec au minimum : whatweb.txt, summary_dirs.txt, summary_files.txt ;
 # - options usuelles : changer la wordlist (-w), limiter la vitesse (-p), définir les extensions (-x),
 #   forcer http/https (--http / --https) ou ajuster le nombre de threads (-T).
@@ -40,7 +40,7 @@
 # mon-recoweb (mini) — annonces vertes, whatweb d'abord, filtres ON, per-extension, résultats en évidence
 # ---------------------------------------------------------------------------------------------------
 # Utilisation : mon-recoweb <IP|HOST|URL> [-x php,html,txt] [--no-filters] [-w <wordlist>] [-T <threads>] [-p <rate>] [--http|--https]
-# Conserve uniquement : recoweb_<target>/{whatweb.txt, summary_dirs.txt, summary_files.txt}
+# Conserve uniquement : mon-recoweb_<target>/{whatweb.txt, summary_dirs.txt, summary_files.txt}
 # Dépendances : whatweb, ffuf, curl, awk, sed
 # ---------------------------------------------------------------------------------------------------
 # SIG: mon-recoweb vMini-perext-whatweb-2025-09-05-g
@@ -101,7 +101,7 @@ ${C_B}Usage:${C_RST} mon-recoweb <IP|HOST|URL> [options]
   -w <wordlist>   Wordlist (def: ${WORDLIST})
   -T <threads>    Threads ffuf (def: ${THREADS})
   -p <rate>       Tempo ffuf (ex: 50ms)
-  -o <outdir>     Dossier de sortie (def: recoweb_<target>)
+  -o <outdir>     Dossier de sortie (def: mon-recoweb_<target>)
   --http | --https
   --no-filters    Désactive -fs auto et -fc 404
   -V, --version   Afficher la version et quitter
@@ -136,7 +136,7 @@ command -v whatweb >/dev/null 2>&1 || { err "whatweb manquant"; exit 1; }
 
 # Outdir
 SAFE_TGT="$(echo "${TARGET}" | sed 's#[/:]#_#g')"
-OUTDIR="${OUTDIR:-recoweb_${SAFE_TGT}}"
+OUTDIR="${OUTDIR:-mon-recoweb_${SAFE_TGT}}"
 mkdir -p "${OUTDIR}"; ok "Dossier : ${OUTDIR}"
 
 # Détection schéma
