@@ -27,10 +27,6 @@
 # Bref résumé :
 #   Automatise une série de scans Nmap (TCP complet, agressif, CMS, UDP) pour une cible CTF donnée.
 #
-# Template minimal pour scripts mes-scripts :
-# - contient usage() et examples() en heredoc (extraits par la pipeline)
-# - contient _version_str / _print_version_and_exit pour être cohérent
-#
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -53,7 +49,7 @@ _print_version_and_exit(){ _version_str; exit 0; }
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# USAGE (heredoc) — extrait automatiquement par la pipeline
+# USAGE (heredoc)
 usage(){
   cat <<USAGE
 Usage: ${_self_base} [OPTIONS] <IP_OU_DOMAINE>
@@ -84,8 +80,6 @@ USAGE
 }
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# EXAMPLES / ASTUCES (optionnel ; extrait si présent)
 examples(){
   cat <<EXAMPLES
 # Scan complet d'une machine CTF (IP directe)
@@ -102,84 +96,89 @@ EXAMPLES
 
 # ---------------------------------------------------------------------------
 # Fonctions spécifiques à mon-nouveau-nmap
-run_scans(){
-  local target="\$1"
+run_scans() {
+  local target="$1"
   local output_dir="mes_scans"
 
   # Création du répertoire de sortie
-  mkdir -p "\$output_dir"
+  mkdir -p "$output_dir"
 
   # ===== ÉTAPE 1: SCAN COMPLET DES PORTS TCP =====
-  echo "[1/4] Scan complet des ports TCP sur \$target..."
-  nmap -Pn -p- --min-rate 5000 -T4 --max-retries 3 -oN "\$output_dir/full_tcp_scan.txt" "\$target"
+  echo "[1/4] Scan complet des ports TCP sur $target..."
+  nmap -Pn -p- --min-rate 5000 -T4 --max-retries 3 -oN "$output_dir/full_tcp_scan.txt" "$target"
 
   # ===== ÉTAPE 2: EXTRACTION DES PORTS OUVERTS =====
   local ports
-  ports=\$(grep -E '^[0-9]+/tcp.*open' "\$output_dir/full_tcp_scan.txt" | awk '{print \$1}' | cut -d'/' -f1 | tr '\n' ',' | sed 's/,\$//')
-  echo "Ports ouverts: \$ports"
+  ports=$(grep -E '^[0-9]+/tcp.*open' "$output_dir/full_tcp_scan.txt" \
+    | awk '{print $1}' \
+    | cut -d'/' -f1 \
+    | tr '\n' ',' \
+    | sed 's/,$//')
+
+  echo "Ports ouverts: $ports"
 
   # ===== ÉTAPE 3: SCAN AGRESSIF CIBLÉ (CTF-perfect LEGACY) =====
-  if [ -n "\${ports:-}" ]; then
-      echo "[2/4] Scan agressif sur les ports \$ports..."
+  if [ -n "${ports:-}" ]; then
+    echo "[2/4] Scan agressif sur les ports $ports..."
 
-      # Variante LEGACY : scripts utiles en CTF + vieux SSL/TLS
-      local vuln_scripts
-      vuln_scripts="http-vuln-*,http-shellshock,http-sql-injection,ssl-cert,ssl-heartbleed,sslv2,ssl-dh-params"
+    # Variante LEGACY : scripts utiles en CTF + vieux SSL/TLS
+    local vuln_scripts
+    vuln_scripts="http-vuln-*,http-shellshock,http-sql-injection,ssl-cert,ssl-heartbleed,sslv2,ssl-dh-params"
 
-      # Commande nmap (pour rappel dans l'en-tête)
-      local scan_cmd
-      scan_cmd="nmap -Pn -A -sV -p\"\$ports\" --script=\"\$vuln_scripts\" --script-timeout=30s -T4 \"\$target\""
+    # Commande nmap (pour rappel dans l'en-tête)
+    local scan_cmd
+    scan_cmd="nmap -Pn -A -sV -p\"$ports\" --script=\"$vuln_scripts\" --script-timeout=30s -T4 \"$target\""
 
-      # 1. Lancer le scan complet dans un fichier temporaire
-      local temp_file
-      temp_file="\$output_dir/aggressive_vuln_scan_raw.txt"
+    # 1. Lancer le scan complet dans un fichier temporaire
+    local temp_file
+    temp_file="$output_dir/aggressive_vuln_scan_raw.txt"
 
-      nmap -Pn -A -sV -p"\$ports" \
-           --script="\$vuln_scripts" \
-           --script-timeout=30s \
-           -T4 \
-           -oN "\$temp_file" \
-           "\$target"
+    nmap -Pn -A -sV -p"$ports" \
+      --script="$vuln_scripts" \
+      --script-timeout=30s \
+      -T4 \
+      -oN "$temp_file" \
+      "$target"
 
-      # 2. Créer un fichier final avec un en-tête + le résultat brut
-      {
-          echo "[+] Scan agressif orienté vulnérabilités (CTF-perfect LEGACY) pour \$target"
-          echo "[+] Commande utilisée :"
-          echo "    \$scan_cmd"
-          echo
-          cat "\$temp_file"
-      } > "\$output_dir/aggressive_vuln_scan.txt"
+    # 2. Créer un fichier final avec un en-tête + le résultat brut
+    {
+      echo "[+] Scan agressif orienté vulnérabilités (CTF-perfect LEGACY) pour $target"
+      echo "[+] Commande utilisée :"
+      echo "    $scan_cmd"
+      echo
+      cat "$temp_file"
+    } > "$output_dir/aggressive_vuln_scan.txt"
 
-      # 3. Nettoyer le fichier temporaire
-      rm -f "\$temp_file"
+    # 3. Nettoyer le fichier temporaire
+    rm -f "$temp_file"
   else
-      echo "⚠️  Aucun port TCP ouvert détecté. Scan agressif ignoré."
+    echo "⚠️  Aucun port TCP ouvert détecté. Scan agressif ignoré."
   fi
 
   # ===== ÉTAPE 4: SCAN CIBLÉ CMS =====
-  if [ -n "\${ports:-}" ]; then
-      echo "[3/4] Scan orienté CMS sur les ports \$ports..."
-      local cms_scripts
-      cms_scripts="http-wordpress-enum,http-wordpress-brute,http-wordpress-users,http-drupal-enum,http-drupal-enum-users,http-joomla-brute,http-generator,http-robots.txt,http-title,http-headers,http-methods,http-enum,http-devframework,http-cakephp-version,http-php-version,http-config-backup,http-backup-finder,http-sitemap-generator"
+  if [ -n "${ports:-}" ]; then
+    echo "[3/4] Scan orienté CMS sur les ports $ports..."
+    local cms_scripts
+    cms_scripts="http-wordpress-enum,http-wordpress-brute,http-wordpress-users,http-drupal-enum,http-drupal-enum-users,http-joomla-brute,http-generator,http-robots.txt,http-title,http-headers,http-methods,http-enum,http-devframework,http-cakephp-version,http-php-version,http-config-backup,http-backup-finder,http-sitemap-generator"
 
-      nmap -Pn -sV -p"\$ports" \
-           --script="\$cms_scripts" \
-           --script-timeout=30s \
-           -T4 \
-           -oN "\$output_dir/cms_vuln_scan.txt" \
-           "\$target"
+    nmap -Pn -sV -p"$ports" \
+      --script="$cms_scripts" \
+      --script-timeout=30s \
+      -T4 \
+      -oN "$output_dir/cms_vuln_scan.txt" \
+      "$target"
   fi
 
   # ===== ÉTAPE 5: SCAN UDP CIBLÉ =====
   echo "[4/4] Scan UDP (top 20 ports)..."
-  nmap -n -Pn -sU --top-ports 20 -T4 -oN "\$output_dir/udp_vuln_scan.txt" "\$target"
+  nmap -n -Pn -sU --top-ports 20 -T4 -oN "$output_dir/udp_vuln_scan.txt" "$target"
 
-  echo "✅ Scans terminés. Résultats du scan agressif dans \$output_dir/aggressive_vuln_scan.txt"
+  echo "✅ Scans terminés. Résultats du scan agressif dans $output_dir/aggressive_vuln_scan.txt"
 }
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Parsing minimal CLI (classique)
+# Parsing minimal CLI
 DEBUG=false
 
 # Aides rapides
@@ -192,7 +191,6 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   exit 0
 fi
 
-# Boucle d'options basique (à compléter selon le script)
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --debug) DEBUG=true; shift ;;
@@ -204,7 +202,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --) shift; break ;;
     -*) echo "Unknown option: $1" >&2; usage; exit 2 ;;
-    *) break ;;  # positions
+    *) break ;;
   esac
 done
 # ---------------------------------------------------------------------------
@@ -220,12 +218,9 @@ _main(){
   fi
 
   local target="$1"
-
   run_scans "$target"
-  return 0
 }
 
-# Exécuter _main si appelé directement
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   _main "$@"
 fi
