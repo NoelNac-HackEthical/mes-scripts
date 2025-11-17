@@ -79,7 +79,7 @@ jobs:
             git ls-files \
               | grep -v -E '^(.github/|templates/|tools/|README|LICENSE)' \
               | grep -v -E '\.sha256$' \
-              | grep -v -E '\.bak$' \          # ← exclut les backups
+              | grep -v -E '\.bak$' \
               | while read -r f; do
                   [ -f "$f" ] || continue
                   head -n1 "$f" | grep -q '^#!' || continue
@@ -301,7 +301,7 @@ jobs:
           # Scripts présents (sans .sha256), triés
           mapfile -t ALL_SCRIPTS < <(echo "$ASSETS_JSON" | jq -r '.[].name' \
             | grep -v '\.sha256$' \
-            | grep -v '\.bak$' \              # ← exclut les backups
+            | grep -v '\.bak$' \
             | sort)
 
           # 2) Déterminer quels scripts envoyer à hugo (selon SCOPE)
