@@ -34,9 +34,9 @@
 # - adapter threads/timeout selon l'environnement pour éviter les blocages ou détections.
 #
 # Exemples :
-#   ./mon-subdomains mon-site.htb --fast
-#   ./mon-subdomains mon-site.htb --medium --strict --save-hosts
-#   ./mon-subdomains mon-site.htb --custom /chemin/ma-liste.txt --https --dry-run-hosts
+#   mon-subdomains mon-site.htb --fast
+#   mon-subdomains mon-site.htb --medium --strict --save-hosts
+#   mon-subdomains mon-site.htb --custom /chemin/ma-liste.txt --https --dry-run-hosts
 #
 # Présentation concise : outil de vhost-fuzzing robuste, conçu pour produire une liste
 # de sous-domaines exploitables et facilement vérifiables pour inclusion dans un writeup.
@@ -46,9 +46,7 @@ set -euo pipefail
 LC_ALL=C
 
 # --- version helpers ---
-# Usage: mettre ce bloc en tête du script. Appel: --version déclenche _print_version_and_exit
 _self_path="${BASH_SOURCE[0]:-$0}"
-# si possible résoudre les symlinks pour afficher le nom réel du fichier
 if command -v readlink >/dev/null 2>&1; then
   _resolved="$(readlink -f -- "$_self_path" 2>/dev/null || true)"
   [ -n "$_resolved" ] && _self_path="$_resolved"
@@ -56,8 +54,6 @@ fi
 _self_base="$(basename "$_self_path")"
 
 _version_str() {
-  # récupère la première ligne '# VERSION=...' (tolère espaces autour de '=' et CRLF)
-  # awk lit le fichier et renvoie la partie droite de '=' ; gsub retire CR si présent
   local v
   v="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$_self_path" 2>/dev/null || true)"
   [ -n "$v" ] || v="0.0.0"
@@ -65,16 +61,8 @@ _version_str() {
 }
 
 _print_version_and_exit() { _version_str; exit 0; }
-# -----------------------
 
-
-# mon-subdomains — v0.3
-# - VHOST fuzzing via ffuf
-# - Master 5000 unique (FAST=1000 / MEDIUM=2000 / LARGE=5000 via head)
-# - Baseline anti-wildcard: -fs (size) + -fw (words)
-# - Parse robuste sortie console ffuf (lignes "collées")
-# - Options: --strict (mc=200,401,403), --codes, --save-hosts, --dry-run-hosts, --https, --debug
-
+# --- UI helpers ---
 GREEN="\e[32m"; BLUE="\e[34m"; YELLOW="\e[33m"; RESET="\e[0m"
 ok(){ echo -e "${GREEN}[✓]${RESET} $*"; }
 info(){ echo -e "${BLUE}[*]${RESET} $*"; }
@@ -103,27 +91,28 @@ Options :
   --debug           Affiche la commande ffuf et garde la sortie brute
   -V, --version     Afficher la version et quitter
   -h, --help        Aide
-
-Exemples :
-  mon-subdomains site.htb --fast
-  mon-subdomains permx.htb --fast --strict
-  mon-subdomains target.htb --medium --codes 200,403 --save-hosts
 USAGE
 }
 
-# ---------- Parse ----------
-# Pré-check : si le premier argument est -V/--version, afficher et quitter (évite de le prendre comme <domaine>)
-if [[ "${1-}" == "-V" || "${1-}" == "--version" ]]; then _print_version_and_exit; fi
+# ---------- Version / aide rapides ----------
+if [[ "${1-}" == "-V" || "${1-}" == "--version" ]]; then
+  _print_version_and_exit
+fi
 
+if [[ "${1-}" == "-h" || "${1-}" == "--help" || -z "${1-}" ]]; then
+  usage
+  exit 0
+fi
+
+# ---------- Arguments de base ----------
 DOMAIN="${1-}"
-if [[ -z "${DOMAIN}" || "${DOMAIN}" == "-h" || "${DOMAIN}" == "--help" ]]; then usage; exit 0; fi
 shift || true
 
 MODE="fast"; WL=""; THREADS=50; TIMEOUT=8
 FORCE_HTTPS=0; DEBUG=0; SAVE_HOSTS=0; DRY_RUN_HOSTS=0
 MASTER="/usr/share/wordlists/htb-dns-vh-5000.txt"
 STRICT=0
-MATCH_CODES="all"   # par défaut
+MATCH_CODES="all"
 
 while (( "$#" )); do
   case "$1" in
@@ -137,7 +126,7 @@ while (( "$#" )); do
     --https)     FORCE_HTTPS=1; shift;;
     --strict)    STRICT=1; shift;;
     --codes)     MATCH_CODES="${2-}"; shift 2;;
-    --save-hosts) SAVE_HOSTS=1; shift;;
+    --save-hosts)    SAVE_HOSTS=1; shift;;
     --dry-run-hosts) DRY_RUN_HOSTS=1; shift;;
     --debug)     DEBUG=1; shift;;
     -V|--version) _print_version_and_exit ;;
@@ -146,34 +135,79 @@ while (( "$#" )); do
   esac
 done
 
-# Si --strict demandé et pas de --codes explicite, applique les codes stricts
 if [[ $STRICT -eq 1 && "$MATCH_CODES" == "all" ]]; then
   MATCH_CODES="200,401,403"
 fi
 
-# ---------- Outils ----------
 command -v ffuf >/dev/null || { warn "ffuf manquant"; exit 1; }
 command -v curl >/dev/null || { warn "curl manquant"; exit 1; }
 
-# ---------- Dossier & WL effective ----------
-OUTDIR="mon-subdomains_${DOMAIN}"
-mkdir -p "$OUTDIR"
-ok "Dossier : $OUTDIR"
-ok "Domaine : $DOMAIN"
+ok "Domaine : ${DOMAIN}"
 
+# ---------- Fichier global mes_scans/scan_vhosts.txt ----------
+MES_SCANS_DIR="mes_scans"
+mkdir -p "$MES_SCANS_DIR"
+SCAN_FILE="${MES_SCANS_DIR}/scan_vhosts.txt"
+ok "Fichier de résultats : ${SCAN_FILE}"
+
+# ---------- Wordlist effective (avec génération interactive) ----------
+WL_EFFECTIVE=""
 if [[ "$MODE" == "custom" ]]; then
-  [[ -f "$WL" ]] || { warn "Wordlist custom introuvable: $WL"; exit 1; }
-  ok "Mode : CUSTOM  (wordlist: $WL)"
+  [[ -f "$WL" ]] || { warn "Wordlist custom introuvable : $WL"; exit 1; }
+  WL_EFFECTIVE="$WL"
+  ok "Mode : CUSTOM (wordlist: $WL_EFFECTIVE)"
 else
-  [[ -f "$MASTER" ]] || { warn "Master introuvable: $MASTER"; exit 1; }
+  if [[ ! -f "$MASTER" ]]; then
+    if [[ "$MASTER" == "/usr/share/wordlists/htb-dns-vh-5000.txt" ]]; then
+      warn "Wordlist HTB (5000 vhosts) introuvable : $MASTER"
+      echo
+      echo "Cette wordlist est la 'master' utilisée par défaut pour mon-subdomains."
+      echo "Elle contient ~5000 noms de sous-domaines/vhosts typiques des machines HTB"
+      echo "(admin, api, dev, staging, etc.) et sert de base aux modes --fast/--medium/--large."
+      echo
+
+      if command -v make-htb-wordlist >/dev/null 2>&1; then
+        read -r -p "Générer la wordlist maintenant avec 'make-htb-wordlist' ? [o/N] " rep
+        case "$rep" in
+          [oOyY])
+            info "Lancement de make-htb-wordlist..."
+            if ! make-htb-wordlist; then
+              warn "Échec de make-htb-wordlist. Corrige le problème puis relance mon-subdomains."
+              exit 1
+            fi
+            if [[ ! -f "$MASTER" ]]; then
+              warn "make-htb-wordlist exécuté, mais $MASTER est toujours absent."
+              echo "Vérifie la configuration de make-htb-wordlist (chemin de sortie, etc.)."
+              exit 1
+            fi
+            ;;
+          *)
+            warn "Wordlist requise. Exécute 'make-htb-wordlist' manuellement puis relance mon-subdomains."
+            exit 1
+            ;;
+        esac
+      else
+        warn "La commande 'make-htb-wordlist' n'est pas disponible dans le PATH."
+        echo "Installe ou rends disponible ton script générateur de wordlist HTB (make-htb-wordlist),"
+        echo "puis crée :"
+        echo "  $MASTER"
+        echo "Ensuite, relance mon-subdomains."
+        exit 1
+      fi
+    else
+      warn "Wordlist master introuvable : $MASTER"
+      exit 1
+    fi
+  fi
+
   case "$MODE" in
     fast)   N=1000;;
     medium) N=2000;;
     large)  N=5000;;
   esac
-  WL="$OUTDIR/effective_wordlist.txt"
-  head -n "$N" "$MASTER" > "$WL"
-  ok "Mode : $(echo "$MODE" | tr a-z A-Z)  (wordlist: $WL)"
+  WL_EFFECTIVE="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_wl.XXXXXX")"
+  head -n "$N" "$MASTER" > "$WL_EFFECTIVE"
+  ok "Mode : $(echo "$MODE" | tr a-z A-Z)  (wordlist: $WL_EFFECTIVE)"
   info "Master : $MASTER"
 fi
 
@@ -185,30 +219,51 @@ TARGET_IP="$(getent hosts "$DOMAIN" | awk '{print $1}' | head -n1 || true)"
 # ---------- HTTP/HTTPS ----------
 SCHEME="http"; PORT=80; CURL_TLS=""; FFUF_TLS=""
 probe(){ curl -sk --max-time "$TIMEOUT" -o /dev/null -w "%{http_code}" "$1" || true; }
+
 if [[ $FORCE_HTTPS -eq 1 ]]; then
   SCHEME="https"; PORT=443; CURL_TLS="--insecure"; FFUF_TLS="-k"
 else
-  if [[ "$(probe http://${DOMAIN}:80/)" == "000" && "$(probe https://${DOMAIN}:443/)" != "000" ]]; then
-    SCHEME="https"; PORT=443; CURL_TLS="--insecure"; FFUF_TLS="-k"
+  # auto: si HTTP ne répond pas mais HTTPS oui, on bascule
+  if [[ -n "${TARGET_IP-}" ]]; then
+    if [[ "$(probe http://${TARGET_IP}:80/)" == "000" && "$(probe https://${TARGET_IP}:443/)" != "000" ]]; then
+      SCHEME="https"; PORT=443; CURL_TLS="--insecure"; FFUF_TLS="-k"
+    fi
   fi
 fi
 ok "Schéma/Port : ${SCHEME}/${PORT}"
 
-# ---------- Fichiers ----------
-VHOST_TXT="$OUTDIR/vhost_found.txt"
-SUMMARY_TXT="$OUTDIR/summary.txt"
-FFUF_RAW="$OUTDIR/ffuf_vhosts.txt"
-: > "$VHOST_TXT"; : > "$SUMMARY_TXT"
+# ---------- Fichiers temporaires ----------
+FFUF_RAW="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_ffuf_raw.XXXXXX")"
+VHOST_TXT="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_vhosts.XXXXXX")"
+: > "$VHOST_TXT"
 
-# ---------- Échantillon baseline ----------
-BASE_HOST="$(tr -dc 'a-z0-9' </dev/urandom | head -c 10 || echo rnd)"
-BASE_URL="${SCHEME}://${TARGET_IP}:${PORT}/"
-BASE_RESP="$(curl -sk ${CURL_TLS:-} -H "Host: ${BASE_HOST}.${DOMAIN}" --max-time "$TIMEOUT" -o /dev/null -w "%{http_code} %{size_download}" "$BASE_URL" 2>/dev/null || true)"
-BASE_CODE="${BASE_RESP%% *}"; BASE_CODE="${BASE_CODE:-000}"
-BASE_SIZE="${BASE_RESP##* }"; BASE_SIZE="${BASE_SIZE:-0}"
-BASE_WORDS="$(curl -sk ${CURL_TLS:-} -H "Host: ${BASE_HOST}.${DOMAIN}" --max-time "$TIMEOUT" "$BASE_URL" 2>/dev/null | wc -w | tr -d ' ' || echo 0)"
-BASE_WORDS="${BASE_WORDS:-0}"
-info "Baseline: code=${BASE_CODE} size=${BASE_SIZE} words=${BASE_WORDS} (Host=${BASE_HOST}.${DOMAIN})"
+# ---------- Baseline + test de port ----------
+BASE_CODE=""; BASE_SIZE=""; BASE_WORDS=""
+CAN_FUZZ=1
+
+if [[ -z "${TARGET_IP-}" ]]; then
+  warn "IP inconnue → pas de vhost fuzzing (ajoute ${DOMAIN} dans /etc/hosts si nécessaire)."
+  CAN_FUZZ=0
+else
+  # test TCP brut pour éviter 1000 erreurs ffuf sur port fermé
+  if ! timeout 3 bash -c "echo >/dev/tcp/${TARGET_IP}/${PORT}" 2>/dev/null; then
+    warn "Le port ${PORT} (${SCHEME}) est fermé ou filtré → pas de vhost fuzzing."
+    CAN_FUZZ=0
+  fi
+fi
+
+if [[ $CAN_FUZZ -eq 1 ]]; then
+  BASE_HOST="$(tr -dc 'a-z0-9' </dev/urandom | head -c 10 || echo rnd)"
+  BASE_URL="${SCHEME}://${TARGET_IP}:${PORT}/"
+  BASE_RESP="$(curl -sk ${CURL_TLS:-} -H "Host: ${BASE_HOST}.${DOMAIN}" --max-time "$TIMEOUT" \
+                 -o /dev/null -w "%{http_code} %{size_download}" "$BASE_URL" 2>/dev/null || true)"
+  BASE_CODE="${BASE_RESP%% *}"; BASE_CODE="${BASE_CODE:-000}"
+  BASE_SIZE="${BASE_RESP##* }"; BASE_SIZE="${BASE_SIZE:-0}"
+  BASE_WORDS="$(curl -sk ${CURL_TLS:-} -H "Host: ${BASE_HOST}.${DOMAIN}" --max-time "$TIMEOUT" \
+                 "$BASE_URL" 2>/dev/null | wc -w | tr -d ' ' || echo 0)"
+  BASE_WORDS="${BASE_WORDS:-0}"
+  info "Baseline: code=${BASE_CODE} size=${BASE_SIZE} words=${BASE_WORDS} (Host=${BASE_HOST}.${DOMAIN})"
+fi
 
 # ---------- Parseur robuste (console ffuf) ----------
 extract_tokens_file() {
@@ -230,39 +285,46 @@ extract_tokens_file() {
 }
 
 # ---------- VHOST fuzzing ----------
-if [[ -n "${TARGET_IP-}" ]]; then
+VHOST_COUNT=0
+
+if [[ $CAN_FUZZ -eq 1 ]]; then
   info "VHOST fuzzing via ffuf ..."
+
   FFUF_FILTER=()
-  [[ "${BASE_SIZE}"  != "0" ]] && FFUF_FILTER+=(-fs "$BASE_SIZE")
-  [[ "${BASE_WORDS}" != "0" ]] && FFUF_FILTER+=(-fw "$BASE_WORDS")
+  if [[ "$BASE_CODE" != "000" ]]; then
+    [[ "$BASE_SIZE"  != "0" && -n "$BASE_SIZE" ]]  && FFUF_FILTER+=(-fs "$BASE_SIZE")
+    [[ "$BASE_WORDS" != "0" && -n "$BASE_WORDS" ]] && FFUF_FILTER+=(-fw "$BASE_WORDS")
+  else
+    info "Baseline invalide (code=000) → pas de filtre -fs/-fw appliqué à ffuf."
+  fi
 
   CMD=(ffuf -u "${SCHEME}://${TARGET_IP}:${PORT}/" $FFUF_TLS \
             -H "Host: FUZZ.${DOMAIN}" \
-            -w "$WL" -t "$THREADS" \
+            -w "$WL_EFFECTIVE" -t "$THREADS" \
             -mc "${MATCH_CODES}" "${FFUF_FILTER[@]}")
 
   [[ $DEBUG -eq 1 ]] && echo "[*] CMD: ${CMD[*]}"
 
   "${CMD[@]}" > "$FFUF_RAW" 2>&1 || true
   extract_tokens_file "$FFUF_RAW" > "$VHOST_TXT" || true
-else
-  warn "Pas d'IP → ajoute l’IP de $DOMAIN dans /etc/hosts pour que le vhost fuzzing fonctionne."
-fi
 
-VHOST_COUNT="$(grep -c '.' "$VHOST_TXT" || true)"
-if [[ "$VHOST_COUNT" -gt 0 ]]; then
-  ok "VHOST: ${VHOST_COUNT} hôtes."
-  echo -e "${GREEN}[✓]${RESET} VHOST trouvés :"
-  sed 's/^/   • /' "$VHOST_TXT"
-else
-  warn "VHOST: rien trouvé."
-  [[ -f "$FFUF_RAW" ]] && { echo "[i] Extrait ffuf:"; sed -n '1,120p' "$FFUF_RAW"; }
+  VHOST_COUNT="$(grep -c '.' "$VHOST_TXT" || true)"
+  if [[ "$VHOST_COUNT" -gt 0 ]]; then
+    ok "VHOST: ${VHOST_COUNT} hôtes."
+    echo -e "${GREEN}[✓]${RESET} VHOST trouvés :"
+    sed 's/^/   • /' "$VHOST_TXT"
+  else
+    warn "VHOST: rien trouvé."
+    if grep -q "Errors: " "$FFUF_RAW" 2>/dev/null; then
+      info "ffuf a rencontré des erreurs (voir fichier brut pour le détail)."
+    fi
+  fi
 fi
 
 # ---------- /etc/hosts ----------
 if [[ $SAVE_HOSTS -eq 1 || $DRY_RUN_HOSTS -eq 1 ]]; then
   if [[ "$VHOST_COUNT" -eq 0 ]]; then
-    warn "Pas de vhost trouvé → rien à faire."
+    warn "Pas de vhost trouvé → rien à faire pour /etc/hosts."
   elif [[ -z "${TARGET_IP-}" ]]; then
     warn "IP inconnue → impossible d’écrire dans /etc/hosts."
   else
@@ -283,30 +345,56 @@ if [[ $SAVE_HOSTS -eq 1 || $DRY_RUN_HOSTS -eq 1 ]]; then
             ((ADDED++))
           fi
         done < "$VHOST_TXT"
-        [[ $ADDED -gt 0 ]] && ok "--save-hosts : ${ADDED} entrées ajoutées" || info "Aucun ajout (déjà présent)"
+        [[ $ADDED -gt 0 ]] && ok "--save-hosts : ${ADDED} entrées ajoutées" || info "Aucun ajout (déjà présent)."
       else
-        warn "Backup /etc/hosts échoué → abandon de --save-hosts"
+        warn "Backup /etc/hosts échoué → abandon de --save-hosts."
       fi
     fi
   fi
 fi
 
-# ---------- Résumé ----------
+# ---------- Mise à jour du fichier global mes_scans/scan_vhosts.txt ----------
+BLOCK_START="=== mon-subdomains ${DOMAIN} START ==="
+BLOCK_END="=== mon-subdomains ${DOMAIN} END ==="
+
+# Supprimer un éventuel bloc existant pour ce domaine
+if [[ -f "$SCAN_FILE" ]]; then
+  sed -e "/^=== mon-subdomains ${DOMAIN} START ===\$/,/^=== mon-subdomains ${DOMAIN} END ===\$/d" \
+    "$SCAN_FILE" > "${SCAN_FILE}.tmp" || true
+  mv "${SCAN_FILE}.tmp" "$SCAN_FILE"
+fi
+
 {
-  echo "=== mon-subdomains (${DOMAIN}) — v0.3 ==="
-  echo "Date: $(date '+%F %T')"
-  [[ -n "${TARGET_IP-}" ]] && echo "IP: ${TARGET_IP}"
-  echo "Schéma/Port: ${SCHEME}/${PORT}"
-  echo "Wordlist effective: ${WL}"
-  [[ "$MODE" != "custom" ]] && echo "Master: ${MASTER}"
-  echo "Codes: ${MATCH_CODES}  (strict=${STRICT})"
-  echo "Baseline: size=${BASE_SIZE} words=${BASE_WORDS} (code=${BASE_CODE})"
+  echo "$BLOCK_START"
+  echo "Script       : mon-subdomains"
+  echo "Version      : $(_version_str)"
+  echo "Date         : $(date '+%F %T')"
+  echo "Domaine      : ${DOMAIN}"
+  [[ -n "${TARGET_IP-}" ]] && echo "IP           : ${TARGET_IP}" || echo "IP           : (non détectée)"
+  echo "Schéma/Port  : ${SCHEME}/${PORT}"
+  echo "Mode         : ${MODE}"
+  echo "Wordlist eff.: ${WL_EFFECTIVE}"
+  echo "Master       : ${MASTER}"
+  echo "Codes        : ${MATCH_CODES}  (strict=${STRICT})"
+  if [[ -n "$BASE_CODE" ]]; then
+    echo "Baseline     : code=${BASE_CODE} size=${BASE_SIZE} words=${BASE_WORDS}"
+  else
+    echo "Baseline     : non effectuée (port fermé ou IP inconnue)"
+  fi
   echo
   echo "VHOST (${VHOST_COUNT})"
-  if [[ -s "$VHOST_TXT" ]]; then sed 's/^/  - /' "$VHOST_TXT"; else echo "  - (aucun)"; fi
+  if [[ -s "$VHOST_TXT" ]]; then
+    sed 's/^/  - /' "$VHOST_TXT"
+  else
+    echo "  - (aucun)"
+  fi
   echo
-  echo "--- Debug files ---"
-  echo "ffuf raw : $FFUF_RAW"
-} > "$SUMMARY_TXT"
+  echo "--- Debug ---"
+  echo "ffuf raw     : ${FFUF_RAW}"
+  echo "$BLOCK_END"
+  echo
+} >> "$SCAN_FILE"
+
+ok "Bloc mis à jour dans ${SCAN_FILE} pour le domaine ${DOMAIN}"
 
 exit 0
