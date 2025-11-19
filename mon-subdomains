@@ -1,6 +1,6 @@
 #!/bin/bash
 # NAME=mon-subdomains
-# VERSION=1.0.0
+# VERSION=2.0.0
 # DESCRIPTION=Découverte de sous-domaines par vhost-fuzzing (ffuf) avec baseline anti-wildcard, modes fast/medium/large et options d'ajout dans /etc/hosts.
 # PRESENTATION_START
 # **mon-subdomains — Découverte de vhosts pour CTF / pentest**
@@ -10,36 +10,8 @@
 # valides (ex. api.mon-site.htb, admin.mon-site.htb). La recherche se fait soit à partir
 # d'une "master" orientée HTB soit via une wordlist custom.
 #
-# Principe de fonctionnement et sécurité :
-# - sampling master : le script propose trois modes (fast/medium/large) qui utilisent
-#   respectivement les 1000 / 2000 / 5000 premières lignes de la master (head) — rapide
-#   vs exhaustif selon le besoin ;
-# - anti-wildcard / baseline : il établit une baseline (code HTTP, taille, nombre de mots)
-#   via un Host aléatoire pour filtrer les faux positifs (wildcards) en ajoutant -fs / -fw ;
-# - sauvegarde / dry-run : l'option --save-hosts tente d'ajouter les hôtes trouvés dans
-#   /etc/hosts (création d'un backup) ; --dry-run-hosts affiche ce qui serait ajouté
-#   sans écrire (utile et conseillé avant toute modification système).
-#
-# Options pratiques et recommandations :
-# - par défaut la master est : /usr/share/wordlists/htb-dns-vh-5000.txt (modifiable via --master) ;
-# - mode FAST/MEDIUM/LARGE : choisir FAST en reconnaissance rapide, LARGE uniquement en lab ;
-# - --strict / --codes : pour restreindre les codes HTTP retenus (ex. 200,401,403) et diminuer le bruit ;
-# - --https / auto-detection : le script détecte automatiquement http/https mais on peut forcer ;
-# - pour que le fuzzing vhost fonctionne, il faut que l'IP cible soit résolue — ajoute l'entrée
-#   dans /etc/hosts si nécessaire (ou utiliser --save-hosts après vérification).
-#
-# Règles d'or :
-# - commencer en fast, valider manuellement les hôtes trouvés, puis relancer medium/large en lab ;
-# - ne pas activer --save-hosts sans vérification (préférer --dry-run-hosts pour contrôler) ;
-# - adapter threads/timeout selon l'environnement pour éviter les blocages ou détections.
-#
-# Exemples :
-#   mon-subdomains mon-site.htb --fast
-#   mon-subdomains mon-site.htb --medium --strict --save-hosts
-#   mon-subdomains mon-site.htb --custom /chemin/ma-liste.txt --https --dry-run-hosts
-#
-# Présentation concise : outil de vhost-fuzzing robuste, conçu pour produire une liste
-# de sous-domaines exploitables et facilement vérifiables pour inclusion dans un writeup.
+# Il s'appuie sur un scan Nmap complet (full_tcp_scan.txt) pour détecter tous les ports
+# HTTP/HTTPS ouverts et lance le vhost fuzzing sur chacun d'eux.
 # PRESENTATION_END
 
 set -euo pipefail
@@ -83,7 +55,6 @@ Options :
   --master FILE     Chemin de la master 5000 (défaut: /usr/share/wordlists/htb-dns-vh-5000.txt)
   -t N              Threads ffuf (défaut: 50)
   --timeout S       Timeout curl (défaut: 8)
-  --https           Forcer HTTPS (sinon auto)
   --strict          Codes restreints utiles (équiv. à --codes 200,401,403)
   --codes LIST      Liste pour ffuf -mc (ex: "200,401,403"; prend le dessus sur --strict)
   --save-hosts      Ajoute les vhosts trouvés dans /etc/hosts (backup, sans doublon)
@@ -94,7 +65,83 @@ Options :
 USAGE
 }
 
-# ---------- Version / aide rapides ----------
+# ---------- Fonctions auxiliaires ----------
+
+ensure_full_tcp_scan() {
+  local nmap_file="${MES_SCANS_DIR}/full_tcp_scan.txt"
+  if [[ -f "$nmap_file" ]]; then
+    info "Scan Nmap existant détecté : $nmap_file"
+    return 0
+  fi
+
+  info "Aucun full_tcp_scan.txt trouvé → lancement d'un scan Nmap TCP complet sur ${DOMAIN}."
+  if ! command -v nmap >/dev/null 2>&1; then
+    warn "nmap est manquant, impossible de créer ${nmap_file} automatiquement."
+    return 1
+  fi
+
+  # Scan complet TCP avec détection de services
+  if ! nmap -Pn -sV -p- --min-rate 5000 -T4 --max-retries 3 -oN "$nmap_file" "$DOMAIN"; then
+    warn "Échec du scan Nmap automatique. Vérifie la connectivité vers ${DOMAIN}."
+    return 1
+  fi
+  ok "Scan Nmap enregistré dans $nmap_file"
+  return 0
+}
+
+# Retourne sur stdout des lignes "port:scheme" (ex: "80:http", "443:https")
+detect_web_endpoints_from_nmap() {
+  local nmap_file="${MES_SCANS_DIR}/full_tcp_scan.txt"
+  [[ -f "$nmap_file" ]] || return 1
+
+  local endpoints=()
+  local line port svc rest text scheme
+
+  while IFS= read -r line; do
+    # Exemple de ligne Nmap : "80/tcp open  http    Apache httpd 2.4.41"
+    if [[ "$line" =~ ^([0-9]+)/tcp[[:space:]]+open[[:space:]]+([^[:space:]]+)[[:space:]]*(.*)$ ]]; then
+      port="${BASH_REMATCH[1]}"
+      svc="${BASH_REMATCH[2]}"
+      rest="${BASH_REMATCH[3]}"
+      text="${svc} ${rest}"
+      if grep -qi 'http' <<<"$text"; then
+        scheme="http"
+        if grep -qiE 'https|ssl/http|tls' <<<"$text"; then
+          scheme="https"
+        fi
+        endpoints+=("${port}:${scheme}")
+      fi
+    fi
+  done < "$nmap_file"
+
+  if ((${#endpoints[@]} == 0)); then
+    return 1
+  fi
+
+  printf '%s\n' "${endpoints[@]}" | sort -n | uniq
+  return 0
+}
+
+# Parseur robuste ffuf → vhosts
+extract_tokens_file() {
+  local f="$1"
+  awk -v d="$DOMAIN" '
+    {
+      line=$0
+      gsub(/\r/,"",line)
+      gsub(/\033\[[0-9;]*[A-Za-z]/,"",line)
+      if (index(line,"[Status:")>0) {
+        n = split(line, a, /\[Status:/)
+        left = a[1]
+        if (match(left, /([a-z0-9-]{1,63})[[:space:]]*$/, m)) {
+          print m[1] "." d
+        }
+      }
+    }
+  ' "$f" | sort -u
+}
+
+# ---------- Version / aide ----------
 if [[ "${1-}" == "-V" || "${1-}" == "--version" ]]; then
   _print_version_and_exit
 fi
@@ -104,15 +151,17 @@ if [[ "${1-}" == "-h" || "${1-}" == "--help" || -z "${1-}" ]]; then
   exit 0
 fi
 
-# ---------- Arguments de base ----------
+# ---------- Arguments ----------
 DOMAIN="${1-}"
 shift || true
 
 MODE="fast"; WL=""; THREADS=50; TIMEOUT=8
-FORCE_HTTPS=0; DEBUG=0; SAVE_HOSTS=0; DRY_RUN_HOSTS=0
 MASTER="/usr/share/wordlists/htb-dns-vh-5000.txt"
 STRICT=0
 MATCH_CODES="all"
+DEBUG=0
+SAVE_HOSTS=0
+DRY_RUN_HOSTS=0
 
 while (( "$#" )); do
   case "$1" in
@@ -123,7 +172,6 @@ while (( "$#" )); do
     --master)    MASTER="${2-}"; shift 2;;
     -t)          THREADS="${2-}"; shift 2;;
     --timeout)   TIMEOUT="${2-}"; shift 2;;
-    --https)     FORCE_HTTPS=1; shift;;
     --strict)    STRICT=1; shift;;
     --codes)     MATCH_CODES="${2-}"; shift 2;;
     --save-hosts)    SAVE_HOSTS=1; shift;;
@@ -144,13 +192,13 @@ command -v curl >/dev/null || { warn "curl manquant"; exit 1; }
 
 ok "Domaine : ${DOMAIN}"
 
-# ---------- Fichier global mes_scans/scan_vhosts.txt ----------
+# ---------- Dossier mes_scans ----------
 MES_SCANS_DIR="mes_scans"
 mkdir -p "$MES_SCANS_DIR"
 SCAN_FILE="${MES_SCANS_DIR}/scan_vhosts.txt"
 ok "Fichier de résultats : ${SCAN_FILE}"
 
-# ---------- Wordlist effective (avec génération interactive) ----------
+# ---------- Wordlist effective ----------
 WL_EFFECTIVE=""
 if [[ "$MODE" == "custom" ]]; then
   [[ -f "$WL" ]] || { warn "Wordlist custom introuvable : $WL"; exit 1; }
@@ -211,119 +259,124 @@ else
   info "Master : $MASTER"
 fi
 
-# ---------- Résolution IP ----------
+# ---------- Résolution IP (pour curl / ffuf) ----------
 TARGET_IP="$(getent hosts "$DOMAIN" | awk '{print $1}' | head -n1 || true)"
 [[ -z "$TARGET_IP" ]] && TARGET_IP="$(dig +short A "$DOMAIN" 2>/dev/null | head -n1 || true)"
-[[ -n "$TARGET_IP" ]] && ok "IP détectée : $TARGET_IP" || warn "IP non détectée"
+[[ -n "$TARGET_IP" ]] && ok "IP détectée : $TARGET_IP" || warn "IP non détectée (curl utilisera le nom de domaine)"
 
-# ---------- HTTP/HTTPS ----------
-SCHEME="http"; PORT=80; CURL_TLS=""; FFUF_TLS=""
-probe(){ curl -sk --max-time "$TIMEOUT" -o /dev/null -w "%{http_code}" "$1" || true; }
+# ---------- full_tcp_scan.txt (Nmap) ----------
+if ! ensure_full_tcp_scan; then
+  warn "Impossible de garantir un full_tcp_scan.txt → pas de vhost fuzzing."
+fi
 
-if [[ $FORCE_HTTPS -eq 1 ]]; then
-  SCHEME="https"; PORT=443; CURL_TLS="--insecure"; FFUF_TLS="-k"
-else
-  # auto: si HTTP ne répond pas mais HTTPS oui, on bascule
-  if [[ -n "${TARGET_IP-}" ]]; then
-    if [[ "$(probe http://${TARGET_IP}:80/)" == "000" && "$(probe https://${TARGET_IP}:443/)" != "000" ]]; then
-      SCHEME="https"; PORT=443; CURL_TLS="--insecure"; FFUF_TLS="-k"
+WEB_ENDPOINTS_RAW="$(detect_web_endpoints_from_nmap || true)"
+WEB_ENDPOINTS=()
+if [[ -n "$WEB_ENDPOINTS_RAW" ]]; then
+  mapfile -t WEB_ENDPOINTS <<< "$WEB_ENDPOINTS_RAW"
+fi
+
+if ((${#WEB_ENDPOINTS[@]} == 0)); then
+  warn "Aucun service HTTP/HTTPS détecté dans ${MES_SCANS_DIR}/full_tcp_scan.txt pour ${DOMAIN}."
+  warn "Impossible d'effectuer un vhost fuzzing."
+fi
+
+# ---------- VHOST fuzzing multi-ports ----------
+DETAILS_TXT="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_details.XXXXXX")"
+UNION_VHOSTS="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_union.XXXXXX")"
+: > "$DETAILS_TXT"
+: > "$UNION_VHOSTS"
+VHOST_COUNT_TOTAL=0
+
+if ((${#WEB_ENDPOINTS[@]} > 0)) && [[ -n "${TARGET_IP-}" ]]; then
+  info "Ports HTTP/HTTPS détectés : ${WEB_ENDPOINTS[*]}"
+
+  for ep in "${WEB_ENDPOINTS[@]}"; do
+    PORT="${ep%%:*}"
+    SCHEME="${ep##*:}"
+    CURL_TLS=""; FFUF_TLS=""
+
+    if [[ "$SCHEME" == "https" ]]; then
+      CURL_TLS="--insecure"
+      FFUF_TLS="-k"
     fi
-  fi
-fi
-ok "Schéma/Port : ${SCHEME}/${PORT}"
 
-# ---------- Fichiers temporaires ----------
-FFUF_RAW="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_ffuf_raw.XXXXXX")"
-VHOST_TXT="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_vhosts.XXXXXX")"
-: > "$VHOST_TXT"
+    info "Port ${PORT} (${SCHEME}) : baseline…"
+    BASE_HOST="$(tr -dc 'a-z0-9' </dev/urandom | head -c 10 || echo rnd)"
+    BASE_URL="${SCHEME}://${TARGET_IP}:${PORT}/"
+    BASE_RESP="$(curl -sk ${CURL_TLS:-} -H "Host: ${BASE_HOST}.${DOMAIN}" --max-time "$TIMEOUT" \
+                   -o /dev/null -w "%{http_code} %{size_download}" "$BASE_URL" 2>/dev/null || true)"
+    BASE_CODE="${BASE_RESP%% *}"; BASE_CODE="${BASE_CODE:-000}"
+    BASE_SIZE="${BASE_RESP##* }"; BASE_SIZE="${BASE_SIZE:-0}"
+    BASE_WORDS="$(curl -sk ${CURL_TLS:-} -H "Host: ${BASE_HOST}.${DOMAIN}" --max-time "$TIMEOUT" \
+                   "$BASE_URL" 2>/dev/null | wc -w | tr -d ' ' || echo 0)"
+    BASE_WORDS="${BASE_WORDS:-0}"
 
-# ---------- Baseline + test de port ----------
-BASE_CODE=""; BASE_SIZE=""; BASE_WORDS=""
-CAN_FUZZ=1
-
-if [[ -z "${TARGET_IP-}" ]]; then
-  warn "IP inconnue → pas de vhost fuzzing (ajoute ${DOMAIN} dans /etc/hosts si nécessaire)."
-  CAN_FUZZ=0
-else
-  # test TCP brut pour éviter 1000 erreurs ffuf sur port fermé
-  if ! timeout 3 bash -c "echo >/dev/tcp/${TARGET_IP}/${PORT}" 2>/dev/null; then
-    warn "Le port ${PORT} (${SCHEME}) est fermé ou filtré → pas de vhost fuzzing."
-    CAN_FUZZ=0
-  fi
-fi
-
-if [[ $CAN_FUZZ -eq 1 ]]; then
-  BASE_HOST="$(tr -dc 'a-z0-9' </dev/urandom | head -c 10 || echo rnd)"
-  BASE_URL="${SCHEME}://${TARGET_IP}:${PORT}/"
-  BASE_RESP="$(curl -sk ${CURL_TLS:-} -H "Host: ${BASE_HOST}.${DOMAIN}" --max-time "$TIMEOUT" \
-                 -o /dev/null -w "%{http_code} %{size_download}" "$BASE_URL" 2>/dev/null || true)"
-  BASE_CODE="${BASE_RESP%% *}"; BASE_CODE="${BASE_CODE:-000}"
-  BASE_SIZE="${BASE_RESP##* }"; BASE_SIZE="${BASE_SIZE:-0}"
-  BASE_WORDS="$(curl -sk ${CURL_TLS:-} -H "Host: ${BASE_HOST}.${DOMAIN}" --max-time "$TIMEOUT" \
-                 "$BASE_URL" 2>/dev/null | wc -w | tr -d ' ' || echo 0)"
-  BASE_WORDS="${BASE_WORDS:-0}"
-  info "Baseline: code=${BASE_CODE} size=${BASE_SIZE} words=${BASE_WORDS} (Host=${BASE_HOST}.${DOMAIN})"
-fi
-
-# ---------- Parseur robuste (console ffuf) ----------
-extract_tokens_file() {
-  local f="$1"
-  awk -v d="$DOMAIN" '
     {
-      line=$0
-      gsub(/\r/,"",line)
-      gsub(/\033\[[0-9;]*[A-Za-z]/,"",line)
-      if (index(line,"[Status:")>0) {
-        n = split(line, a, /\[Status:/)
-        left = a[1]
-        if (match(left, /([a-z0-9-]{1,63})[[:space:]]*$/, m)) {
-          print m[1] "." d
-        }
-      }
-    }
-  ' "$f" | sort -u
-}
+      echo "Port ${PORT} (${SCHEME})"
+      echo "  Baseline: code=${BASE_CODE} size=${BASE_SIZE} words=${BASE_WORDS} (Host=${BASE_HOST}.${DOMAIN})"
+    } >> "$DETAILS_TXT"
 
-# ---------- VHOST fuzzing ----------
-VHOST_COUNT=0
+    FFUF_RAW="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_ffuf_${PORT}.XXXXXX")"
+    VHOST_TXT_PORT="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_vhosts_${PORT}.XXXXXX")"
+    : > "$VHOST_TXT_PORT"
 
-if [[ $CAN_FUZZ -eq 1 ]]; then
-  info "VHOST fuzzing via ffuf ..."
+    if [[ "$BASE_CODE" == "000" ]]; then
+      warn "Baseline invalide sur ${PORT} (code=000) → le service ne répond pas en HTTP."
+      warn "Fuzzing VHOST sauté sur ce port (inutile de lancer ffuf)."
+      {
+        echo "  VHOST (0)"
+        echo "    - (fuzzing sauté : baseline code=000)"
+        echo
+      } >> "$DETAILS_TXT"
+      continue   # on passe au port suivant
+    fi
 
-  FFUF_FILTER=()
-  if [[ "$BASE_CODE" != "000" ]]; then
+    FFUF_FILTER=()
     [[ "$BASE_SIZE"  != "0" && -n "$BASE_SIZE" ]]  && FFUF_FILTER+=(-fs "$BASE_SIZE")
     [[ "$BASE_WORDS" != "0" && -n "$BASE_WORDS" ]] && FFUF_FILTER+=(-fw "$BASE_WORDS")
-  else
-    info "Baseline invalide (code=000) → pas de filtre -fs/-fw appliqué à ffuf."
-  fi
 
-  CMD=(ffuf -u "${SCHEME}://${TARGET_IP}:${PORT}/" $FFUF_TLS \
-            -H "Host: FUZZ.${DOMAIN}" \
-            -w "$WL_EFFECTIVE" -t "$THREADS" \
-            -mc "${MATCH_CODES}" "${FFUF_FILTER[@]}")
+    info "VHOST fuzzing via ffuf sur ${SCHEME}://${TARGET_IP}:${PORT}/ ..."
+    CMD=(ffuf -u "${SCHEME}://${TARGET_IP}:${PORT}/" $FFUF_TLS \
+              -H "Host: FUZZ.${DOMAIN}" \
+              -w "$WL_EFFECTIVE" -t "$THREADS" \
+              -mc "${MATCH_CODES}" "${FFUF_FILTER[@]}")
 
-  [[ $DEBUG -eq 1 ]] && echo "[*] CMD: ${CMD[*]}"
+    [[ $DEBUG -eq 1 ]] && echo "[*] CMD: ${CMD[*]}"
+    "${CMD[@]}" > "$FFUF_RAW" 2>&1 || true
 
-  "${CMD[@]}" > "$FFUF_RAW" 2>&1 || true
-  extract_tokens_file "$FFUF_RAW" > "$VHOST_TXT" || true
+    extract_tokens_file "$FFUF_RAW" > "$VHOST_TXT_PORT" || true
+    VHOST_COUNT_PORT="$(grep -c '.' "$VHOST_TXT_PORT" || true)"
 
-  VHOST_COUNT="$(grep -c '.' "$VHOST_TXT" || true)"
-  if [[ "$VHOST_COUNT" -gt 0 ]]; then
-    ok "VHOST: ${VHOST_COUNT} hôtes."
-    echo -e "${GREEN}[✓]${RESET} VHOST trouvés :"
-    sed 's/^/   • /' "$VHOST_TXT"
-  else
-    warn "VHOST: rien trouvé."
-    if grep -q "Errors: " "$FFUF_RAW" 2>/dev/null; then
-      info "ffuf a rencontré des erreurs (voir fichier brut pour le détail)."
+    {
+      echo "  VHOST (${VHOST_COUNT_PORT})"
+      if [[ "$VHOST_COUNT_PORT" -gt 0 ]]; then
+        sed 's/^/    - /' "$VHOST_TXT_PORT"
+      else
+        echo "    - (aucun)"
+      fi
+      echo
+    } >> "$DETAILS_TXT"
+
+    if [[ "$VHOST_COUNT_PORT" -gt 0 ]]; then
+      cat "$VHOST_TXT_PORT" >> "$UNION_VHOSTS"
+      VHOST_COUNT_TOTAL=$((VHOST_COUNT_TOTAL + VHOST_COUNT_PORT))
     fi
-  fi
+  done
+
+else
+  warn "Pas de ports HTTP/HTTPS exploitables (ou IP inconnue) → pas de vhost fuzzing."
+fi
+
+# Union finale des vhosts
+if [[ -s "$UNION_VHOSTS" ]]; then
+  sort -u "$UNION_VHOSTS" -o "$UNION_VHOSTS"
+else
+  VHOST_COUNT_TOTAL=0
 fi
 
 # ---------- /etc/hosts ----------
 if [[ $SAVE_HOSTS -eq 1 || $DRY_RUN_HOSTS -eq 1 ]]; then
-  if [[ "$VHOST_COUNT" -eq 0 ]]; then
+  if [[ "$VHOST_COUNT_TOTAL" -eq 0 ]]; then
     warn "Pas de vhost trouvé → rien à faire pour /etc/hosts."
   elif [[ -z "${TARGET_IP-}" ]]; then
     warn "IP inconnue → impossible d’écrire dans /etc/hosts."
@@ -332,7 +385,7 @@ if [[ $SAVE_HOSTS -eq 1 || $DRY_RUN_HOSTS -eq 1 ]]; then
       info "[DRY-RUN] Lignes qui seraient ajoutées à /etc/hosts :"
       while IFS= read -r host; do
         echo "${TARGET_IP} ${host}"
-      done < "$VHOST_TXT"
+      done < "$UNION_VHOSTS"
     else
       TS="$(date +%Y%m%d-%H%M%S)"
       BACKUP="/etc/hosts.bak.${TS}"
@@ -344,7 +397,7 @@ if [[ $SAVE_HOSTS -eq 1 || $DRY_RUN_HOSTS -eq 1 ]]; then
             echo "${TARGET_IP} ${host}" | sudo tee -a /etc/hosts >/dev/null
             ((ADDED++))
           fi
-        done < "$VHOST_TXT"
+        done < "$UNION_VHOSTS"
         [[ $ADDED -gt 0 ]] && ok "--save-hosts : ${ADDED} entrées ajoutées" || info "Aucun ajout (déjà présent)."
       else
         warn "Backup /etc/hosts échoué → abandon de --save-hosts."
@@ -353,16 +406,11 @@ if [[ $SAVE_HOSTS -eq 1 || $DRY_RUN_HOSTS -eq 1 ]]; then
   fi
 fi
 
-# ---------- Mise à jour du fichier global mes_scans/scan_vhosts.txt ----------
+# ---------- Construction du bloc final ----------
 BLOCK_START="=== mon-subdomains ${DOMAIN} START ==="
 BLOCK_END="=== mon-subdomains ${DOMAIN} END ==="
 
-# Supprimer un éventuel bloc existant pour ce domaine
-if [[ -f "$SCAN_FILE" ]]; then
-  sed -e "/^=== mon-subdomains ${DOMAIN} START ===\$/,/^=== mon-subdomains ${DOMAIN} END ===\$/d" \
-    "$SCAN_FILE" > "${SCAN_FILE}.tmp" || true
-  mv "${SCAN_FILE}.tmp" "$SCAN_FILE"
-fi
+TMP_BLOCK="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_block.XXXXXX")"
 
 {
   echo "$BLOCK_START"
@@ -371,30 +419,43 @@ fi
   echo "Date         : $(date '+%F %T')"
   echo "Domaine      : ${DOMAIN}"
   [[ -n "${TARGET_IP-}" ]] && echo "IP           : ${TARGET_IP}" || echo "IP           : (non détectée)"
-  echo "Schéma/Port  : ${SCHEME}/${PORT}"
   echo "Mode         : ${MODE}"
   echo "Wordlist eff.: ${WL_EFFECTIVE}"
   echo "Master       : ${MASTER}"
   echo "Codes        : ${MATCH_CODES}  (strict=${STRICT})"
-  if [[ -n "$BASE_CODE" ]]; then
-    echo "Baseline     : code=${BASE_CODE} size=${BASE_SIZE} words=${BASE_WORDS}"
-  else
-    echo "Baseline     : non effectuée (port fermé ou IP inconnue)"
-  fi
   echo
-  echo "VHOST (${VHOST_COUNT})"
-  if [[ -s "$VHOST_TXT" ]]; then
-    sed 's/^/  - /' "$VHOST_TXT"
+  echo "VHOST totaux : ${VHOST_COUNT_TOTAL}"
+  if [[ -s "$UNION_VHOSTS" ]]; then
+    sed 's/^/  - /' "$UNION_VHOSTS"
   else
     echo "  - (aucun)"
   fi
   echo
-  echo "--- Debug ---"
-  echo "ffuf raw     : ${FFUF_RAW}"
+  echo "--- Détails par port ---"
+  cat "$DETAILS_TXT"
+  echo
   echo "$BLOCK_END"
   echo
-} >> "$SCAN_FILE"
+} > "$TMP_BLOCK"
 
+# ---------- Affichage à l'écran ----------
+echo
+echo -e "${BLUE}===== Résultats mon-subdomains (${DOMAIN}) =====${RESET}"
+cat "$TMP_BLOCK"
+echo -e "${BLUE}===============================================${RESET}"
+echo
+
+# ---------- Insertion dans scan_vhosts.txt ----------
+if [[ -f "$SCAN_FILE" ]]; then
+  sed -e "/^=== mon-subdomains ${DOMAIN} START ===\$/,/^=== mon-subdomains ${DOMAIN} END ===\$/d" \
+    "$SCAN_FILE" > "${SCAN_FILE}.tmp" || true
+  mv "${SCAN_FILE}.tmp" "$SCAN_FILE"
+fi
+
+cat "$TMP_BLOCK" >> "$SCAN_FILE"
 ok "Bloc mis à jour dans ${SCAN_FILE} pour le domaine ${DOMAIN}"
+
+# ---------- Nettoyage des fichiers temporaires ----------
+rm -f /tmp/mon-subdomains_${DOMAIN}_* 2>/dev/null || true
 
 exit 0
