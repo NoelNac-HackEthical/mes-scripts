@@ -1,6 +1,6 @@
 #!/bin/bash
 # NAME=mon-recoweb
-# VERSION=2.1.2
+# VERSION=2.1.3
 # DESCRIPTION=Automatise la découverte de répertoires et fichiers web (whatweb + ffuf) et agrège les résultats dans mes_scans/scan_repertoires.txt.
 # PRESENTATION_START
 # **mon-recoweb — Découverte web ciblée pour CTF / pentest**
@@ -476,8 +476,11 @@ TMP_BLOCK="$(mktemp "/tmp/mon-recoweb_${DOMAIN}_block.XXXXXX")"
   echo "--- Détails par port ---"
   cat "$DETAILS_TXT"
   echo
-  echo "--- Nmap interne ---"
-  echo "  Fichier : $NMAP_FILE"
+  if [[ $DEBUG -eq 1 ]]; then
+      echo "--- Nmap interne ---"
+      echo "  Fichier : $NMAP_TMP"
+      echo
+  fi
   echo
   echo "$BLOCK_END"
   echo

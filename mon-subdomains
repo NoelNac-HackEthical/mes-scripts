@@ -1,6 +1,6 @@
 #!/bin/bash
 # NAME=mon-subdomains
-# VERSION=2.1.0
+# VERSION=2.1.1
 # DESCRIPTION=Découverte de sous-domaines par vhost-fuzzing (ffuf) avec baseline anti-wildcard, modes fast/medium/large et options d'ajout dans /etc/hosts.
 # PRESENTATION_START
 # **mon-subdomains — Découverte de vhosts pour CTF / pentest**
@@ -265,7 +265,9 @@ else
     echo "Domaine      : ${DOMAIN}"
     echo "IP           : (non détectée)"
     echo "Mode         : ${MODE}"
-    echo "Wordlist eff.: ${WL_EFFECTIVE}"
+    if [[ $DEBUG -eq 1 ]]; then
+        echo "Wordlist eff.: $WORDLIST_EFFECTIVE"
+    fi
     echo "Master       : ${MASTER}"
     echo "Codes        : ${MATCH_CODES}  (strict=${STRICT})"
     echo
@@ -471,7 +473,9 @@ TMP_BLOCK="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_block.XXXXXX")"
   echo "Domaine      : ${DOMAIN}"
   echo "IP           : ${TARGET_IP}"
   echo "Mode         : ${MODE}"
-  echo "Wordlist eff.: ${WL_EFFECTIVE}"
+  if [[ $DEBUG -eq 1 ]]; then
+      echo "Wordlist eff.: $WORDLIST_EFFECTIVE"
+  fi
   echo "Master       : ${MASTER}"
   echo "Codes        : ${MATCH_CODES}  (strict=${STRICT})"
   echo
@@ -485,8 +489,11 @@ TMP_BLOCK="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_block.XXXXXX")"
   echo "--- Détails par port ---"
   cat "$DETAILS_TXT"
   echo
-  echo "--- Nmap interne ---"
-  echo "  Fichier : $NMAP_FILE"
+  if [[ $DEBUG -eq 1 ]]; then
+      echo "--- Nmap interne ---"
+      echo "  Fichier : $NMAP_TMP"
+      echo
+  fi
   echo
   echo "$BLOCK_END"
   echo
