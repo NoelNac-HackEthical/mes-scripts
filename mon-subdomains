@@ -1,6 +1,6 @@
 #!/bin/bash
 # NAME=mon-subdomains
-# VERSION=2.0.0
+# VERSION=2.1.0
 # DESCRIPTION=Découverte de sous-domaines par vhost-fuzzing (ffuf) avec baseline anti-wildcard, modes fast/medium/large et options d'ajout dans /etc/hosts.
 # PRESENTATION_START
 # **mon-subdomains — Découverte de vhosts pour CTF / pentest**
@@ -10,8 +10,12 @@
 # valides (ex. api.mon-site.htb, admin.mon-site.htb). La recherche se fait soit à partir
 # d'une "master" orientée HTB soit via une wordlist custom.
 #
-# Il s'appuie sur un scan Nmap complet (full_tcp_scan.txt) pour détecter tous les ports
-# HTTP/HTTPS ouverts et lance le vhost fuzzing sur chacun d'eux.
+# Fonctionnement :
+# - Résolution de l'IP du domaine (getent/dig) et ping pour vérifier /etc/hosts.
+# - Scan Nmap interne (-Pn -sV -p-) pour détecter tous les ports HTTP/HTTPS.
+# - VHOST fuzzing via ffuf sur chacun de ces ports (Host: FUZZ.domaine.htb).
+# - Résultats agrégés dans mes_scans/scan_vhosts.txt, avec un bloc par domaine.
+#
 # PRESENTATION_END
 
 set -euo pipefail
@@ -67,38 +71,36 @@ USAGE
 
 # ---------- Fonctions auxiliaires ----------
 
-ensure_full_tcp_scan() {
-  local nmap_file="${MES_SCANS_DIR}/full_tcp_scan.txt"
-  if [[ -f "$nmap_file" ]]; then
-    info "Scan Nmap existant détecté : $nmap_file"
-    return 0
-  fi
-
-  info "Aucun full_tcp_scan.txt trouvé → lancement d'un scan Nmap TCP complet sur ${DOMAIN}."
-  if ! command -v nmap >/dev/null 2>&1; then
-    warn "nmap est manquant, impossible de créer ${nmap_file} automatiquement."
-    return 1
-  fi
-
-  # Scan complet TCP avec détection de services
-  if ! nmap -Pn -sV -p- --min-rate 5000 -T4 --max-retries 3 -oN "$nmap_file" "$DOMAIN"; then
-    warn "Échec du scan Nmap automatique. Vérifie la connectivité vers ${DOMAIN}."
-    return 1
-  fi
-  ok "Scan Nmap enregistré dans $nmap_file"
-  return 0
+# parseur robuste ffuf → vhosts
+extract_tokens_file() {
+  local f="$1"
+  awk -v d="$DOMAIN" '
+    {
+      line=$0
+      gsub(/\r/,"",line)
+      gsub(/\033\[[0-9;]*[A-Za-z]/,"",line)
+      if (index(line,"[Status:")>0) {
+        n = split(line, a, /\[Status:/)
+        left = a[1]
+        if (match(left, /([a-z0-9-]{1,63})[[:space:]]*$/, m)) {
+          print m[1] "." d
+        }
+      }
+    }
+  ' "$f" | sort -u
 }
 
+# Détection des endpoints HTTP/HTTPS à partir d'un fichier Nmap -sV
 # Retourne sur stdout des lignes "port:scheme" (ex: "80:http", "443:https")
 detect_web_endpoints_from_nmap() {
-  local nmap_file="${MES_SCANS_DIR}/full_tcp_scan.txt"
+  local nmap_file="$1"
   [[ -f "$nmap_file" ]] || return 1
 
   local endpoints=()
   local line port svc rest text scheme
 
   while IFS= read -r line; do
-    # Exemple de ligne Nmap : "80/tcp open  http    Apache httpd 2.4.41"
+    # Exemple de ligne Nmap : "8080/tcp open  http    Apache Tomcat ..."
     if [[ "$line" =~ ^([0-9]+)/tcp[[:space:]]+open[[:space:]]+([^[:space:]]+)[[:space:]]*(.*)$ ]]; then
       port="${BASH_REMATCH[1]}"
       svc="${BASH_REMATCH[2]}"
@@ -120,25 +122,6 @@ detect_web_endpoints_from_nmap() {
 
   printf '%s\n' "${endpoints[@]}" | sort -n | uniq
   return 0
-}
-
-# Parseur robuste ffuf → vhosts
-extract_tokens_file() {
-  local f="$1"
-  awk -v d="$DOMAIN" '
-    {
-      line=$0
-      gsub(/\r/,"",line)
-      gsub(/\033\[[0-9;]*[A-Za-z]/,"",line)
-      if (index(line,"[Status:")>0) {
-        n = split(line, a, /\[Status:/)
-        left = a[1]
-        if (match(left, /([a-z0-9-]{1,63})[[:space:]]*$/, m)) {
-          print m[1] "." d
-        }
-      }
-    }
-  ' "$f" | sort -u
 }
 
 # ---------- Version / aide ----------
@@ -189,6 +172,7 @@ fi
 
 command -v ffuf >/dev/null || { warn "ffuf manquant"; exit 1; }
 command -v curl >/dev/null || { warn "curl manquant"; exit 1; }
+command -v nmap >/dev/null || { warn "nmap manquant"; exit 1; }
 
 ok "Domaine : ${DOMAIN}"
 
@@ -259,35 +243,110 @@ else
   info "Master : $MASTER"
 fi
 
-# ---------- Résolution IP (pour curl / ffuf) ----------
+# ---------- Résolution IP ----------
 TARGET_IP="$(getent hosts "$DOMAIN" | awk '{print $1}' | head -n1 || true)"
-[[ -z "$TARGET_IP" ]] && TARGET_IP="$(dig +short A "$DOMAIN" 2>/dev/null | head -n1 || true)"
-[[ -n "$TARGET_IP" ]] && ok "IP détectée : $TARGET_IP" || warn "IP non détectée (curl utilisera le nom de domaine)"
-
-# ---------- full_tcp_scan.txt (Nmap) ----------
-if ! ensure_full_tcp_scan; then
-  warn "Impossible de garantir un full_tcp_scan.txt → pas de vhost fuzzing."
+if [[ -z "$TARGET_IP" ]]; then
+  TARGET_IP="$(dig +short A "$DOMAIN" 2>/dev/null | head -n1 || true)"
 fi
 
-WEB_ENDPOINTS_RAW="$(detect_web_endpoints_from_nmap || true)"
+if [[ -n "$TARGET_IP" ]]; then
+  ok "IP détectée : $TARGET_IP"
+else
+  warn "IP non détectée pour ${DOMAIN}. Impossible de lancer un scan web."
+  # On écrit quand même un bloc minimal
+  BLOCK_START="=== mon-subdomains ${DOMAIN} START ==="
+  BLOCK_END="=== mon-subdomains ${DOMAIN} END ==="
+  TMP_BLOCK="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_block.XXXXXX")"
+  {
+    echo "$BLOCK_START"
+    echo "Script       : mon-subdomains"
+    echo "Version      : $(_version_str)"
+    echo "Date         : $(date '+%F %T')"
+    echo "Domaine      : ${DOMAIN}"
+    echo "IP           : (non détectée)"
+    echo "Mode         : ${MODE}"
+    echo "Wordlist eff.: ${WL_EFFECTIVE}"
+    echo "Master       : ${MASTER}"
+    echo "Codes        : ${MATCH_CODES}  (strict=${STRICT})"
+    echo
+    echo "VHOST totaux : 0"
+    echo "  - (aucun)"
+    echo
+    echo "--- Détails par port ---"
+    echo "  Aucun port scanné (IP non détectée)."
+    echo
+    echo "$BLOCK_END"
+    echo
+  } > "$TMP_BLOCK"
+
+  # affichage
+  echo
+  echo -e "${BLUE}===== Résultats mon-subdomains (${DOMAIN}) =====${RESET}"
+  cat "$TMP_BLOCK"
+  echo -e "${BLUE}===============================================${RESET}"
+  echo
+
+  # suppression éventuelle d'un bloc existant + écriture
+  if [[ -f "$SCAN_FILE" ]]; then
+    sed -e "/^=== mon-subdomains ${DOMAIN} START ===\$/,/^=== mon-subdomains ${DOMAIN} END ===\$/d" \
+      "$SCAN_FILE" > "${SCAN_FILE}.tmp" || true
+    mv "${SCAN_FILE}.tmp" "$SCAN_FILE"
+  fi
+  cat "$TMP_BLOCK" >> "$SCAN_FILE"
+  ok "Bloc mis à jour dans ${SCAN_FILE} pour le domaine ${DOMAIN}"
+
+  rm -f /tmp/mon-subdomains_"${DOMAIN}"_* 2>/dev/null || true
+  exit 0
+fi
+
+# ---------- Vérification ping (cohérence /etc/hosts) ----------
+if ping -c1 -W1 "$TARGET_IP" >/dev/null 2>&1; then
+  ok "Ping OK : ${DOMAIN} (${TARGET_IP}) est joignable."
+else
+  warn "Ping échoué vers ${DOMAIN} (${TARGET_IP})."
+  warn "Il est possible que l'entrée /etc/hosts soit obsolète (reset de machine HTB, nouvelle IP...)."
+  echo
+  read -r -p "Continuer quand même le scan ? [o/N] " rep
+  case "$rep" in
+    [oOyY])
+      info "Poursuite du scan malgré l'échec du ping."
+      ;;
+    *)
+      warn "Scan interrompu. Vérifie /etc/hosts (IP de ${DOMAIN}) puis relance mon-subdomains."
+      rm -f /tmp/mon-subdomains_"${DOMAIN}"_* 2>/dev/null || true
+      exit 1
+      ;;
+  esac
+fi
+
+# ---------- Scan Nmap interne (détection des ports HTTP/HTTPS) ----------
+NMAP_FILE="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_nmap.XXXXXX")"
+info "Scan Nmap interne pour détecter les ports HTTP/HTTPS…"
+info "Commande : nmap -Pn -sV -p- --min-rate 5000 -T4 --max-retries 3 -oN \"$NMAP_FILE\" \"$TARGET_IP\""
+
+if ! nmap -Pn -sV -p- --min-rate 5000 -T4 --max-retries 3 -oN "$NMAP_FILE" "$TARGET_IP"; then
+  warn "Échec du scan Nmap interne sur ${TARGET_IP}."
+fi
+
+WEB_ENDPOINTS_RAW="$(detect_web_endpoints_from_nmap "$NMAP_FILE" || true)"
 WEB_ENDPOINTS=()
 if [[ -n "$WEB_ENDPOINTS_RAW" ]]; then
   mapfile -t WEB_ENDPOINTS <<< "$WEB_ENDPOINTS_RAW"
 fi
 
-if ((${#WEB_ENDPOINTS[@]} == 0)); then
-  warn "Aucun service HTTP/HTTPS détecté dans ${MES_SCANS_DIR}/full_tcp_scan.txt pour ${DOMAIN}."
-  warn "Impossible d'effectuer un vhost fuzzing."
-fi
-
-# ---------- VHOST fuzzing multi-ports ----------
 DETAILS_TXT="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_details.XXXXXX")"
 UNION_VHOSTS="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_union.XXXXXX")"
 : > "$DETAILS_TXT"
 : > "$UNION_VHOSTS"
 VHOST_COUNT_TOTAL=0
 
-if ((${#WEB_ENDPOINTS[@]} > 0)) && [[ -n "${TARGET_IP-}" ]]; then
+if ((${#WEB_ENDPOINTS[@]} == 0)); then
+  warn "Aucun service HTTP/HTTPS détecté par Nmap sur ${TARGET_IP}."
+  {
+    echo "Aucun port HTTP/HTTPS détecté."
+    echo
+  } >> "$DETAILS_TXT"
+else
   info "Ports HTTP/HTTPS détectés : ${WEB_ENDPOINTS[*]}"
 
   for ep in "${WEB_ENDPOINTS[@]}"; do
@@ -316,24 +375,25 @@ if ((${#WEB_ENDPOINTS[@]} > 0)) && [[ -n "${TARGET_IP-}" ]]; then
       echo "  Baseline: code=${BASE_CODE} size=${BASE_SIZE} words=${BASE_WORDS} (Host=${BASE_HOST}.${DOMAIN})"
     } >> "$DETAILS_TXT"
 
-    FFUF_RAW="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_ffuf_${PORT}.XXXXXX")"
-    VHOST_TXT_PORT="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_vhosts_${PORT}.XXXXXX")"
-    : > "$VHOST_TXT_PORT"
-
+    # Si baseline totalement KO → pas de fuzzing
     if [[ "$BASE_CODE" == "000" ]]; then
       warn "Baseline invalide sur ${PORT} (code=000) → le service ne répond pas en HTTP."
-      warn "Fuzzing VHOST sauté sur ce port (inutile de lancer ffuf)."
+      warn "Fuzzing VHOST sauté sur ce port."
       {
         echo "  VHOST (0)"
         echo "    - (fuzzing sauté : baseline code=000)"
         echo
       } >> "$DETAILS_TXT"
-      continue   # on passe au port suivant
+      continue
     fi
 
     FFUF_FILTER=()
     [[ "$BASE_SIZE"  != "0" && -n "$BASE_SIZE" ]]  && FFUF_FILTER+=(-fs "$BASE_SIZE")
     [[ "$BASE_WORDS" != "0" && -n "$BASE_WORDS" ]] && FFUF_FILTER+=(-fw "$BASE_WORDS")
+
+    FFUF_RAW="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_ffuf_${PORT}.XXXXXX")"
+    VHOST_TXT_PORT="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_vhosts_${PORT}.XXXXXX")"
+    : > "$VHOST_TXT_PORT"
 
     info "VHOST fuzzing via ffuf sur ${SCHEME}://${TARGET_IP}:${PORT}/ ..."
     CMD=(ffuf -u "${SCHEME}://${TARGET_IP}:${PORT}/" $FFUF_TLS \
@@ -363,23 +423,15 @@ if ((${#WEB_ENDPOINTS[@]} > 0)) && [[ -n "${TARGET_IP-}" ]]; then
     fi
   done
 
-else
-  warn "Pas de ports HTTP/HTTPS exploitables (ou IP inconnue) → pas de vhost fuzzing."
-fi
-
-# Union finale des vhosts
-if [[ -s "$UNION_VHOSTS" ]]; then
-  sort -u "$UNION_VHOSTS" -o "$UNION_VHOSTS"
-else
-  VHOST_COUNT_TOTAL=0
+  if [[ -s "$UNION_VHOSTS" ]]; then
+    sort -u "$UNION_VHOSTS" -o "$UNION_VHOSTS"
+  fi
 fi
 
 # ---------- /etc/hosts ----------
 if [[ $SAVE_HOSTS -eq 1 || $DRY_RUN_HOSTS -eq 1 ]]; then
   if [[ "$VHOST_COUNT_TOTAL" -eq 0 ]]; then
     warn "Pas de vhost trouvé → rien à faire pour /etc/hosts."
-  elif [[ -z "${TARGET_IP-}" ]]; then
-    warn "IP inconnue → impossible d’écrire dans /etc/hosts."
   else
     if [[ $DRY_RUN_HOSTS -eq 1 ]]; then
       info "[DRY-RUN] Lignes qui seraient ajoutées à /etc/hosts :"
@@ -406,10 +458,9 @@ if [[ $SAVE_HOSTS -eq 1 || $DRY_RUN_HOSTS -eq 1 ]]; then
   fi
 fi
 
-# ---------- Construction du bloc final ----------
+# ---------- Construction du bloc final & affichage ----------
 BLOCK_START="=== mon-subdomains ${DOMAIN} START ==="
 BLOCK_END="=== mon-subdomains ${DOMAIN} END ==="
-
 TMP_BLOCK="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_block.XXXXXX")"
 
 {
@@ -418,7 +469,7 @@ TMP_BLOCK="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_block.XXXXXX")"
   echo "Version      : $(_version_str)"
   echo "Date         : $(date '+%F %T')"
   echo "Domaine      : ${DOMAIN}"
-  [[ -n "${TARGET_IP-}" ]] && echo "IP           : ${TARGET_IP}" || echo "IP           : (non détectée)"
+  echo "IP           : ${TARGET_IP}"
   echo "Mode         : ${MODE}"
   echo "Wordlist eff.: ${WL_EFFECTIVE}"
   echo "Master       : ${MASTER}"
@@ -434,11 +485,13 @@ TMP_BLOCK="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_block.XXXXXX")"
   echo "--- Détails par port ---"
   cat "$DETAILS_TXT"
   echo
+  echo "--- Nmap interne ---"
+  echo "  Fichier : $NMAP_FILE"
+  echo
   echo "$BLOCK_END"
   echo
 } > "$TMP_BLOCK"
 
-# ---------- Affichage à l'écran ----------
 echo
 echo -e "${BLUE}===== Résultats mon-subdomains (${DOMAIN}) =====${RESET}"
 cat "$TMP_BLOCK"
@@ -456,6 +509,11 @@ cat "$TMP_BLOCK" >> "$SCAN_FILE"
 ok "Bloc mis à jour dans ${SCAN_FILE} pour le domaine ${DOMAIN}"
 
 # ---------- Nettoyage des fichiers temporaires ----------
-rm -f /tmp/mon-subdomains_${DOMAIN}_* 2>/dev/null || true
-
+if [[ $DEBUG -eq 1 ]]; then
+  info "DEBUG MODE : aucun nettoyage des fichiers /tmp effectué."
+  info "Garde les fichiers temporaires :"
+  ls -1 /tmp/mon-subdomains_"${DOMAIN}"_* 2>/dev/null || true
+else
+  rm -f /tmp/mon-subdomains_"${DOMAIN}"_* 2>/dev/null || true
+fi
 exit 0
