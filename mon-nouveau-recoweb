@@ -1,0 +1,279 @@
+#!/usr/bin/env bash
+# NAME=mon-nouveau-recoweb
+# VERSION=1.0.0
+# DESCRIPTION=Scan HTTP/HTTPS (nmap) + ffuf + whatweb + dirsearch sur une cible
+# PRESENTATION_START
+# Outil d’énumération Web complet :
+#
+# - Ping + résolution IP
+# - Détection des ports HTTP/HTTPS via Nmap (-sV)
+# - ffuf (répertoires + extensions .php,.txt)
+# - whatweb (fingerprinting rapide)
+# - dirsearch (capturé via script(1), parsing stable)
+#
+# Résumé final ajouté dans mes_scans/scan_repertoires.txt
+# PRESENTATION_END
+# HOMEPAGE=https://github.com/NoelNac-HackEthical/mes-scripts
+#____________________________________________________________________________
+
+set -euo pipefail
+
+# --- Helpers version ---
+_self_path="${BASH_SOURCE[0]:-$0}"
+if command -v readlink >/dev/null 2>&1; then
+  resolved="$(readlink -f -- "$_self_path" 2>/dev/null || true)"
+  [[ -n "$resolved" ]] && _self_path="$resolved"
+fi
+_self_base="$(basename "$_self_path")"
+
+_version_str(){
+  local v
+  v="$(awk -F= '/^# *VERSION *=/ {gsub(/\r$/,"",$2); print $2; exit}' "$_self_path" 2>/dev/null || true)"
+  printf '%s v%s' "$_self_base" "${v:-0.0.0}"
+}
+_print_version_and_exit(){ _version_str; echo; exit 0; }
+
+usage(){
+  cat <<USAGE
+Usage: ${_self_base} <cible>
+USAGE
+}
+
+# --- CLI basique ---
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  _version_str; echo
+  usage
+  exit 0
+fi
+if [[ "${1:-}" == "-V" || "${1:-}" == "--version" ]]; then
+  _print_version_and_exit
+fi
+[[ $# -lt 1 ]] && { usage; exit 1; }
+
+TARGET="$1"
+
+echo
+echo "$( _version_str ) — cible: $TARGET"
+echo "------------------------------------------------------------"
+
+# --- Résolution IP ---
+TARGET_IP="$(getent hosts "$TARGET" | awk '{print $1}' | head -n1 || true)"
+if [[ -z "$TARGET_IP" ]]; then
+  echo "[!] Impossible de résoudre $TARGET"
+  exit 1
+fi
+
+# --- Ping ---
+echo "[1/5] Ping..."
+if ping -c1 -W1 "$TARGET_IP" >/dev/null 2>&1; then
+  echo "[✓] OK"
+else
+  echo "[!] Ping KO — on continue malgré tout"
+fi
+
+# --- Nmap ---
+echo "[2/5] Nmap..."
+NMAP_FILE="/tmp/mon-nouveau-recoweb_nmap_${TARGET_IP}.txt"
+
+nmap -Pn -sV -p- --min-rate 5000 -T4 --max-retries 2 -oN "$NMAP_FILE" "$TARGET_IP"
+
+# Extraction des ports HTTP/HTTPS
+ENDPOINTS="$(
+  grep -E '^[0-9]+/tcp[[:space:]]+open' "$NMAP_FILE" |
+  grep -Ei 'http|ssl' |
+  awk '{print $1, $3}' |
+  sed 's|/tcp||' |
+  sed 's|open||' |
+  awk '{
+    port=$1
+    proto=tolower($2)
+    if(proto ~ /https|ssl/) print port ":https";
+    else print port ":http";
+  }'
+)"
+
+ENDPOINTS_CLEAN="$(
+  printf "%s\n" "$ENDPOINTS" \
+    | tr -d '\r' \
+    | sed 's/[[:space:]]*$//' \
+    | sed '/^$/d'
+)"
+
+# --- ffuf ---
+echo "[3/5] ffuf..."
+FFUF_RESULTS="$(mktemp)"
+FFUF_SUMMARY=()
+WORDLIST="/usr/share/wordlists/dirb/common.txt"
+
+while IFS= read -r ep; do
+  [[ -z "$ep" ]] && continue
+  PORT="${ep%%:*}"
+  SCHEME="${ep##*:}"
+  URL="${SCHEME}://${TARGET}:${PORT}/"
+
+  echo ">>> ffuf sur $URL ..."
+
+  TMP_CSV="$(mktemp)"
+
+  ffuf -u "${URL}FUZZ" \
+       -w "$WORDLIST" \
+       -e ".php,.txt" \
+       -mc "200,301,302,403" \
+       -of csv \
+       -o "$TMP_CSV" \
+       >/dev/null 2>&1 || true
+
+  awk -F',' '
+    NR>1 {
+      for(i=1;i<=NF;i++){
+        if(match($i, /(https?:\/\/[^\/]+(\/[^"]*))/ ,m)){
+          print m[2]
+        }
+      }
+    }
+  ' "$TMP_CSV" \
+    | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' \
+    | sed 's/^[[:space:]]*//' \
+    | sed 's/[[:space:]]*$//' \
+    | sed '/^$/d' \
+    >> "$FFUF_RESULTS"
+
+done <<< "$ENDPOINTS_CLEAN"
+
+sort -u -o "$FFUF_RESULTS" "$FFUF_RESULTS"
+
+if [[ ! -s "$FFUF_RESULTS" ]]; then
+  FFUF_SUMMARY+=( "(aucun résultat intéressant)" )
+else
+  while IFS= read -r l; do
+    FFUF_SUMMARY+=( "$l" )
+  done < "$FFUF_RESULTS"
+fi
+
+# --- whatweb ---
+echo "[4/5] whatweb..."
+WHATWEB_RESULTS=()
+
+while IFS= read -r ep; do
+  [[ -z "$ep" ]] && continue
+  PORT="${ep%%:*}"
+  SCHEME="${ep##*:}"
+  URL="${SCHEME}://${TARGET}:${PORT}/"
+
+  echo ">>> whatweb sur $URL"
+
+  OUT="$(whatweb --color=never --max-threads=15 --read-timeout=8 "$URL" 2>/dev/null || true)"
+
+  if [[ -n "$OUT" ]]; then
+    WHATWEB_RESULTS+=( "$OUT" )
+  fi
+
+done <<< "$ENDPOINTS_CLEAN"
+
+if [[ ${#WHATWEB_RESULTS[@]} -eq 0 ]]; then
+  WHATWEB_RESULTS+=( "(aucune techno ou whatweb KO)" )
+fi
+
+# --- dirsearch via script(1) (capture stable) ---
+echo "[5/5] dirsearch..."
+
+DIR_RESULTS="$(mktemp)"
+DIR_SUMMARY=()
+
+DIRSEARCH_BIN="$(command -v dirsearch || true)"
+SCRIPT_BIN="$(command -v script || true)"
+
+if [[ -z "$DIRSEARCH_BIN" ]]; then
+  DIR_SUMMARY+=( "(dirsearch non trouvé sur le système)" )
+else
+  while IFS= read -r ep; do
+    [[ -z "$ep" ]] && continue
+    PORT="${ep%%:*}"
+    SCHEME="${ep##*:}"
+    URL="${SCHEME}://${TARGET}:${PORT}/"
+
+    echo ">>> dirsearch sur $URL"
+
+    TMP_DS="$(mktemp)"
+
+    if [[ -n "$SCRIPT_BIN" ]]; then
+      # capture complète dans un fichier, sans diagonale
+      "$SCRIPT_BIN" -qc "$DIRSEARCH_BIN -u $URL -e php,txt --no-color --quiet -t 20" "$TMP_DS" >/dev/null 2>&1 || true
+    else
+      # fallback sans script(1) : on capture directement stdout
+      "$DIRSEARCH_BIN" -u "$URL" -e php,txt --no-color --quiet -t 20 >"$TMP_DS" 2>/dev/null || true
+    fi
+
+    if [[ -f "$TMP_DS" ]]; then
+      {
+        grep -E '\] (200|301|302|403) ' "$TMP_DS" 2>/dev/null || true
+      } \
+        | sed -E 's/^.*\] *([0-9]{3}) *- *[0-9KMGkmgB ]* - *//' \
+        | sed -E 's| -> .*||' \
+        | sed -E 's|https?://[^/]+||' \
+        | sed 's/[[:space:]]*$//' \
+        | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' \
+        | sed '/^$/d' \
+        >> "$DIR_RESULTS"
+    fi
+
+  done <<< "$ENDPOINTS_CLEAN"
+
+  sort -u -o "$DIR_RESULTS" "$DIR_RESULTS"
+
+  if [[ ! -s "$DIR_RESULTS" ]]; then
+    DIR_SUMMARY+=( "(aucun résultat intéressant)" )
+  else
+    while IFS= read -r p; do
+      [[ -z "$p" ]] && continue
+      DIR_SUMMARY+=( "$p" )
+    done < "$DIR_RESULTS"
+  fi
+fi
+
+echo
+echo "------------------------------------------------------------"
+echo "[✓] Scan terminé pour $TARGET."
+echo
+
+# --- Résumé final ---
+MES_SCANS_DIR="mes_scans"
+mkdir -p "$MES_SCANS_DIR"
+OUTFILE="${MES_SCANS_DIR}/scan_repertoires.txt"
+
+{
+  echo "=== mon-nouveau-recoweb ($TARGET) ==="
+  echo "Date: $(date '+%F %T')"
+  echo
+  echo "--- Ports HTTP/HTTPS détectés ---"
+  if [[ -z "$ENDPOINTS_CLEAN" ]]; then
+    echo "  (aucun)"
+  else
+    while IFS= read -r ep; do
+      [[ -z "$ep" ]] && continue
+      PORT="${ep%%:*}"
+      SCHEME="${ep##*:}"
+      echo "  - ${SCHEME}://${TARGET}:${PORT}/"
+    done <<< "$ENDPOINTS_CLEAN"
+  fi
+  echo
+  echo "--- Résumé ffuf (chemins avec 200/301/302/403) ---"
+  for l in "${FFUF_SUMMARY[@]}"; do
+    echo "  - $l"
+  done
+  echo
+  echo "--- Résumé whatweb (par service) ---"
+  for l in "${WHATWEB_RESULTS[@]}"; do
+    echo "  - $l"
+  done
+  echo
+  echo "--- Résumé dirsearch (chemins avec 200/301/302/403) ---"
+  for l in "${DIR_SUMMARY[@]}"; do
+    echo "  - $l"
+  done
+  echo
+  echo "=== END mon-nouveau-recoweb ($TARGET) ==="
+  echo
+} > "$OUTFILE"
+
+echo "[✓] Résumé enregistré dans $OUTFILE"
