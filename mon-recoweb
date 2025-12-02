@@ -307,9 +307,8 @@ else
   echo
 
   if [[ -f "$SCAN_FILE" ]]; then
-    sed -e "/^=== mon-recoweb ${DOMAIN} START ===\$/,/^=== mon-recoweb ${DOMAIN} END ===\$/d" \
-      "$SCAN_FILE" > "${SCAN_FILE}.tmp" || true
-    mv "${SCAN_FILE}.tmp" "$SCAN_FILE"
+    sed -e "\#^=== mon-recoweb ${DOMAIN} START ===\$#,\#^=== mon-recoweb ${DOMAIN} END ===\$#d" \
+      "$SCAN_FILE" > "${SCAN_FILE}.tmp" || true    mv "${SCAN_FILE}.tmp" "$SCAN_FILE"
   fi
   cat "$TMP_BLOCK" >> "$SCAN_FILE"
   ok "Bloc mis à jour dans ${SCAN_FILE} pour le domaine ${DOMAIN}"
@@ -540,9 +539,8 @@ echo
 
 # ---------- Insertion dans scan_repertoires*.txt ----------
 if [[ -f "$SCAN_FILE" ]]; then
-  sed -e "/^=== mon-recoweb ${DOMAIN} START ===\$/,/^=== mon-recoweb ${DOMAIN} END ===\$/d" \
-    "$SCAN_FILE" > "${SCAN_FILE}.tmp" || true
-  mv "${SCAN_FILE}.tmp" "$SCAN_FILE"
+  sed -e "\#^=== mon-recoweb ${DOMAIN} START ===\$#,\#^=== mon-recoweb ${DOMAIN} END ===\$#d" \
+    "$SCAN_FILE" > "${SCAN_FILE}.tmp" || true  mv "${SCAN_FILE}.tmp" "$SCAN_FILE"
 fi
 
 cat "$TMP_BLOCK" >> "$SCAN_FILE"
