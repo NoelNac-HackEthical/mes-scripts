@@ -1,9 +1,9 @@
 #!/bin/bash
 # NAME=mon-nouveau-recoweb
-# VERSION=v1.1.1
+# VERSION=v1.2.0
 # DESCRIPTION=Automatise la découverte web (whatweb + ffuf + dirsearch) et agrège les résultats dans mes_scans/scan_repertoires.txt (ou un fichier spécifique si un chemin est fourni).
 # PRESENTATION_START
-# **mon-recoweb — Découverte web ciblée pour CTF / pentest (version simplifiée)**
+# **mon-nouveau-recoweb — Découverte web ciblée pour CTF / pentest (version simplifiée)**
 #
 # Ce script automatise la reconnaissance web d'une cible (ex. mon-site.htb) :
 # - Résolution de l'IP et vérification via ping (cohérence /etc/hosts).
@@ -29,7 +29,7 @@ LC_ALL=C
 
 # --- version helpers ---
 _self_path="${BASH_SOURCE[0]:-$0}"
-if command -v readlink >/dev/null 2>&1; then
+if command -v readlink >/devnull 2>&1; then
   _resolved="$(readlink -f -- "$_self_path" 2>/dev/null || true)"
   [ -n "$_resolved" ] && _self_path="$_resolved"
 fi
@@ -39,7 +39,7 @@ _version_str() {
   local v
   v="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$_self_path" 2>/dev/null || true)"
   [ -n "$v" ] || v="v0.0.0"
-  printf '%s\n' "$v"
+  printf "%s\n" "$v"
 }
 
 _print_version_and_exit() { _version_str; exit 0; }
@@ -53,7 +53,7 @@ warn(){ echo -e "${YELLOW}[!]${RESET} $*"; }
 usage(){
   cat <<'USAGE'
 Usage:
-  mon-recoweb <domaine.htb> [options]
+  mon-nouveau-recoweb <domaine.htb> [options]
 
 Options :
   --master FILE     Wordlist (défaut: /usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt)
@@ -67,27 +67,24 @@ Options :
   -h, --help        Aide
 
 Exemples :
-  mon-recoweb target.htb
-  mon-recoweb target.htb --strict
-  mon-recoweb target.htb/cgi-bin/ --ext ".sh,.cgi,.pl"
+  mon-nouveau-recoweb target.htb
+  mon-nouveau-recoweb target.htb --strict
+  mon-nouveau-recoweb target.htb/cgi-bin/ --ext ".sh,.cgi,.pl"
 USAGE
 }
 
-# ---------- parseur ffuf (paths) ----------
+# ---------- parseur ffuf simple (non utilisé pour le filtrage bruit) ----------
 extract_paths_csv() {
   local f="$1"
   [[ -f "$f" ]] || return 0
 
   awk -F',' '
-    NR==1 { next }  # sauter l’en-tête CSV
+    NR==1 { next }
     {
-      # On cherche un champ qui ressemble à une URL http(s)
       for (i=1; i<=NF; i++) {
         if (match($i, /(https?:\/\/[^\/]+(\/[^"]*))/ , m)) {
           path = m[2]
-          if (path == "" || path == "/") {
-            next   # On ignore complètement la racine "/"
-          }
+          if (path == "" || path == "/") next
           print path
           break
         }
@@ -96,7 +93,103 @@ extract_paths_csv() {
   ' "$f" | sort -u
 }
 
-# ---------- petit parseur dirsearch (récupérer les chemins) ----------
+# ---------- détecter les combos (status:size) "bruit" dans un CSV ffuf ----------
+detect_ffuf_noise_combos() {
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+
+  awk -F',' '
+    NR==1 {
+      for (i=1; i<=NF; i++) {
+        h=$i; gsub(/"/,"",h); h=tolower(h)
+        if (h ~ /status/)                                      ci_status=i
+        else if (h ~ /content[_-]*length/ || h ~ /length/ || h ~ /size/) ci_size=i
+      }
+      next
+    }
+    {
+      if (!ci_status || !ci_size) {
+        next
+      }
+      total++
+      code = $ci_status+0
+      size = $ci_size+0
+      key  = code ":" size
+      count[key]++
+    }
+    END {
+      if (total == 0) exit
+      # Heuristique : toute combo 403:SIZE qui apparaît au moins 5 fois = bruit
+      for (k in count) {
+        split(k,a,":")
+        code=a[1]; size=a[2]
+        c=count[k]
+        if (code == 403 && c >= 5) {
+          print k
+        }
+      }
+    }
+  ' "$f"
+}
+
+# ---------- extraire les paths ffuf en ignorant les combos "bruit" détectés ----------
+filtered_paths_from_ffuf_csv() {
+  local f="$1"
+  local noise_file="$2"
+
+  [[ -f "$f" ]] || return 0
+
+  awk -F',' '
+    # 1er fichier : fichier de combos de bruit (status:size)
+    FNR==NR {
+      line=$0
+      gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", line)
+      if (line != "") {
+        noise[line]=1
+      }
+      next
+    }
+
+    # 2e fichier : CSV ffuf
+    FNR==1 {
+      # Détection des colonnes
+      for (i=1; i<=NF; i++) {
+        h=$i; gsub(/"/,"",h); h=tolower(h)
+        if (h ~ /status/)                                      ci_status=i
+        else if (h ~ /content[_-]*length/ || h ~ /length/ || h ~ /size/) ci_size=i
+        else if (h=="url")                                     ci_url=i
+      }
+      next
+    }
+
+    {
+      if (!ci_status || !ci_size || !ci_url) {
+        next
+      }
+
+      code = $ci_status+0
+      size = $ci_size+0
+      key  = code ":" size
+
+      # Si le couple (status:size) est marqué comme bruit → on ignore
+      if (key in noise) {
+        next
+      }
+
+      url = $ci_url
+      # Nettoyage des séquences ANSI éventuelles
+      gsub(/\x1B\[[0-9;]*[A-Za-z]/, "", url)
+
+      if (match(url, /(https?:\/\/[^\/]+(\/[^"]*))/ , m)) {
+        path = m[2]
+        if (path=="" || path=="/") next
+        print path
+      }
+    }
+  ' "$noise_file" "$f" | sort -u
+}
+
+# ---------- extraction des paths depuis la sortie dirsearch ----------
 extract_paths_dirsearch() {
   local f="$1"
   [[ -f "$f" ]] || return 0
@@ -104,13 +197,11 @@ extract_paths_dirsearch() {
   awk '
     {
       line=$0
-      gsub(/\r/,"",line)
-      # lignes typiques : "200  -  http://example.com/admin"
+      # Nettoyage ANSI
+      gsub(/\x1B\[[0-9;]*[A-Za-z]/, "", line)
       if (match(line, /(https?:\/\/[^\/]+(\/[^[:space:]]*))/ , m)) {
         path = m[2]
-        if (path == "" || path == "/") {
-          next
-        }
+        if (path == "" || path == "/") next
         print path
       }
     }
@@ -141,12 +232,8 @@ detect_web_endpoints_from_nmap() {
     fi
   done < "$nmap_file"
 
-  if ((${#endpoints[@]} == 0)); then
-    return 1
-  fi
-
+  ((${#endpoints[@]}==0)) && return 1
   printf '%s\n' "${endpoints[@]}" | sort -n | uniq
-  return 0
 }
 
 # ---------- Version / aide ----------
@@ -163,7 +250,6 @@ fi
 DOMAIN="${1-}"
 shift || true
 
-# --- Extraire hostname + chemin si l'utilisateur passe host/path ---
 HOST="${DOMAIN%%/*}"
 HOST="${HOST%%:*}"
 [[ -z "$HOST" ]] && HOST="$DOMAIN"
@@ -175,12 +261,11 @@ if [[ "$DOMAIN" == */* ]]; then
   [[ "$PATH_PART" != */ ]] && PATH_PART="${PATH_PART}/"
 fi
 
-# --- si pas de chemin fourni, on force "/" pour éviter ...:80FUZZ ---
 if [[ -z "$PATH_PART" ]]; then
   PATH_PART="/"
 fi
 
-MODE="standard"   # plus de fast/medium/large/custom
+MODE="standard"
 THREADS=50
 TIMEOUT=8
 MASTER="/usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt"
@@ -188,7 +273,6 @@ STRICT=1
 MATCH_CODES="200,301,302,403"
 DEBUG=0
 
-# --- extensions par défaut (généralisées) ---
 EXTENSIONS_DEFAULT=".php,.txt,"
 EXTENSIONS="$EXTENSIONS_DEFAULT"
 
@@ -197,7 +281,7 @@ while (( "$#" )); do
     --master)    MASTER="${2-}"; shift 2;;
     -t)          THREADS="${2-}"; shift 2;;
     --timeout)   TIMEOUT="${2-}"; shift 2;;
-    --strict)    STRICT=1; shift;;  # déjà par défaut, mais accepté
+    --strict)    STRICT=1; shift;;
     --codes)     MATCH_CODES="${2-}"; shift 2;;
     --ext)       EXTENSIONS="${2-}"; shift 2;;
     --debug)     DEBUG=1; shift;;
@@ -222,16 +306,14 @@ fi
 
 ok "Domaine : ${DOMAIN}"
 
-# ---------- Dossier mes_scans ----------
 MES_SCANS_DIR="mes_scans"
 mkdir -p "$MES_SCANS_DIR"
 
-# --- fichier de sortie spécifique si PATH_PART présent ---
 SCAN_FILE="${MES_SCANS_DIR}/scan_repertoires.txt"
 if [[ -n "$PATH_PART" ]]; then
-  PATH_TAG="${PATH_PART#/}"          # enlever le / de début
-  PATH_TAG="${PATH_TAG%/}"           # enlever le / final
-  PATH_TAG="${PATH_TAG//\//-}"       # / -> -
+  PATH_TAG="${PATH_PART#/}"
+  PATH_TAG="${PATH_TAG%/}"
+  PATH_TAG="${PATH_TAG//\//-}"
   if [[ -n "$PATH_TAG" ]]; then
     SCAN_FILE="${MES_SCANS_DIR}/scan_repertoires_${PATH_TAG}.txt"
   fi
@@ -239,7 +321,6 @@ fi
 
 ok "Fichier de résultats : ${SCAN_FILE}"
 
-# ---------- Wordlist effective (unique) ----------
 WL_EFFECTIVE="$MASTER"
 if [[ ! -f "$WL_EFFECTIVE" ]]; then
   warn "Wordlist introuvable : $WL_EFFECTIVE"
@@ -248,7 +329,6 @@ if [[ ! -f "$WL_EFFECTIVE" ]]; then
 fi
 ok "Wordlist : $WL_EFFECTIVE"
 
-# ---------- Résolution IP ----------
 TARGET_IP="$(getent hosts "$HOST" | awk '{print $1}' | head -n1 || true)"
 if [[ -z "$TARGET_IP" ]]; then
   TARGET_IP="$(dig +short A "$HOST" 2>/dev/null | head -n1 || true)"
@@ -257,10 +337,9 @@ fi
 if [[ -n "$TARGET_IP" ]]; then
   ok "IP détectée : $TARGET_IP"
 else
-  warn "IP non détectée pour ${HOST}. Impossible de lancer un scan web."
-  BLOCK_START="=== mon-recoweb ${DOMAIN} START ==="
-  BLOCK_END="=== mon-recoweb ${DOMAIN} END ==="
-  TMP_BLOCK="$(mktemp "/tmp/mon-recoweb_${DOMAIN//\//_}_block.XXXXXX")"
+  BLOCK_START="=== mon-nouveau-recoweb ${DOMAIN} START ==="
+  BLOCK_END="=== mon-nouveau-recoweb ${DOMAIN} END ==="
+  TMP_BLOCK="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_block.XXXXXX")"
   {
     echo "$BLOCK_START"
     echo "Script       : mon-nouveau-recoweb"
@@ -281,24 +360,23 @@ else
   } > "$TMP_BLOCK"
 
   echo
-  echo -e "${BLUE}===== Résultats mon-recoweb (${DOMAIN}) =====${RESET}"
+  echo -e "${BLUE}===== Résultats mon-nouveau-recoweb (${DOMAIN}) =====${RESET}"
   cat "$TMP_BLOCK"
   echo -e "${BLUE}=============================================${RESET}"
   echo
 
   if [[ -f "$SCAN_FILE" ]]; then
-    sed -e "\#^=== mon-recoweb ${DOMAIN} START ===\$#,\#^=== mon-recoweb ${DOMAIN} END ===\$#d" \
+    sed -e "\#^=== mon-nouveau-recoweb ${DOMAIN} START ===\$#,\#^=== mon-nouveau-recoweb ${DOMAIN} END ===\$#d" \
       "$SCAN_FILE" > "${SCAN_FILE}.tmp" || true
     mv "${SCAN_FILE}.tmp" "$SCAN_FILE"
   fi
   cat "$TMP_BLOCK" >> "$SCAN_FILE"
   ok "Bloc mis à jour dans ${SCAN_FILE} pour le domaine ${DOMAIN}"
 
-  rm -f /tmp/mon-recoweb_"${DOMAIN//\//_}"_* 2>/dev/null || true
+  rm -f /tmp/mon-nouveau-recoweb_"${DOMAIN//\//_}"_* 2>/dev/null || true
   exit 0
 fi
 
-# ---------- Vérification ping ----------
 if ping -c1 -W1 "$TARGET_IP" >/dev/null 2>&1; then
   ok "Ping OK : ${HOST} (${TARGET_IP}) est joignable."
 else
@@ -307,19 +385,14 @@ else
   echo
   read -r -p "Continuer quand même le scan ? [o/N] " rep
   case "$rep" in
-    [oOyY])
-      info "Poursuite du scan malgré l'échec du ping."
-      ;;
-    *)
-      warn "Scan interrompu. Vérifie /etc/hosts (IP de ${HOST}) puis relance mon-recoweb."
-      rm -f /tmp/mon-recoweb_"${DOMAIN//\//_}"_* 2>/dev/null || true
-      exit 1
-      ;;
+    [oOyY]) info "Poursuite du scan malgré l'échec du ping." ;;
+    *)      warn "Scan interrompu. Vérifie /etc/hosts puis relance mon-nouveau-recoweb."
+            rm -f /tmp/mon-nouveau-recoweb_"${DOMAIN//\//_}"_* 2>/dev/null || true
+            exit 1 ;;
   esac
 fi
 
-# ---------- Scan Nmap interne ----------
-NMAP_FILE="$(mktemp "/tmp/mon-recoweb_${DOMAIN//\//_}_nmap.XXXXXX")"
+NMAP_FILE="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_nmap.XXXXXX")"
 info "Scan Nmap interne pour détecter les ports HTTP/HTTPS…"
 info "Commande : nmap -Pn -sV -p- --min-rate 5000 -T4 --max-retries 3 -oN \"$NMAP_FILE\" \"$TARGET_IP\""
 
@@ -333,15 +406,14 @@ if [[ -n "$WEB_ENDPOINTS_RAW" ]]; then
   mapfile -t WEB_ENDPOINTS <<< "$WEB_ENDPOINTS_RAW"
 fi
 
-# ---------- Fichiers de détails par outil ----------
-WHATWEB_DETAILS="$(mktemp "/tmp/mon-recoweb_${DOMAIN//\//_}_whatweb_details.XXXXXX")"
-FFUF_DETAILS="$(mktemp "/tmp/mon-recoweb_${DOMAIN//\//_}_ffuf_details.XXXXXX")"
-DIRSEARCH_DETAILS="$(mktemp "/tmp/mon-recoweb_${DOMAIN//\//_}_dirsearch_details.XXXXXX")"
+WHATWEB_DETAILS="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_whatweb_details.XXXXXX")"
+FFUF_DETAILS="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_ffuf_details.XXXXXX")"
+DIRSEARCH_DETAILS="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirsearch_details.XXXXXX")"
 : > "$WHATWEB_DETAILS"
 : > "$FFUF_DETAILS"
 : > "$DIRSEARCH_DETAILS"
 
-UNION_DIRS="$(mktemp "/tmp/mon-recoweb_${DOMAIN//\//_}_union.XXXXXX")"
+UNION_DIRS="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_union.XXXXXX")"
 : > "$UNION_DIRS"
 UNION_DIRS_NORM=""
 DIR_COUNT_TOTAL=0
@@ -349,15 +421,9 @@ DIR_UNIQUE_TOTAL=0
 
 if ((${#WEB_ENDPOINTS[@]} == 0)); then
   warn "Aucun service HTTP/HTTPS détecté par Nmap sur ${TARGET_IP}."
-  {
-    echo "Aucun port HTTP/HTTPS détecté sur ${TARGET_IP}."
-  } >> "$WHATWEB_DETAILS"
-  {
-    echo "Aucun port HTTP/HTTPS détecté sur ${TARGET_IP}."
-  } >> "$FFUF_DETAILS"
-  {
-    echo "Aucun port HTTP/HTTPS détecté sur ${TARGET_IP}."
-  } >> "$DIRSEARCH_DETAILS"
+  echo "Aucun port HTTP/HTTPS détecté sur ${TARGET_IP}." >> "$WHATWEB_DETAILS"
+  echo "Aucun port HTTP/HTTPS détecté sur ${TARGET_IP}." >> "$FFUF_DETAILS"
+  echo "Aucun port HTTP/HTTPS détecté sur ${TARGET_IP}." >> "$DIRSEARCH_DETAILS"
 else
   info "Ports HTTP/HTTPS détectés : ${WEB_ENDPOINTS[*]}"
 
@@ -370,8 +436,7 @@ else
       FFUF_TLS="-k"
     fi
 
-    # --- WHATWEB ---
-    WHATWEB_OUT="$(mktemp "/tmp/mon-recoweb_${DOMAIN//\//_}_whatweb_${PORT}.XXXXXX")"
+    WHATWEB_OUT="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_whatweb_${PORT}.XXXXXX")"
     info "whatweb sur ${SCHEME}://${HOST}:${PORT}${PATH_PART} ..."
     if ! whatweb --color=never -a 3 "${SCHEME}://${HOST}:${PORT}${PATH_PART}" > "$WHATWEB_OUT" 2>&1; then
       warn "whatweb a rencontré une erreur sur ${SCHEME}://${HOST}:${PORT}${PATH_PART}."
@@ -383,7 +448,6 @@ else
       echo
     } >> "$WHATWEB_DETAILS"
 
-    # --- baseline anti-404 pour FFUF ---
     RAND_PATH="$(tr -dc 'a-z0-9' </dev/urandom | head -c 10 || echo rnd)"
     BASE_URL="${SCHEME}://${TARGET_IP}:${PORT}${PATH_PART}${RAND_PATH}"
     BASE_RESP="$(curl -sk ${CURL_TLS:-} -H "Host: ${HOST}" --max-time "$TIMEOUT" \
@@ -405,10 +469,8 @@ else
       [[ "$BASE_WORDS" != "0" && -n "$BASE_WORDS" ]] && FFUF_FILTER+=(-fw "$BASE_WORDS")
     fi
 
-    # --- FFUF ---
-    FFUF_RAW="$(mktemp "/tmp/mon-recoweb_${DOMAIN//\//_}_ffuf_${PORT}.XXXXXX")"
-    FFUF_CSV="$(mktemp "/tmp/mon-recoweb_${DOMAIN//\//_}_ffuf_${PORT}.csv.XXXXXX")"
-    DIR_TXT_PORT="$(mktemp "/tmp/mon-recoweb_${DOMAIN//\//_}_dirs_${PORT}.XXXXXX")"
+    FFUF_CSV="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_ffuf_${PORT}.csv.XXXXXX")"
+    DIR_TXT_PORT="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirs_${PORT}.XXXXXX")"
     : > "$DIR_TXT_PORT"
 
     info "Fuzzing répertoires via ffuf sur ${SCHEME}://${TARGET_IP}:${PORT}${PATH_PART}FUZZ ..."
@@ -429,14 +491,21 @@ else
               -of csv -o "$FFUF_CSV")
 
     [[ $DEBUG -eq 1 ]] && echo "[*] CMD: ${CMD[*]}"
-    "${CMD[@]}" > "$FFUF_RAW" 2>&1 || true
+    "${CMD[@]}" || true
 
-    extract_paths_csv "$FFUF_CSV" > "$DIR_TXT_PORT" || true
+    NOISE_KEYS_FILE="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_ffuf_noise_${PORT}.XXXXXX")"
+    detect_ffuf_noise_combos "$FFUF_CSV" > "$NOISE_KEYS_FILE" || true
+
+    filtered_paths_from_ffuf_csv "$FFUF_CSV" "$NOISE_KEYS_FILE" > "$DIR_TXT_PORT" || true
     DIR_COUNT_PORT="$(grep -c '.' "$DIR_TXT_PORT" || true)"
 
     {
       echo "Port ${PORT} (${SCHEME})"
       echo "  Baseline: code=${BASE_CODE} size=${BASE_SIZE} words=${BASE_WORDS} (${PATH_PART}${RAND_PATH})"
+      if [[ -s "$NOISE_KEYS_FILE" ]]; then
+        echo "  Heuristique bruit : combos ignorés (status:size) :"
+        sed 's/^/    - /' "$NOISE_KEYS_FILE"
+      fi
       echo "  FFUF DIR (${DIR_COUNT_PORT})"
       if [[ "$DIR_COUNT_PORT" -gt 0 ]]; then
         sed 's/^/    - /' "$DIR_TXT_PORT"
@@ -451,16 +520,14 @@ else
       DIR_COUNT_TOTAL=$((DIR_COUNT_TOTAL + DIR_COUNT_PORT))
     fi
 
-    # --- DIRSEARCH (option A : toujours lancé si présent) ---
     if [[ $HAS_DIRSEARCH -eq 1 ]]; then
-      DIRSEARCH_OUT="$(mktemp "/tmp/mon-recoweb_${DOMAIN//\//_}_dirsearch_${PORT}.XXXXXX")"
+      DIRSEARCH_OUT="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirsearch_${PORT}.XXXXXX")"
       info "dirsearch sur ${SCHEME}://${HOST}:${PORT}${PATH_PART} ..."
       if ! dirsearch -u "${SCHEME}://${HOST}:${PORT}${PATH_PART}" -H "Host: ${HOST}" -q > "$DIRSEARCH_OUT" 2>&1; then
         warn "dirsearch a rencontré une erreur sur ${SCHEME}://${HOST}:${PORT}${PATH_PART}."
       fi
 
-      # On ajoute aussi ses chemins au set global
-      DIRSEARCH_PATHS="$(mktemp "/tmp/mon-recoweb_${DOMAIN//\//_}_dirsearch_paths_${PORT}.XXXXXX")"
+      DIRSEARCH_PATHS="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirsearch_paths_${PORT}.XXXXXX")"
       extract_paths_dirsearch "$DIRSEARCH_OUT" > "$DIRSEARCH_PATHS" || true
       if [[ -s "$DIRSEARCH_PATHS" ]]; then
         cat "$DIRSEARCH_PATHS" >> "$UNION_DIRS"
@@ -483,14 +550,27 @@ else
   if [[ -s "$UNION_DIRS" ]]; then
     sort -u "$UNION_DIRS" -o "$UNION_DIRS"
 
-    UNION_DIRS_NORM="$(mktemp "/tmp/mon-recoweb_${DOMAIN//\//_}_union_norm.XXXXXX")"
+    UNION_DIRS_NORM="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_union_norm.XXXXXX")"
     awk '
       {
         s = $0
-        gsub(/\/+$/, "", s)
-        if (s == "" || s == ".") {
-          s = "/"
+        # Nettoyage ANSI (progress bar ffuf, etc.)
+        gsub(/\x1B\[[0-9;]*[A-Za-z]/, "", s)
+
+        # Si on voit une URL complète, extraire juste le /chemin
+        if (match(s, /(https?:\/\/[^\/]+(\/[^[:space:]]*))/ , m)) {
+          s = m[2]
+        } else {
+          # Sinon, on garde tout ce qui suit le premier /
+          sub(/^[^\/]*/, "", s)
         }
+
+        if (s == "" || s !~ /^\//) next
+
+        gsub(/\/+$/, "", s)
+
+        if (s == "" || s == ".") next
+
         print tolower(s)
       }
     ' "$UNION_DIRS" | sort -u > "$UNION_DIRS_NORM"
@@ -501,10 +581,9 @@ else
   fi
 fi
 
-# ---------- Bloc final & affichage ----------
-BLOCK_START="=== mon-recoweb ${DOMAIN} START ==="
-BLOCK_END="=== mon-recoweb ${DOMAIN} END ==="
-TMP_BLOCK="$(mktemp "/tmp/mon-recoweb_${DOMAIN//\//_}_block.XXXXXX")"
+BLOCK_START="=== mon-nouveau-recoweb ${DOMAIN} START ==="
+BLOCK_END="=== mon-nouveau-recoweb ${DOMAIN} END ==="
+TMP_BLOCK="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_block.XXXXXX")"
 
 {
   echo "$BLOCK_START"
@@ -526,14 +605,13 @@ TMP_BLOCK="$(mktemp "/tmp/mon-recoweb_${DOMAIN//\//_}_block.XXXXXX")"
   else
     echo "Ports HTTP/HTTPS détectés : (aucun)"
   fi
-  echo "Total chemins bruts (ffuf + dirsearch) : ${DIR_COUNT_TOTAL}"
-  echo "Chemins uniques normalisés            : ${DIR_UNIQUE_TOTAL}"
+  echo "Total chemins bruts (ffuf + dirsearch, après filtrage bruit) : ${DIR_COUNT_TOTAL}"
+  echo "Chemins uniques normalisés                                : ${DIR_UNIQUE_TOTAL}"
   echo
+  echo "Chemins uniques :"
   if [[ -n "$UNION_DIRS_NORM" && -s "$UNION_DIRS_NORM" ]]; then
-    echo "Chemins uniques :"
     sed 's/^/  - /' "$UNION_DIRS_NORM"
   else
-    echo "Chemins uniques :"
     echo "  - (aucun)"
   fi
   echo
@@ -571,14 +649,13 @@ TMP_BLOCK="$(mktemp "/tmp/mon-recoweb_${DOMAIN//\//_}_block.XXXXXX")"
 } > "$TMP_BLOCK"
 
 echo
-echo -e "${BLUE}===== Résultats mon-recoweb (${DOMAIN}) =====${RESET}"
+echo -e "${BLUE}===== Résultats mon-nouveau-recoweb (${DOMAIN}) =====${RESET}"
 cat "$TMP_BLOCK"
 echo -e "${BLUE}=============================================${RESET}"
 echo
 
-# ---------- Insertion dans scan_repertoires*.txt ----------
 if [[ -f "$SCAN_FILE" ]]; then
-  sed -e "\#^=== mon-recoweb ${DOMAIN} START ===\$#,\#^=== mon-recoweb ${DOMAIN} END ===\$#d" \
+  sed -e "\#^=== mon-nouveau-recoweb ${DOMAIN} START ===\$#,\#^=== mon-nouveau-recoweb ${DOMAIN} END ===\$#d" \
     "$SCAN_FILE" > "${SCAN_FILE}.tmp" || true
   mv "${SCAN_FILE}.tmp" "$SCAN_FILE"
 fi
@@ -586,12 +663,11 @@ fi
 cat "$TMP_BLOCK" >> "$SCAN_FILE"
 ok "Bloc mis à jour dans ${SCAN_FILE} pour le domaine ${DOMAIN}"
 
-# ---------- Nettoyage des fichiers temporaires ----------
 if [[ $DEBUG -eq 1 ]]; then
   info "DEBUG : aucun nettoyage des fichiers /tmp effectué."
-  ls -1 /tmp/mon-recoweb_"${DOMAIN//\//_}"_* 2>/dev/null || true
+  ls -1 /tmp/mon-nouveau-recoweb_"${DOMAIN//\//_}"_* 2>/dev/null || true
 else
-  rm -f /tmp/mon-recoweb_"${DOMAIN//\//_}"_* 2>/dev/null || true
+  rm -f /tmp/mon-nouveau-recoweb_"${DOMAIN//\//_}"_* 2>/dev/null || true
 fi
 
 exit 0
