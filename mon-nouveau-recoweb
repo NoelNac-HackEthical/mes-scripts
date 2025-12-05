@@ -29,7 +29,7 @@ LC_ALL=C
 
 # --- version helpers ---
 _self_path="${BASH_SOURCE[0]:-$0}"
-if command -v readlink >/devnull 2>&1; then
+if command -v readlink >/dev/null 2>&1; then
   _resolved="$(readlink -f -- "$_self_path" 2>/dev/null || true)"
   [ -n "$_resolved" ] && _self_path="$_resolved"
 fi
@@ -495,6 +495,16 @@ else
 
     NOISE_KEYS_FILE="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_ffuf_noise_${PORT}.XXXXXX")"
     detect_ffuf_noise_combos "$FFUF_CSV" > "$NOISE_KEYS_FILE" || true
+
+    # --- Logs d'info sur l'heuristique de bruit avant dirsearch / agrégation ---
+    info "Recherche des combos de bruit (status:size) dans les résultats ffuf du port ${PORT}..."
+    if [[ -s "$NOISE_KEYS_FILE" ]]; then
+      NOISE_LIST="$(paste -sd ', ' "$NOISE_KEYS_FILE")"
+      info "Heuristique bruit : combos ignorés (status:size) : ${NOISE_LIST}"
+    else
+      info "Heuristique bruit : aucun combo de bruit détecté dans les résultats ffuf du port ${PORT}."
+    fi
+    # ---------------------------------------------------------------------------
 
     filtered_paths_from_ffuf_csv "$FFUF_CSV" "$NOISE_KEYS_FILE" > "$DIR_TXT_PORT" || true
     DIR_COUNT_PORT="$(grep -c '.' "$DIR_TXT_PORT" || true)"
