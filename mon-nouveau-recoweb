@@ -1,6 +1,6 @@
 #!/bin/bash
 # NAME=mon-nouveau-recoweb
-# VERSION=v1.2.0
+# VERSION=v1.2.1
 # DESCRIPTION=Automatise la découverte web (whatweb + ffuf + dirsearch) et agrège les résultats dans mes_scans/scan_repertoires.txt (ou un fichier spécifique si un chemin est fourni).
 # PRESENTATION_START
 # **mon-nouveau-recoweb — Découverte web ciblée pour CTF / pentest (version simplifiée)**
@@ -519,7 +519,7 @@ else
       cat "$DIR_TXT_PORT" >> "$UNION_DIRS"
       DIR_COUNT_TOTAL=$((DIR_COUNT_TOTAL + DIR_COUNT_PORT))
     fi
-
+    HAS_DIRSEARCH=0
     if [[ $HAS_DIRSEARCH -eq 1 ]]; then
       DIRSEARCH_OUT="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirsearch_${PORT}.XXXXXX")"
       info "dirsearch sur ${SCHEME}://${HOST}:${PORT}${PATH_PART} ..."
