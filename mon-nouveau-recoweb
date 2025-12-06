@@ -1,6 +1,7 @@
 #!/bin/bash
 # NAME=mon-nouveau-recoweb
-# VERSION=v1.4.0
+# VERSION=v1.4.1
+# DESCRIPTION=Découverte web automatisée via ffuf avec heuristique de bruit et agrégation des chemins filtrés.
 # PRESENTATION_START
 # **mon-nouveau-recoweb — Découverte web ciblée pour CTF / pentest (ffuf + filtrage de bruit)**
 #
