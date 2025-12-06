@@ -1,28 +1,69 @@
 #!/bin/bash
 # NAME=mon-nouveau-recoweb
-# VERSION=v1.2.1
-# DESCRIPTION=Automatise la découverte web (whatweb + ffuf + dirsearch) et agrège les résultats dans mes_scans/scan_repertoires.txt (ou un fichier spécifique si un chemin est fourni).
+# VERSION=v1.4.0
 # PRESENTATION_START
-# **mon-nouveau-recoweb — Découverte web ciblée pour CTF / pentest (version simplifiée)**
+# **mon-nouveau-recoweb — Découverte web ciblée pour CTF / pentest (ffuf + filtrage de bruit)**
 #
-# Ce script automatise la reconnaissance web d'une cible (ex. mon-site.htb) :
-# - Résolution de l'IP et vérification via ping (cohérence /etc/hosts).
-# - Scan interne Nmap (-Pn -sV -p-) pour détecter tous les ports HTTP/HTTPS.
-# - Pour chaque port HTTP/HTTPS :
-#     * Analyse de surface via whatweb (sur DOMAIN:PORT[/PATH]).
-#     * Fuzzing de répertoires/fichiers via ffuf, avec Host: DOMAIN.
-#     * Scan complémentaire via dirsearch (si installé).
-#     * Baseline anti-404 (fs/fw) pour limiter le bruit (ffuf).
-# - Wordlist par défaut :
-#     /usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt
-# - Résultats :
-#     * Affichage à l'écran avec sections séparées (Résumé global, WHATWEB, FFUF, DIRSEARCH)
-#     * Agrégation dans :
-#         mes_scans/scan_repertoires.txt
-#       ou, si un chemin est fourni (ex: /cgi-bin/), dans :
-#         mes_scans/scan_repertoires_<chemin>.txt
+# Ce script automatise la reconnaissance web d'une cible (ex. mon-site.htb) en se concentrant
+# sur ffuf, avec une gestion avancée du “bruit de fond” (404/403 génériques) pour ne conserver
+# que les chemins intéressants.
+#
+# Principales étapes :
+# - Résolution du domaine vers une IP + vérification par ping (cohérence /etc/hosts).
+# - Scan Nmap interne (-Pn -sV -p-) pour détecter tous les ports TCP exposant du HTTP/HTTPS.
+# - Pour chaque port HTTP/HTTPS détecté :
+#     1) Calcul d’une baseline HTTP sur un chemin aléatoire :
+#        - Requête vers http(s)://IP:PORT/<random> avec en-tête Host: domaine.
+#        - Récupération du triplet : code HTTP, taille de réponse, nombre de mots.
+#        - Utilisation de cette baseline pour paramétrer les filtres ffuf (-fs / -fw) contre les faux positifs.
+#
+#     2) Phase d’échantillonnage (détection du bruit de fond) :
+#        - Construction d’une mini-wordlist (~10 000 premières entrées de la wordlist principale).
+#        - Lancement d’un ffuf “échantillon” sur cette mini-wordlist, avec les filtres de baseline.
+#        - Analyse des résultats CSV pour détecter les combos (status:size) récurrents typiques du bruit
+#          (ex. 403:199 renvoyé massivement par le serveur).
+#        - Affichage des combos de bruit détectés pour le port concerné.
+#
+#     3) Scan ffuf complet (sur la wordlist principale) :
+#        - Lancement d’un ffuf sur l’ensemble de la wordlist fournie en argument (--master),
+#          en appliquant :
+#            * les filtres de baseline (-fs, -fw) issus du chemin aléatoire,
+#            * les filtres supplémentaires (-fs, -fw) dérivés des combos de bruit détectés à l’étape 2.
+#        - Export des résultats en CSV par port.
+#
+#     4) Post-traitement et agrégation :
+#        - Lecture des CSV ffuf par port.
+#        - Filtrage logique supplémentaire côté script : exclusion explicite des combos (status:size)
+#          identifiés comme bruit (ex. 403:199), même s’ils apparaissaient encore dans le CSV.
+#        - Extraction et normalisation des chemins :
+#            * Suppression des éventuelles séquences ANSI.
+#            * Réduction des URL complètes au chemin (/path).
+#            * Normalisation (lowercase, suppression des / finaux, déduplication).
+#        - Calcul :
+#            * du nombre total de chemins bruts (ffuf, après filtrage bruit),
+#            * du nombre de chemins uniques normalisés.
+#
+# Wordlist par défaut :
+#   /usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt
+#
+# Résultats :
+#   - Affichage à l’écran avec sections détaillées :
+#       * Résumé global (ports HTTP/HTTPS, compteurs de chemins bruts / uniques).
+#       * Résultats FFUF par port (baseline utilisée, combos de bruit ignorés, chemins trouvés).
+#   - Agrégation dans un fichier dans le répertoire mes_scans/ :
+#       * Si on lance : mon-nouveau-recoweb target.htb
+#           → mes_scans/scan_repertoires.txt
+#       * Si on cible un sous-chemin : mon-nouveau-recoweb target.htb/cgi-bin/
+#           → mes_scans/scan_repertoires_cgi-bin.txt
+#
+# À propos de dirsearch :
+#   - Le script détecte la présence de dirsearch, mais dans cette version le lancement de dirsearch
+#     est volontairement désactivé : seul ffuf est exécuté.
+#   - Le code est structuré de façon à pouvoir réactiver dirsearch ultérieurement (par exemple pour
+#     faire un second passage récursif sur les chemins déjà filtrés par ffuf).
 #
 # PRESENTATION_END
+
 
 set -euo pipefail
 LC_ALL=C
@@ -58,7 +99,7 @@ Usage:
 Options :
   --master FILE     Wordlist (défaut: /usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt)
   -t N              Threads ffuf (défaut: 50)
-  --timeout S       Timeout curl/whatweb (défaut: 8)
+  --timeout S       Timeout curl (défaut: 8)
   --strict          Mode strict (déjà activé par défaut : 200,301,302,403)
   --codes LIST      Liste pour ffuf -mc (ex: "200,301,302,403"; priorité sur --strict)
   --ext LIST        Extensions ffuf (ex: ".php,.txt,.sh,.cgi,.pl"). Vide = désactivé.
@@ -291,17 +332,16 @@ while (( "$#" )); do
   esac
 done
 
-command -v whatweb >/dev/null || { warn "whatweb manquant"; exit 1; }
-command -v ffuf    >/dev/null || { warn "ffuf manquant"; exit 1; }
-command -v curl    >/dev/null || { warn "curl manquant"; exit 1; }
-command -v nmap    >/dev/null || { warn "nmap manquant"; exit 1; }
+command -v ffuf >/dev/null 2>&1 || { warn "ffuf manquant"; exit 1; }
+command -v curl >/dev/null 2>&1 || { warn "curl manquant"; exit 1; }
+command -v nmap >/dev/null 2>&1 || { warn "nmap manquant"; exit 1; }
 
 HAS_DIRSEARCH=0
 if command -v dirsearch >/dev/null 2>&1; then
-  HAS_DIRSEARCH=1
-  info "dirsearch détecté : il sera lancé sur chaque endpoint HTTP/HTTPS."
+  HAS_DIRSEARCH=0
+  info "dirsearch détecté, mais désactivé dans cette version (seul ffuf est utilisé)."
 else
-  warn "dirsearch non détecté : seuls whatweb + ffuf seront utilisés."
+  warn "dirsearch non détecté : seul ffuf sera utilisé."
 fi
 
 ok "Domaine : ${DOMAIN}"
@@ -351,7 +391,7 @@ else
     echo "Wordlist     : ${WL_EFFECTIVE}"
     echo "Codes ffuf   : ${MATCH_CODES}  (strict=${STRICT})"
     echo "Extensions   : ${EXTENSIONS:-"(désactivées)"}"
-    echo "dirsearch    : $([[ $HAS_DIRSEARCH -eq 1 ]] && echo "activé" || echo "non détecté")"
+    echo "dirsearch    : (désactivé dans cette version)"
     echo
     echo "Aucun port HTTP/HTTPS n'a pu être scanné (IP non détectée)."
     echo
@@ -406,10 +446,8 @@ if [[ -n "$WEB_ENDPOINTS_RAW" ]]; then
   mapfile -t WEB_ENDPOINTS <<< "$WEB_ENDPOINTS_RAW"
 fi
 
-WHATWEB_DETAILS="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_whatweb_details.XXXXXX")"
 FFUF_DETAILS="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_ffuf_details.XXXXXX")"
 DIRSEARCH_DETAILS="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirsearch_details.XXXXXX")"
-: > "$WHATWEB_DETAILS"
 : > "$FFUF_DETAILS"
 : > "$DIRSEARCH_DETAILS"
 
@@ -421,7 +459,6 @@ DIR_UNIQUE_TOTAL=0
 
 if ((${#WEB_ENDPOINTS[@]} == 0)); then
   warn "Aucun service HTTP/HTTPS détecté par Nmap sur ${TARGET_IP}."
-  echo "Aucun port HTTP/HTTPS détecté sur ${TARGET_IP}." >> "$WHATWEB_DETAILS"
   echo "Aucun port HTTP/HTTPS détecté sur ${TARGET_IP}." >> "$FFUF_DETAILS"
   echo "Aucun port HTTP/HTTPS détecté sur ${TARGET_IP}." >> "$DIRSEARCH_DETAILS"
 else
@@ -436,20 +473,10 @@ else
       FFUF_TLS="-k"
     fi
 
-    WHATWEB_OUT="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_whatweb_${PORT}.XXXXXX")"
-    info "whatweb sur ${SCHEME}://${HOST}:${PORT}${PATH_PART} ..."
-    if ! whatweb --color=never -a 3 "${SCHEME}://${HOST}:${PORT}${PATH_PART}" > "$WHATWEB_OUT" 2>&1; then
-      warn "whatweb a rencontré une erreur sur ${SCHEME}://${HOST}:${PORT}${PATH_PART}."
-    fi
-    {
-      echo "Port ${PORT} (${SCHEME})"
-      echo "  whatweb :"
-      sed 's/^/    /' "$WHATWEB_OUT"
-      echo
-    } >> "$WHATWEB_DETAILS"
-
+    # --- Baseline (404 générique) ---
     RAND_PATH="$(tr -dc 'a-z0-9' </dev/urandom | head -c 10 || echo rnd)"
     BASE_URL="${SCHEME}://${TARGET_IP}:${PORT}${PATH_PART}${RAND_PATH}"
+
     BASE_RESP="$(curl -sk ${CURL_TLS:-} -H "Host: ${HOST}" --max-time "$TIMEOUT" \
                    -o /dev/null -w "%{http_code} %{size_download}" "$BASE_URL" 2>/dev/null || true)"
     BASE_CODE="${BASE_RESP%% *}"; BASE_CODE="${BASE_CODE:-000}"
@@ -458,27 +485,83 @@ else
                    "${SCHEME}://${TARGET_IP}:${PORT}${PATH_PART}${RAND_PATH}" 2>/dev/null | wc -w | tr -d ' ' || echo 0)"
     BASE_WORDS="${BASE_WORDS:-0}"
 
-    FFUF_FILTER=()
+    # --- Filtres communs de base (404) ---
+    FFUF_FILTER_BASE=()
     FFUF_AC_OPTS=()
 
     if [[ "$BASE_CODE" == "000" ]]; then
       warn "Baseline invalide sur le port ${PORT} (code=000) → ffuf sans filtres baseline."
       FFUF_AC_OPTS=(-ac)
     else
-      [[ "$BASE_SIZE"  != "0" && -n "$BASE_SIZE" ]]  && FFUF_FILTER+=(-fs "$BASE_SIZE")
-      [[ "$BASE_WORDS" != "0" && -n "$BASE_WORDS" ]] && FFUF_FILTER+=(-fw "$BASE_WORDS")
+      [[ "$BASE_SIZE"  != "0" && -n "$BASE_SIZE"  ]] && FFUF_FILTER_BASE+=(-fs "$BASE_SIZE")
+      [[ "$BASE_WORDS" != "0" && -n "$BASE_WORDS" ]] && FFUF_FILTER_BASE+=(-fw "$BASE_WORDS")
     fi
 
-    FFUF_CSV="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_ffuf_${PORT}.csv.XXXXXX")"
-    DIR_TXT_PORT="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirs_${PORT}.XXXXXX")"
-    : > "$DIR_TXT_PORT"
+    # --- Phase bruit : échantillon (~10000) ---
+    info "Tentative d'élimination du bruit de fond (404/403 génériques) sur le port ${PORT} (échantillon ~10000 entrées)…"
+    info "Recherche des combos de bruit (status:size) dans les résultats ffuf du port ${PORT} (phase d'échantillonnage)..."
 
-    info "Fuzzing répertoires via ffuf sur ${SCHEME}://${TARGET_IP}:${PORT}${PATH_PART}FUZZ ..."
+    WL_NOISE="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_wl_noise_${PORT}.XXXXXX")"
+    head -n 10000 "$WL_EFFECTIVE" > "$WL_NOISE" 2>/dev/null || cp "$WL_EFFECTIVE" "$WL_NOISE"
+
+    FFUF_CSV_NOISE="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_ffuf_noise_${PORT}.csv.XXXXXX")"
+    NOISE_KEYS_FILE="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_ffuf_noise_keys_${PORT}.XXXXXX")"
 
     FFUF_EXT_OPTS=()
     if [[ -n "${EXTENSIONS:-}" ]]; then
       FFUF_EXT_OPTS=(-e "$EXTENSIONS")
     fi
+
+    CMD_NOISE=(ffuf -u "${SCHEME}://${TARGET_IP}:${PORT}${PATH_PART}FUZZ" $FFUF_TLS \
+                     -H "Host: ${HOST}" \
+                     -w "$WL_NOISE" -t "$THREADS" \
+                     -mc "${MATCH_CODES}" \
+                     "${FFUF_EXT_OPTS[@]}" \
+                     -ic \
+                     "${FFUF_AC_OPTS[@]}" \
+                     "${FFUF_FILTER_BASE[@]}" \
+                     -of csv -o "$FFUF_CSV_NOISE")
+
+    [[ $DEBUG -eq 1 ]] && echo "[*] CMD_NOISE: ${CMD_NOISE[*]}"
+    "${CMD_NOISE[@]}" || true
+
+    detect_ffuf_noise_combos "$FFUF_CSV_NOISE" > "$NOISE_KEYS_FILE" || true
+
+    NOISE_SIZE=""
+    if [[ -s "$NOISE_KEYS_FILE" ]]; then
+      info "Heuristique bruit : combos détectés sur l'échantillon du port ${PORT} :"
+      sed 's/^/    - /' "$NOISE_KEYS_FILE"
+      # On récupère la première taille de bruit détectée (ex. 403:199 → 199)
+      while IFS= read -r combo; do
+        size="${combo##*:}"
+        if [[ -n "$size" ]]; then
+          NOISE_SIZE="$size"
+          break
+        fi
+      done < "$NOISE_KEYS_FILE"
+    else
+      info "Heuristique bruit : aucun combo de bruit de fond détecté sur l'échantillon du port ${PORT}."
+    fi
+
+    # --- Filtres pour le ffuf complet ---
+    FFUF_FILTER_MAIN=()
+    if [[ -n "$NOISE_SIZE" ]]; then
+      # Nouvelle stratégie :
+      #  - la 404 est filtrée par nombres de mots (fw)
+      #  - le bruit (ex. 403 génériques) est filtré par taille (fs)
+      [[ "$BASE_WORDS" != "0" && -n "$BASE_WORDS" ]] && FFUF_FILTER_MAIN+=(-fw "$BASE_WORDS")
+      FFUF_FILTER_MAIN+=(-fs "$NOISE_SIZE")
+    else
+      # Pas de bruit détecté → on conserve les filtres de base
+      FFUF_FILTER_MAIN=("${FFUF_FILTER_BASE[@]}")
+    fi
+
+    # --- ffuf complet ---
+    FFUF_CSV="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_ffuf_${PORT}.csv.XXXXXX")"
+    DIR_TXT_PORT="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirs_${PORT}.XXXXXX")"
+    : > "$DIR_TXT_PORT"
+
+    info "Fuzzing répertoires via ffuf sur ${SCHEME}://${TARGET_IP}:${PORT}${PATH_PART}FUZZ ..."
 
     CMD=(ffuf -u "${SCHEME}://${TARGET_IP}:${PORT}${PATH_PART}FUZZ" $FFUF_TLS \
               -H "Host: ${HOST}" \
@@ -487,25 +570,13 @@ else
               "${FFUF_EXT_OPTS[@]}" \
               -ic \
               "${FFUF_AC_OPTS[@]}" \
-              "${FFUF_FILTER[@]}" \
+              "${FFUF_FILTER_MAIN[@]}" \
               -of csv -o "$FFUF_CSV")
 
     [[ $DEBUG -eq 1 ]] && echo "[*] CMD: ${CMD[*]}"
     "${CMD[@]}" || true
 
-    NOISE_KEYS_FILE="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_ffuf_noise_${PORT}.XXXXXX")"
-    detect_ffuf_noise_combos "$FFUF_CSV" > "$NOISE_KEYS_FILE" || true
-
-    # --- Logs d'info sur l'heuristique de bruit avant dirsearch / agrégation ---
-    info "Recherche des combos de bruit (status:size) dans les résultats ffuf du port ${PORT}..."
-    if [[ -s "$NOISE_KEYS_FILE" ]]; then
-      NOISE_LIST="$(paste -sd ', ' "$NOISE_KEYS_FILE")"
-      info "Heuristique bruit : combos ignorés (status:size) : ${NOISE_LIST}"
-    else
-      info "Heuristique bruit : aucun combo de bruit détecté dans les résultats ffuf du port ${PORT}."
-    fi
-    # ---------------------------------------------------------------------------
-
+    # Extraction des chemins filtrés (en ignorant le bruit status:size)
     filtered_paths_from_ffuf_csv "$FFUF_CSV" "$NOISE_KEYS_FILE" > "$DIR_TXT_PORT" || true
     DIR_COUNT_PORT="$(grep -c '.' "$DIR_TXT_PORT" || true)"
 
@@ -529,31 +600,14 @@ else
       cat "$DIR_TXT_PORT" >> "$UNION_DIRS"
       DIR_COUNT_TOTAL=$((DIR_COUNT_TOTAL + DIR_COUNT_PORT))
     fi
-    HAS_DIRSEARCH=0
-    if [[ $HAS_DIRSEARCH -eq 1 ]]; then
-      DIRSEARCH_OUT="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirsearch_${PORT}.XXXXXX")"
-      info "dirsearch sur ${SCHEME}://${HOST}:${PORT}${PATH_PART} ..."
-      if ! dirsearch -u "${SCHEME}://${HOST}:${PORT}${PATH_PART}" -H "Host: ${HOST}" -q > "$DIRSEARCH_OUT" 2>&1; then
-        warn "dirsearch a rencontré une erreur sur ${SCHEME}://${HOST}:${PORT}${PATH_PART}."
-      fi
 
-      DIRSEARCH_PATHS="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirsearch_paths_${PORT}.XXXXXX")"
-      extract_paths_dirsearch "$DIRSEARCH_OUT" > "$DIRSEARCH_PATHS" || true
-      if [[ -s "$DIRSEARCH_PATHS" ]]; then
-        cat "$DIRSEARCH_PATHS" >> "$UNION_DIRS"
-      fi
-
-      {
-        echo "Port ${PORT} (${SCHEME})"
-        echo "  dirsearch :"
-        if [[ -s "$DIRSEARCH_OUT" ]]; then
-          sed 's/^/    /' "$DIRSEARCH_OUT"
-        else
-          echo "    (aucune sortie exploitable)"
-        fi
-        echo
-      } >> "$DIRSEARCH_DETAILS"
-    fi
+    # dirsearch désactivé, mais on garde la section dans le rapport
+    {
+      echo "Port ${PORT} (${SCHEME})"
+      echo "  dirsearch :"
+      echo "    (désactivé dans cette version de mon-nouveau-recoweb)"
+      echo
+    } >> "$DIRSEARCH_DETAILS"
 
   done
 
@@ -606,7 +660,7 @@ TMP_BLOCK="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_block.XXXXXX")"
   echo "Wordlist     : ${WL_EFFECTIVE}"
   echo "Codes ffuf   : ${MATCH_CODES}  (strict=${STRICT})"
   echo "Extensions   : ${EXTENSIONS:-"(désactivées)"}"
-  echo "dirsearch    : $([[ $HAS_DIRSEARCH -eq 1 ]] && echo "activé" || echo "non détecté")"
+  echo "dirsearch    : (désactivé dans cette version)"
   echo
 
   echo "=== Résumé global ==="
@@ -626,14 +680,6 @@ TMP_BLOCK="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_block.XXXXXX")"
   fi
   echo
 
-  echo "=== Résultats WHATWEB (par port) ==="
-  if [[ -s "$WHATWEB_DETAILS" ]]; then
-    cat "$WHATWEB_DETAILS"
-  else
-    echo "  (aucun résultat whatweb)"
-  fi
-  echo
-
   echo "=== Résultats FFUF (par port) ==="
   if [[ -s "$FFUF_DETAILS" ]]; then
     cat "$FFUF_DETAILS"
@@ -643,15 +689,7 @@ TMP_BLOCK="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_block.XXXXXX")"
   echo
 
   echo "=== Résultats dirsearch (par port) ==="
-  if [[ $HAS_DIRSEARCH -eq 1 ]]; then
-    if [[ -s "$DIRSEARCH_DETAILS" ]]; then
-      cat "$DIRSEARCH_DETAILS"
-    else
-      echo "  (dirsearch n'a retourné aucun résultat exploitable)"
-    fi
-  else
-    echo "  (dirsearch non installé / non détecté)"
-  fi
+  echo "  (dirsearch non installé / non détecté ou désactivé)"
   echo
 
   echo "$BLOCK_END"
@@ -681,3 +719,4 @@ else
 fi
 
 exit 0
+
