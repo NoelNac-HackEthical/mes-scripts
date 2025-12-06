@@ -1,70 +1,74 @@
 #!/bin/bash
 # NAME=mon-nouveau-recoweb
-# VERSION=v1.4.1
-# DESCRIPTION=Découverte web automatisée via ffuf avec heuristique de bruit et agrégation des chemins filtrés.
+# VERSION=v1.5.0
+# DESCRIPTION=Découverte web automatisée via feroxbuster + ffuf avec heuristique de bruit (ffuf) et agrégation des chemins filtrés.
 # PRESENTATION_START
-# **mon-nouveau-recoweb — Découverte web ciblée pour CTF / pentest (ffuf + filtrage de bruit)**
+# mon-nouveau-recoweb — Découverte web ciblée pour CTF / pentest (feroxbuster + ffuf)
 #
-# Ce script automatise la reconnaissance web d'une cible (ex. mon-site.htb) en se concentrant
-# sur ffuf, avec une gestion avancée du “bruit de fond” (404/403 génériques) pour ne conserver
-# que les chemins intéressants.
+# Ce script automatise la reconnaissance web d'une cible (ex. mon-site.htb) en combinant :
+#   - feroxbuster : scan récursif en premier, avec ses propres mécanismes internes (auto-filter, recursion, etc.),
+#   - ffuf        : scan guidé par baseline + heuristique de “bruit de fond” (404/403 génériques), en second.
 #
 # Principales étapes :
 # - Résolution du domaine vers une IP + vérification par ping (cohérence /etc/hosts).
 # - Scan Nmap interne (-Pn -sV -p-) pour détecter tous les ports TCP exposant du HTTP/HTTPS.
 # - Pour chaque port HTTP/HTTPS détecté :
-#     1) Calcul d’une baseline HTTP sur un chemin aléatoire :
-#        - Requête vers http(s)://IP:PORT/<random> avec en-tête Host: domaine.
-#        - Récupération du triplet : code HTTP, taille de réponse, nombre de mots.
-#        - Utilisation de cette baseline pour paramétrer les filtres ffuf (-fs / -fw) contre les faux positifs.
 #
-#     2) Phase d’échantillonnage (détection du bruit de fond) :
-#        - Construction d’une mini-wordlist (~10 000 premières entrées de la wordlist principale).
-#        - Lancement d’un ffuf “échantillon” sur cette mini-wordlist, avec les filtres de baseline.
-#        - Analyse des résultats CSV pour détecter les combos (status:size) récurrents typiques du bruit
-#          (ex. 403:199 renvoyé massivement par le serveur).
-#        - Affichage des combos de bruit détectés pour le port concerné.
+#   1) Scan feroxbuster (en premier) :
+#      - Lancement de feroxbuster sur l’URL basée sur le domaine (http(s)://domaine[:port]/chemin).
+#      - Utilisation d’une wordlist dédiée (--ferox-master, défaut : big.txt).
+#      - Aucune modification des paramètres internes de ferox (filtres, recursion, auto-filter).
+#      - Conservation de la sortie dans un fichier pour extraction des chemins (/path).
 #
-#     3) Scan ffuf complet (sur la wordlist principale) :
-#        - Lancement d’un ffuf sur l’ensemble de la wordlist fournie en argument (--master),
-#          en appliquant :
-#            * les filtres de baseline (-fs, -fw) issus du chemin aléatoire,
-#            * les filtres supplémentaires (-fs, -fw) dérivés des combos de bruit détectés à l’étape 2.
-#        - Export des résultats en CSV par port.
+#   2) Baseline + ffuf (en second) :
+#      a) Calcul d’une baseline HTTP sur un chemin aléatoire :
+#         - Requête vers http(s)://IP:PORT/<random> avec en-tête Host: domaine.
+#         - Récupération du triplet : code HTTP, taille de réponse, nombre de mots.
+#         - Utilisation de cette baseline pour paramétrer les filtres ffuf (-fs / -fw)
+#           contre les faux positifs (404 génériques).
 #
-#     4) Post-traitement et agrégation :
-#        - Lecture des CSV ffuf par port.
-#        - Filtrage logique supplémentaire côté script : exclusion explicite des combos (status:size)
-#          identifiés comme bruit (ex. 403:199), même s’ils apparaissaient encore dans le CSV.
-#        - Extraction et normalisation des chemins :
-#            * Suppression des éventuelles séquences ANSI.
-#            * Réduction des URL complètes au chemin (/path).
-#            * Normalisation (lowercase, suppression des / finaux, déduplication).
-#        - Calcul :
-#            * du nombre total de chemins bruts (ffuf, après filtrage bruit),
-#            * du nombre de chemins uniques normalisés.
+#      b) Phase d’échantillonnage (détection du bruit de fond) — ffuf uniquement :
+#         - Construction d’une mini-wordlist (~10 000 premières entrées de la wordlist ffuf).
+#         - Lancement d’un ffuf “échantillon” sur cette mini-wordlist, avec les filtres de baseline.
+#         - Analyse des résultats CSV pour détecter les combos (status:size) récurrents typiques du bruit
+#           (ex. 403:199 renvoyé massivement par le serveur).
+#         - Affichage des combos de bruit détectés pour le port concerné.
 #
-# Wordlist par défaut :
-#   /usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt
+#      c) Scan ffuf complet (sur la wordlist ffuf principale) :
+#         - Lancement d’un ffuf sur l’ensemble de la wordlist ffuf (--ffuf-master),
+#           en appliquant :
+#             * les filtres de baseline (-fs, -fw),
+#             * les filtres supplémentaires (-fs, -fw) dérivés des combos de bruit détectés à l’étape b).
+#         - Export des résultats en CSV par port.
+#         - Post-traitement côté script pour exclure explicitement les combos (status:size) identifiés comme bruit.
+#
+#   3) Post-traitement et agrégation globale :
+#      - Lecture de tous les chemins trouvés par feroxbuster puis ffuf.
+#      - Nettoyage :
+#          * suppression des séquences ANSI,
+#          * réduction des URLs complètes au chemin (/path),
+#          * normalisation (suppression des / finaux, déduplication, conservation de la casse).
+#      - Calcul :
+#          * du nombre total de chemins bruts (ferox + ffuf, après filtrage),
+#          * du nombre de chemins uniques normalisés.
+#
+# Wordlists par défaut :
+#   - ffuf  : /usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt
+#   - ferox : /usr/share/seclists/Discovery/Web-Content/big.txt
 #
 # Résultats :
 #   - Affichage à l’écran avec sections détaillées :
 #       * Résumé global (ports HTTP/HTTPS, compteurs de chemins bruts / uniques).
-#       * Résultats FFUF par port (baseline utilisée, combos de bruit ignorés, chemins trouvés).
+#       * Résultats feroxbuster (par port).
+#       * Résultats FFUF (par port).
+#       * Résultats dirsearch (placeholder désactivé).
 #   - Agrégation dans un fichier dans le répertoire mes_scans/ :
 #       * Si on lance : mon-nouveau-recoweb target.htb
 #           → mes_scans/scan_repertoires.txt
 #       * Si on cible un sous-chemin : mon-nouveau-recoweb target.htb/cgi-bin/
 #           → mes_scans/scan_repertoires_cgi-bin.txt
 #
-# À propos de dirsearch :
-#   - Le script détecte la présence de dirsearch, mais dans cette version le lancement de dirsearch
-#     est volontairement désactivé : seul ffuf est exécuté.
-#   - Le code est structuré de façon à pouvoir réactiver dirsearch ultérieurement (par exemple pour
-#     faire un second passage récursif sur les chemins déjà filtrés par ffuf).
-#
 # PRESENTATION_END
-
 
 set -euo pipefail
 LC_ALL=C
@@ -88,9 +92,9 @@ _print_version_and_exit() { _version_str; exit 0; }
 
 # --- UI helpers ---
 GREEN="\e[32m"; BLUE="\e[34m"; YELLOW="\e[33m"; RESET="\e[0m"
-ok(){ echo -e "${GREEN}[✓]${RESET} $*"; }
-info(){ echo -e "${BLUE}[*]${RESET} $*"; }
-warn(){ echo -e "${YELLOW}[!]${RESET} $*"; }
+ok()   { echo -e "${GREEN}[✓]${RESET} $*"; }
+info() { echo -e "${BLUE}[*]${RESET} $*"; }
+warn() { echo -e "${YELLOW}[!]${RESET} $*"; }
 
 usage(){
   cat <<'USAGE'
@@ -98,20 +102,21 @@ Usage:
   mon-nouveau-recoweb <domaine.htb> [options]
 
 Options :
-  --master FILE     Wordlist (défaut: /usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt)
-  -t N              Threads ffuf (défaut: 50)
-  --timeout S       Timeout curl (défaut: 8)
-  --strict          Mode strict (déjà activé par défaut : 200,301,302,403)
-  --codes LIST      Liste pour ffuf -mc (ex: "200,301,302,403"; priorité sur --strict)
-  --ext LIST        Extensions ffuf (ex: ".php,.txt,.sh,.cgi,.pl"). Vide = désactivé.
-  --debug           Affiche les commandes ffuf et conserve les fichiers /tmp
-  -V, --version     Afficher la version et quitter
-  -h, --help        Aide
+  --ffuf-master FILE    Wordlist ffuf (défaut: /usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt)
+  --ferox-master FILE   Wordlist feroxbuster (défaut: /usr/share/seclists/Discovery/Web-Content/big.txt)
+  -t N                  Threads ffuf (défaut: 50)
+  --timeout S           Timeout curl pour la baseline (défaut: 8)
+  --strict              Mode strict (déjà activé par défaut : 200,301,302,403)
+  --codes LIST          Liste pour ffuf -mc (ex: "200,301,302,403"; priorité sur --strict)
+  --ext LIST            Extensions ffuf (ex: ".php,.txt,.sh,.cgi,.pl"). Vide = désactivé.
+  --debug               Affiche les commandes ffuf/ferox et conserve les fichiers /tmp
+  -V, --version         Afficher la version et quitter
+  -h, --help            Aide
 
 Exemples :
   mon-nouveau-recoweb target.htb
-  mon-nouveau-recoweb target.htb --strict
   mon-nouveau-recoweb target.htb/cgi-bin/ --ext ".sh,.cgi,.pl"
+  mon-nouveau-recoweb target.htb --ffuf-master raft-large-directories.txt --ferox-master big.txt
 USAGE
 }
 
@@ -231,7 +236,7 @@ filtered_paths_from_ffuf_csv() {
   ' "$noise_file" "$f" | sort -u
 }
 
-# ---------- extraction des paths depuis la sortie dirsearch ----------
+# ---------- extraction des paths depuis la sortie dirsearch/ferox ----------
 extract_paths_dirsearch() {
   local f="$1"
   [[ -f "$f" ]] || return 0
@@ -310,7 +315,10 @@ fi
 MODE="standard"
 THREADS=50
 TIMEOUT=8
-MASTER="/usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt"
+
+FFUF_MASTER="/usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt"
+FEROX_MASTER="/usr/share/seclists/Discovery/Web-Content/big.txt"
+
 STRICT=1
 MATCH_CODES="200,301,302,403"
 DEBUG=0
@@ -318,31 +326,42 @@ DEBUG=0
 EXTENSIONS_DEFAULT=".php,.txt,"
 EXTENSIONS="$EXTENSIONS_DEFAULT"
 
+HAS_FEROX=0
+HAS_DIRSEARCH=0
+
 while (( "$#" )); do
   case "$1" in
-    --master)    MASTER="${2-}"; shift 2;;
-    -t)          THREADS="${2-}"; shift 2;;
-    --timeout)   TIMEOUT="${2-}"; shift 2;;
-    --strict)    STRICT=1; shift;;
-    --codes)     MATCH_CODES="${2-}"; shift 2;;
-    --ext)       EXTENSIONS="${2-}"; shift 2;;
-    --debug)     DEBUG=1; shift;;
-    -V|--version) _print_version_and_exit ;;
-    -h|--help)   usage; exit 0;;
-    *) warn "Option inconnue: $1"; usage; exit 1;;
+    --ffuf-master)   FFUF_MASTER="${2-}"; shift 2;;
+    --ferox-master)  FEROX_MASTER="${2-}"; shift 2;;
+    -t)              THREADS="${2-}"; shift 2;;
+    --timeout)       TIMEOUT="${2-}"; shift 2;;
+    --strict)        STRICT=1; shift;;
+    --codes)         MATCH_CODES="${2-}"; shift 2;;
+    --ext)           EXTENSIONS="${2-}"; shift 2;;
+    --debug)         DEBUG=1; shift;;
+    -V|--version)    _print_version_and_exit ;;
+    -h|--help)       usage; exit 0;;
+    *)               warn "Option inconnue: $1"; usage; exit 1;;
   esac
 done
 
-command -v ffuf >/dev/null 2>&1 || { warn "ffuf manquant"; exit 1; }
-command -v curl >/dev/null 2>&1 || { warn "curl manquant"; exit 1; }
-command -v nmap >/dev/null 2>&1 || { warn "nmap manquant"; exit 1; }
+# --- binaires nécessaires ---
+command -v ffuf  >/dev/null 2>&1 || { warn "ffuf manquant";  exit 1; }
+command -v curl  >/dev/null 2>&1 || { warn "curl manquant";  exit 1; }
+command -v nmap  >/dev/null 2>&1 || { warn "nmap manquant";  exit 1; }
 
-HAS_DIRSEARCH=0
+if command -v feroxbuster >/dev/null 2>&1; then
+  HAS_FEROX=1
+else
+  HAS_FEROX=0
+  warn "feroxbuster non détecté : seul ffuf sera utilisé."
+fi
+
 if command -v dirsearch >/dev/null 2>&1; then
   HAS_DIRSEARCH=0
-  info "dirsearch détecté, mais désactivé dans cette version (seul ffuf est utilisé)."
+  info "dirsearch détecté, mais désactivé dans cette version (seuls feroxbuster/ffuf sont utilisés)."
 else
-  warn "dirsearch non détecté : seul ffuf sera utilisé."
+  warn "dirsearch non détecté : feroxbuster/ffuf uniquement."
 fi
 
 ok "Domaine : ${DOMAIN}"
@@ -362,24 +381,35 @@ fi
 
 ok "Fichier de résultats : ${SCAN_FILE}"
 
-WL_EFFECTIVE="$MASTER"
-if [[ ! -f "$WL_EFFECTIVE" ]]; then
-  warn "Wordlist introuvable : $WL_EFFECTIVE"
-  echo "Tu peux changer avec --master /chemin/vers/ta_wordlist.txt"
+FFUF_WL_EFFECTIVE="$FFUF_MASTER"
+if [[ ! -f "$FFUF_WL_EFFECTIVE" ]]; then
+  warn "Wordlist ffuf introuvable : $FFUF_WL_EFFECTIVE"
+  echo "Tu peux changer avec --ffuf-master /chemin/vers/ta_wordlist_ffuf.txt"
   exit 1
 fi
-ok "Wordlist : $WL_EFFECTIVE"
+ok "Wordlist ffuf  : $FFUF_WL_EFFECTIVE"
+
+FEROX_WL_EFFECTIVE=""
+if (( HAS_FEROX )); then
+  FEROX_WL_EFFECTIVE="$FEROX_MASTER"
+  if [[ ! -f "$FEROX_WL_EFFECTIVE" ]]; then
+    warn "Wordlist ferox introuvable : $FEROX_WL_EFFECTIVE"
+    echo "feroxbuster sera désactivé pour ce run."
+    HAS_FEROX=0
+  else
+    ok "Wordlist ferox : $FEROX_WL_EFFECTIVE"
+  fi
+fi
 
 TARGET_IP="$(getent hosts "$HOST" | awk '{print $1}' | head -n1 || true)"
 if [[ -z "$TARGET_IP" ]]; then
   TARGET_IP="$(dig +short A "$HOST" 2>/dev/null | head -n1 || true)"
 fi
 
-if [[ -n "$TARGET_IP" ]]; then
-  ok "IP détectée : $TARGET_IP"
-else
-  BLOCK_START="=== mon-nouveau-recoweb ${DOMAIN} START ==="
-  BLOCK_END="=== mon-nouveau-recoweb ${DOMAIN} END ==="
+BLOCK_START="=== mon-nouveau-recoweb ${DOMAIN} START ==="
+BLOCK_END="=== mon-nouveau-recoweb ${DOMAIN} END ==="
+
+if [[ -z "$TARGET_IP" ]]; then
   TMP_BLOCK="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_block.XXXXXX")"
   {
     echo "$BLOCK_START"
@@ -389,10 +419,16 @@ else
     echo "Domaine      : ${DOMAIN}"
     echo "IP           : (non détectée)"
     echo "Mode         : ${MODE}"
-    echo "Wordlist     : ${WL_EFFECTIVE}"
-    echo "Codes ffuf   : ${MATCH_CODES}  (strict=${STRICT})"
-    echo "Extensions   : ${EXTENSIONS:-"(désactivées)"}"
-    echo "dirsearch    : (désactivé dans cette version)"
+    echo "Wordlist ffuf  : ${FFUF_WL_EFFECTIVE}"
+    if (( HAS_FEROX )); then
+      echo "Wordlist ferox : ${FEROX_WL_EFFECTIVE}"
+    else
+      echo "Wordlist ferox : (désactivée ou introuvable)"
+    fi
+    echo "Codes ffuf     : ${MATCH_CODES}  (strict=${STRICT})"
+    echo "Extensions     : ${EXTENSIONS:-"(désactivées)"}"
+    echo "feroxbuster    : $([[ $HAS_FEROX -eq 1 ]] && echo 'activé' || echo 'désactivé')"
+    echo "dirsearch      : (désactivé dans cette version)"
     echo
     echo "Aucun port HTTP/HTTPS n'a pu être scanné (IP non détectée)."
     echo
@@ -417,6 +453,8 @@ else
   rm -f /tmp/mon-nouveau-recoweb_"${DOMAIN//\//_}"_* 2>/dev/null || true
   exit 0
 fi
+
+ok "IP détectée : $TARGET_IP"
 
 if ping -c1 -W1 "$TARGET_IP" >/dev/null 2>&1; then
   ok "Ping OK : ${HOST} (${TARGET_IP}) est joignable."
@@ -449,8 +487,10 @@ fi
 
 FFUF_DETAILS="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_ffuf_details.XXXXXX")"
 DIRSEARCH_DETAILS="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirsearch_details.XXXXXX")"
+FEROX_DETAILS="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_ferox_details.XXXXXX")"
 : > "$FFUF_DETAILS"
 : > "$DIRSEARCH_DETAILS"
+: > "$FEROX_DETAILS"
 
 UNION_DIRS="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_union.XXXXXX")"
 : > "$UNION_DIRS"
@@ -462,6 +502,7 @@ if ((${#WEB_ENDPOINTS[@]} == 0)); then
   warn "Aucun service HTTP/HTTPS détecté par Nmap sur ${TARGET_IP}."
   echo "Aucun port HTTP/HTTPS détecté sur ${TARGET_IP}." >> "$FFUF_DETAILS"
   echo "Aucun port HTTP/HTTPS détecté sur ${TARGET_IP}." >> "$DIRSEARCH_DETAILS"
+  echo "Aucun port HTTP/HTTPS détecté sur ${TARGET_IP}." >> "$FEROX_DETAILS"
 else
   info "Ports HTTP/HTTPS détectés : ${WEB_ENDPOINTS[*]}"
 
@@ -474,7 +515,59 @@ else
       FFUF_TLS="-k"
     fi
 
-    # --- Baseline (404 générique) ---
+    DIR_TXT_PORT_FFUF=""
+    DIR_COUNT_PORT_FFUF=0
+    DIR_TXT_PORT_FEROX=""
+    DIR_COUNT_PORT_FEROX=0
+
+    # =====================
+    # 1) feroxbuster (en premier)
+    # =====================
+    if (( HAS_FEROX )); then
+      FEROX_URL_BASE="${SCHEME}://${HOST}"
+      if [[ "$SCHEME" == "http" && "$PORT" != "80" ]] || [[ "$SCHEME" == "https" && "$PORT" != "443" ]]; then
+        FEROX_URL_BASE="${FEROX_URL_BASE}:${PORT}"
+      fi
+      FEROX_URL="${FEROX_URL_BASE}${PATH_PART}"
+
+      FEROX_OUT="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_ferox_${PORT}.out.XXXXXX")"
+      DIR_TXT_PORT_FEROX="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirs_ferox_${PORT}.XXXXXX")"
+      : > "$DIR_TXT_PORT_FEROX"
+
+      FEROX_CMD=(feroxbuster
+        -u "$FEROX_URL"
+        -w "$FEROX_WL_EFFECTIVE"
+        -o "$FEROX_OUT"
+      )
+
+      [[ $DEBUG -eq 1 ]] && echo "[*] CMD (feroxbuster): ${FEROX_CMD[*]}"
+      "${FEROX_CMD[@]}" || true
+
+      extract_paths_dirsearch "$FEROX_OUT" > "$DIR_TXT_PORT_FEROX" || true
+      DIR_COUNT_PORT_FEROX="$(grep -c '.' "$DIR_TXT_PORT_FEROX" || true)"
+
+      {
+        echo "Port ${PORT} (${SCHEME})"
+        echo "  Base ferox: ${FEROX_URL}"
+        echo "  ferox DIR (${DIR_COUNT_PORT_FEROX})"
+        if [[ "$DIR_COUNT_PORT_FEROX" -gt 0 ]]; then
+          sed 's/^/    - /' "$DIR_TXT_PORT_FEROX"
+        else
+          echo "    - (aucun)"
+        fi
+        echo
+      } >> "$FEROX_DETAILS"
+
+      if [[ "$DIR_COUNT_PORT_FEROX" -gt 0 ]]; then
+        cat "$DIR_TXT_PORT_FEROX" >> "$UNION_DIRS"
+        DIR_COUNT_TOTAL=$((DIR_COUNT_TOTAL + DIR_COUNT_PORT_FEROX))
+      fi
+    fi
+
+    # =====================
+    # 2) Baseline + ffuf (en second)
+    # =====================
+
     RAND_PATH="$(tr -dc 'a-z0-9' </dev/urandom | head -c 10 || echo rnd)"
     BASE_URL="${SCHEME}://${TARGET_IP}:${PORT}${PATH_PART}${RAND_PATH}"
 
@@ -486,7 +579,6 @@ else
                    "${SCHEME}://${TARGET_IP}:${PORT}${PATH_PART}${RAND_PATH}" 2>/dev/null | wc -w | tr -d ' ' || echo 0)"
     BASE_WORDS="${BASE_WORDS:-0}"
 
-    # --- Filtres communs de base (404) ---
     FFUF_FILTER_BASE=()
     FFUF_AC_OPTS=()
 
@@ -498,12 +590,11 @@ else
       [[ "$BASE_WORDS" != "0" && -n "$BASE_WORDS" ]] && FFUF_FILTER_BASE+=(-fw "$BASE_WORDS")
     fi
 
-    # --- Phase bruit : échantillon (~10000) ---
-    info "Tentative d'élimination du bruit de fond (404/403 génériques) sur le port ${PORT} (échantillon ~10000 entrées)…"
+    info "Tentative d'élimination du bruit de fond (404/403 génériques) sur le port ${PORT} (échantillon ~10000 entrées, ffuf)…"
     info "Recherche des combos de bruit (status:size) dans les résultats ffuf du port ${PORT} (phase d'échantillonnage)..."
 
     WL_NOISE="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_wl_noise_${PORT}.XXXXXX")"
-    head -n 10000 "$WL_EFFECTIVE" > "$WL_NOISE" 2>/dev/null || cp "$WL_EFFECTIVE" "$WL_NOISE"
+    head -n 10000 "$FFUF_WL_EFFECTIVE" > "$WL_NOISE" 2>/dev/null || cp "$FFUF_WL_EFFECTIVE" "$WL_NOISE"
 
     FFUF_CSV_NOISE="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_ffuf_noise_${PORT}.csv.XXXXXX")"
     NOISE_KEYS_FILE="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_ffuf_noise_keys_${PORT}.XXXXXX")"
@@ -523,16 +614,15 @@ else
                      "${FFUF_FILTER_BASE[@]}" \
                      -of csv -o "$FFUF_CSV_NOISE")
 
-    [[ $DEBUG -eq 1 ]] && echo "[*] CMD_NOISE: ${CMD_NOISE[*]}"
+    [[ $DEBUG -eq 1 ]] && echo "[*] CMD_NOISE (ffuf): ${CMD_NOISE[*]}"
     "${CMD_NOISE[@]}" || true
 
     detect_ffuf_noise_combos "$FFUF_CSV_NOISE" > "$NOISE_KEYS_FILE" || true
 
     NOISE_SIZE=""
     if [[ -s "$NOISE_KEYS_FILE" ]]; then
-      info "Heuristique bruit : combos détectés sur l'échantillon du port ${PORT} :"
+      info "Heuristique bruit (ffuf) : combos détectés sur l'échantillon du port ${PORT} :"
       sed 's/^/    - /' "$NOISE_KEYS_FILE"
-      # On récupère la première taille de bruit détectée (ex. 403:199 → 199)
       while IFS= read -r combo; do
         size="${combo##*:}"
         if [[ -n "$size" ]]; then
@@ -541,32 +631,26 @@ else
         fi
       done < "$NOISE_KEYS_FILE"
     else
-      info "Heuristique bruit : aucun combo de bruit de fond détecté sur l'échantillon du port ${PORT}."
+      info "Heuristique bruit (ffuf) : aucun combo de bruit de fond détecté sur l'échantillon du port ${PORT}."
     fi
 
-    # --- Filtres pour le ffuf complet ---
     FFUF_FILTER_MAIN=()
     if [[ -n "$NOISE_SIZE" ]]; then
-      # Nouvelle stratégie :
-      #  - la 404 est filtrée par nombres de mots (fw)
-      #  - le bruit (ex. 403 génériques) est filtré par taille (fs)
       [[ "$BASE_WORDS" != "0" && -n "$BASE_WORDS" ]] && FFUF_FILTER_MAIN+=(-fw "$BASE_WORDS")
       FFUF_FILTER_MAIN+=(-fs "$NOISE_SIZE")
     else
-      # Pas de bruit détecté → on conserve les filtres de base
       FFUF_FILTER_MAIN=("${FFUF_FILTER_BASE[@]}")
     fi
 
-    # --- ffuf complet ---
     FFUF_CSV="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_ffuf_${PORT}.csv.XXXXXX")"
-    DIR_TXT_PORT="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirs_${PORT}.XXXXXX")"
-    : > "$DIR_TXT_PORT"
+    DIR_TXT_PORT_FFUF="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirs_ffuf_${PORT}.XXXXXX")"
+    : > "$DIR_TXT_PORT_FFUF"
 
     info "Fuzzing répertoires via ffuf sur ${SCHEME}://${TARGET_IP}:${PORT}${PATH_PART}FUZZ ..."
 
     CMD=(ffuf -u "${SCHEME}://${TARGET_IP}:${PORT}${PATH_PART}FUZZ" $FFUF_TLS \
               -H "Host: ${HOST}" \
-              -w "$WL_EFFECTIVE" -t "$THREADS" \
+              -w "$FFUF_WL_EFFECTIVE" -t "$THREADS" \
               -mc "${MATCH_CODES}" \
               "${FFUF_EXT_OPTS[@]}" \
               -ic \
@@ -574,35 +658,36 @@ else
               "${FFUF_FILTER_MAIN[@]}" \
               -of csv -o "$FFUF_CSV")
 
-    [[ $DEBUG -eq 1 ]] && echo "[*] CMD: ${CMD[*]}"
+    [[ $DEBUG -eq 1 ]] && echo "[*] CMD (ffuf): ${CMD[*]}"
     "${CMD[@]}" || true
 
-    # Extraction des chemins filtrés (en ignorant le bruit status:size)
-    filtered_paths_from_ffuf_csv "$FFUF_CSV" "$NOISE_KEYS_FILE" > "$DIR_TXT_PORT" || true
-    DIR_COUNT_PORT="$(grep -c '.' "$DIR_TXT_PORT" || true)"
+    filtered_paths_from_ffuf_csv "$FFUF_CSV" "$NOISE_KEYS_FILE" > "$DIR_TXT_PORT_FFUF" || true
+    DIR_COUNT_PORT_FFUF="$(grep -c '.' "$DIR_TXT_PORT_FFUF" || true)"
 
     {
       echo "Port ${PORT} (${SCHEME})"
       echo "  Baseline: code=${BASE_CODE} size=${BASE_SIZE} words=${BASE_WORDS} (${PATH_PART}${RAND_PATH})"
       if [[ -s "$NOISE_KEYS_FILE" ]]; then
-        echo "  Heuristique bruit : combos ignorés (status:size) :"
+        echo "  Heuristique bruit (ffuf) : combos ignorés (status:size) :"
         sed 's/^/    - /' "$NOISE_KEYS_FILE"
       fi
-      echo "  FFUF DIR (${DIR_COUNT_PORT})"
-      if [[ "$DIR_COUNT_PORT" -gt 0 ]]; then
-        sed 's/^/    - /' "$DIR_TXT_PORT"
+      echo "  FFUF DIR (${DIR_COUNT_PORT_FFUF})"
+      if [[ "$DIR_COUNT_PORT_FFUF" -gt 0 ]]; then
+        sed 's/^/    - /' "$DIR_TXT_PORT_FFUF"
       else
         echo "    - (aucun)"
       fi
       echo
     } >> "$FFUF_DETAILS"
 
-    if [[ "$DIR_COUNT_PORT" -gt 0 ]]; then
-      cat "$DIR_TXT_PORT" >> "$UNION_DIRS"
-      DIR_COUNT_TOTAL=$((DIR_COUNT_TOTAL + DIR_COUNT_PORT))
+    if [[ "$DIR_COUNT_PORT_FFUF" -gt 0 ]]; then
+      cat "$DIR_TXT_PORT_FFUF" >> "$UNION_DIRS"
+      DIR_COUNT_TOTAL=$((DIR_COUNT_TOTAL + DIR_COUNT_PORT_FFUF))
     fi
 
-    # dirsearch désactivé, mais on garde la section dans le rapport
+    # =====================
+    # 3) dirsearch (placeholder)
+    # =====================
     {
       echo "Port ${PORT} (${SCHEME})"
       echo "  dirsearch :"
@@ -619,24 +704,25 @@ else
     awk '
       {
         s = $0
-        # Nettoyage ANSI (progress bar ffuf, etc.)
+        # Nettoyage ANSI (progress bar, etc.)
         gsub(/\x1B\[[0-9;]*[A-Za-z]/, "", s)
 
         # Si on voit une URL complète, extraire juste le /chemin
         if (match(s, /(https?:\/\/[^\/]+(\/[^[:space:]]*))/ , m)) {
           s = m[2]
         } else {
-          # Sinon, on garde tout ce qui suit le premier /
           sub(/^[^\/]*/, "", s)
         }
 
         if (s == "" || s !~ /^\//) next
 
+        # Supprimer les / finaux multiples
         gsub(/\/+$/, "", s)
 
         if (s == "" || s == ".") next
 
-        print tolower(s)
+        # On conserve la casse originale
+        print s
       }
     ' "$UNION_DIRS" | sort -u > "$UNION_DIRS_NORM"
 
@@ -646,51 +732,82 @@ else
   fi
 fi
 
-BLOCK_START="=== mon-nouveau-recoweb ${DOMAIN} START ==="
-BLOCK_END="=== mon-nouveau-recoweb ${DOMAIN} END ==="
 TMP_BLOCK="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_block.XXXXXX")"
+
+# Préparer les sections ferox / ffuf / dirsearch
+FEROX_SECTION_BODY=""
+FFUF_SECTION_BODY=""
+DIRSEARCH_SECTION_BODY="  (dirsearch non installe / non detecte ou desactive)"
+
+if (( HAS_FEROX )) && [[ -s "$FEROX_DETAILS" ]]; then
+  FEROX_SECTION_BODY="$(cat "$FEROX_DETAILS")"
+else
+  FEROX_SECTION_BODY="  (feroxbuster non utilise pour ce scan ou aucun resultat)"
+fi
+
+if [[ -s "$FFUF_DETAILS" ]]; then
+  FFUF_SECTION_BODY="$(cat "$FFUF_DETAILS")"
+else
+  FFUF_SECTION_BODY="  (ffuf non utilise pour ce scan ou aucun resultat)"
+fi
 
 {
   echo "$BLOCK_START"
-  echo "Script       : mon-nouveau-recoweb"
-  echo "Version      : $(_version_str)"
-  echo "Date         : $(date '+%F %T')"
-  echo "Domaine      : ${DOMAIN}"
-  echo "IP           : ${TARGET_IP}"
-  echo "Mode         : ${MODE}"
-  echo "Wordlist     : ${WL_EFFECTIVE}"
-  echo "Codes ffuf   : ${MATCH_CODES}  (strict=${STRICT})"
-  echo "Extensions   : ${EXTENSIONS:-"(désactivées)"}"
-  echo "dirsearch    : (désactivé dans cette version)"
+  echo "Script         : mon-nouveau-recoweb"
+  echo "Version        : $(_version_str)"
+  echo "Date           : $(date '+%F %T')"
+  echo "Domaine        : ${DOMAIN}"
+  echo "IP             : ${TARGET_IP}"
+  echo "Mode           : ${MODE}"
+  echo "Wordlist ffuf  : ${FFUF_WL_EFFECTIVE}"
+
+  if (( HAS_FEROX )); then
+    echo "Wordlist ferox : ${FEROX_WL_EFFECTIVE}"
+  else
+    echo "Wordlist ferox : (desactivee ou introuvable)"
+  fi
+
+  echo "Codes ffuf     : ${MATCH_CODES}  (strict=${STRICT})"
+  echo "Extensions     : ${EXTENSIONS:-"(desactivees)"}"
+
+  if (( HAS_FEROX )); then
+    echo "feroxbuster    : active"
+  else
+    echo "feroxbuster    : desactive"
+  fi
+
+  echo "dirsearch      : desactive dans cette version"
   echo
 
-  echo "=== Résumé global ==="
+  echo "=== Resume global ==="
   if ((${#WEB_ENDPOINTS[@]} > 0)); then
-    echo "Ports HTTP/HTTPS détectés : ${WEB_ENDPOINTS[*]}"
+    echo "Ports HTTP/HTTPS detectes : ${WEB_ENDPOINTS[*]}"
   else
-    echo "Ports HTTP/HTTPS détectés : (aucun)"
+    echo "Ports HTTP/HTTPS detectes : (aucun)"
   fi
-  echo "Total chemins bruts (ffuf + dirsearch, après filtrage bruit) : ${DIR_COUNT_TOTAL}"
-  echo "Chemins uniques normalisés                                : ${DIR_UNIQUE_TOTAL}"
+
+  echo "Total chemins bruts (ferox/ffuf apres filtrage) : ${DIR_COUNT_TOTAL}"
+  echo "Chemins uniques normalises                      : ${DIR_UNIQUE_TOTAL}"
   echo
   echo "Chemins uniques :"
+
   if [[ -n "$UNION_DIRS_NORM" && -s "$UNION_DIRS_NORM" ]]; then
     sed 's/^/  - /' "$UNION_DIRS_NORM"
   else
     echo "  - (aucun)"
   fi
+
+  echo
+  echo "=== Resultats feroxbuster (par port) ==="
+  printf "%s\n" "$FEROX_SECTION_BODY"
   echo
 
-  echo "=== Résultats FFUF (par port) ==="
-  if [[ -s "$FFUF_DETAILS" ]]; then
-    cat "$FFUF_DETAILS"
-  else
-    echo "  (aucun résultat ffuf)"
-  fi
+  echo "=== Resultats FFUF (par port) ==="
+  printf "%s\n" "$FFUF_SECTION_BODY"
   echo
 
-  echo "=== Résultats dirsearch (par port) ==="
-  echo "  (dirsearch non installé / non détecté ou désactivé)"
+  echo "=== Resultats dirsearch (par port) ==="
+  printf "%s\n" "$DIRSEARCH_SECTION_BODY"
   echo
 
   echo "$BLOCK_END"
@@ -698,10 +815,12 @@ TMP_BLOCK="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_block.XXXXXX")"
 } > "$TMP_BLOCK"
 
 echo
-echo -e "${BLUE}===== Résultats mon-nouveau-recoweb (${DOMAIN}) =====${RESET}"
+echo -e "${BLUE}===== Resultats mon-nouveau-recoweb (${DOMAIN}) =====${RESET}"
 cat "$TMP_BLOCK"
 echo -e "${BLUE}=============================================${RESET}"
 echo
+
+# Mise à jour du fichier scan_repertoires*.txt
 
 if [[ -f "$SCAN_FILE" ]]; then
   sed -e "\#^=== mon-nouveau-recoweb ${DOMAIN} START ===\$#,\#^=== mon-nouveau-recoweb ${DOMAIN} END ===\$#d" \
@@ -710,14 +829,14 @@ if [[ -f "$SCAN_FILE" ]]; then
 fi
 
 cat "$TMP_BLOCK" >> "$SCAN_FILE"
-ok "Bloc mis à jour dans ${SCAN_FILE} pour le domaine ${DOMAIN}"
+ok "Bloc mis a jour dans ${SCAN_FILE} pour le domaine ${DOMAIN}"
 
+# Nettoyage
 if [[ $DEBUG -eq 1 ]]; then
-  info "DEBUG : aucun nettoyage des fichiers /tmp effectué."
+  info "DEBUG : aucun nettoyage des fichiers /tmp effectue."
   ls -1 /tmp/mon-nouveau-recoweb_"${DOMAIN//\//_}"_* 2>/dev/null || true
 else
   rm -f /tmp/mon-nouveau-recoweb_"${DOMAIN//\//_}"_* 2>/dev/null || true
 fi
 
 exit 0
-
