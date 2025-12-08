@@ -1,13 +1,14 @@
 #!/bin/bash
 # NAME=mon-nouveau-recoweb
-# VERSION=v1.5.0
-# DESCRIPTION=Découverte web automatisée via feroxbuster + ffuf avec heuristique de bruit (ffuf) et agrégation des chemins filtrés.
+# VERSION=v1.6.0
+# DESCRIPTION=Découverte web automatisée via feroxbuster + ffuf + dirsearch avec heuristique de bruit (ffuf) et agrégation des chemins filtrés.
 # PRESENTATION_START
-# mon-nouveau-recoweb — Découverte web ciblée pour CTF / pentest (feroxbuster + ffuf)
+# mon-nouveau-recoweb — Découverte web ciblée pour CTF / pentest (feroxbuster + ffuf + dirsearch)
 #
 # Ce script automatise la reconnaissance web d'une cible (ex. mon-site.htb) en combinant :
-#   - feroxbuster : scan récursif en premier, avec ses propres mécanismes internes (auto-filter, recursion, etc.),
-#   - ffuf        : scan guidé par baseline + heuristique de “bruit de fond” (404/403 génériques), en second.
+#   - feroxbuster : scan récursif en premier, avec ses mécanismes internes (auto-filter, recursion, etc.),
+#   - ffuf        : scan guidé par baseline + heuristique de bruit (404/403 génériques),
+#   - dirsearch   : scan supplémentaire après ffuf, basé sur sa propre wordlist et sa config.
 #
 # Principales étapes :
 # - Résolution du domaine vers une IP + vérification par ping (cohérence /etc/hosts).
@@ -29,10 +30,9 @@
 #
 #      b) Phase d’échantillonnage (détection du bruit de fond) — ffuf uniquement :
 #         - Construction d’une mini-wordlist (~10 000 premières entrées de la wordlist ffuf).
-#         - Lancement d’un ffuf “échantillon” sur cette mini-wordlist, avec les filtres de baseline.
+#         - Lancement d’un ffuf échantillon sur cette mini-wordlist, avec les filtres de baseline.
 #         - Analyse des résultats CSV pour détecter les combos (status:size) récurrents typiques du bruit
 #           (ex. 403:199 renvoyé massivement par le serveur).
-#         - Affichage des combos de bruit détectés pour le port concerné.
 #
 #      c) Scan ffuf complet (sur la wordlist ffuf principale) :
 #         - Lancement d’un ffuf sur l’ensemble de la wordlist ffuf (--ffuf-master),
@@ -42,14 +42,20 @@
 #         - Export des résultats en CSV par port.
 #         - Post-traitement côté script pour exclure explicitement les combos (status:size) identifiés comme bruit.
 #
-#   3) Post-traitement et agrégation globale :
-#      - Lecture de tous les chemins trouvés par feroxbuster puis ffuf.
+#   3) dirsearch (après ffuf) :
+#      - Lancement de dirsearch sur l’URL basée sur le domaine.
+#      - Utilisation de la configuration / wordlist par défaut de dirsearch.
+#      - Extraction des chemins depuis le rapport texte.
+#
+#   4) Post-traitement et agrégation globale :
+#      - Lecture de tous les chemins trouvés par feroxbuster, ffuf et dirsearch.
 #      - Nettoyage :
 #          * suppression des séquences ANSI,
 #          * réduction des URLs complètes au chemin (/path),
-#          * normalisation (suppression des / finaux, déduplication, conservation de la casse).
+#          * normalisation (suppression des / finaux, déduplication),
+#          * conservation de la casse (LICENSE, README.md, etc.).
 #      - Calcul :
-#          * du nombre total de chemins bruts (ferox + ffuf, après filtrage),
+#          * du nombre total de chemins bruts (ferox + ffuf + dirsearch, après filtrage),
 #          * du nombre de chemins uniques normalisés.
 #
 # Wordlists par défaut :
@@ -61,7 +67,7 @@
 #       * Résumé global (ports HTTP/HTTPS, compteurs de chemins bruts / uniques).
 #       * Résultats feroxbuster (par port).
 #       * Résultats FFUF (par port).
-#       * Résultats dirsearch (placeholder désactivé).
+#       * Résultats dirsearch (par port).
 #   - Agrégation dans un fichier dans le répertoire mes_scans/ :
 #       * Si on lance : mon-nouveau-recoweb target.htb
 #           → mes_scans/scan_repertoires.txt
@@ -109,7 +115,7 @@ Options :
   --strict              Mode strict (déjà activé par défaut : 200,301,302,403)
   --codes LIST          Liste pour ffuf -mc (ex: "200,301,302,403"; priorité sur --strict)
   --ext LIST            Extensions ffuf (ex: ".php,.txt,.sh,.cgi,.pl"). Vide = désactivé.
-  --debug               Affiche les commandes ffuf/ferox et conserve les fichiers /tmp
+  --debug               Affiche les commandes ffuf/ferox/dirsearch et conserve les fichiers /tmp
   -V, --version         Afficher la version et quitter
   -h, --help            Aide
 
@@ -236,7 +242,7 @@ filtered_paths_from_ffuf_csv() {
   ' "$noise_file" "$f" | sort -u
 }
 
-# ---------- extraction des paths depuis la sortie dirsearch/ferox ----------
+# ---------- extraction des paths depuis la sortie dirsearch / ferox ----------
 extract_paths_dirsearch() {
   local f="$1"
   [[ -f "$f" ]] || return 0
@@ -346,22 +352,45 @@ while (( "$#" )); do
 done
 
 # --- binaires nécessaires ---
-command -v ffuf  >/dev/null 2>&1 || { warn "ffuf manquant";  exit 1; }
-command -v curl  >/dev/null 2>&1 || { warn "curl manquant";  exit 1; }
-command -v nmap  >/dev/null 2>&1 || { warn "nmap manquant";  exit 1; }
+# --- binaires nécessaires ---
+# curl / nmap / ffuf sont critiques → on arrête si l'un manque
+MISSING_CRIT=0
 
+if ! command -v curl >/dev/null 2>&1; then
+  warn "curl manquant. Installe-le avec : sudo apt install curl"
+  MISSING_CRIT=1
+fi
+
+if ! command -v nmap >/dev/null 2>&1; then
+  warn "nmap manquant. Installe-le avec : sudo apt install nmap"
+  MISSING_CRIT=1
+fi
+
+if ! command -v ffuf >/dev/null 2>&1; then
+  warn "ffuf manquant. Installe-le (Kali/Debian) avec : sudo apt install ffuf"
+  MISSING_CRIT=1
+fi
+
+if [[ $MISSING_CRIT -eq 1 ]]; then
+  warn "Un ou plusieurs binaires essentiels (curl/nmap/ffuf) sont manquants. Abandon du scan."
+  exit 1
+fi
+
+# feroxbuster et dirsearch sont optionnels, on active/désactive dynamiquement
 if command -v feroxbuster >/dev/null 2>&1; then
   HAS_FEROX=1
+  info "feroxbuster détecté : il sera exécuté avant ffuf."
 else
   HAS_FEROX=0
-  warn "feroxbuster non détecté : seul ffuf sera utilisé."
+  warn "feroxbuster non détecté (optionnel). Installe-le avec : sudo apt install feroxbuster"
 fi
 
 if command -v dirsearch >/dev/null 2>&1; then
-  HAS_DIRSEARCH=0
-  info "dirsearch détecté, mais désactivé dans cette version (seuls feroxbuster/ffuf sont utilisés)."
+  HAS_DIRSEARCH=1
+  info "dirsearch détecté : il sera exécuté après ffuf."
 else
-  warn "dirsearch non détecté : feroxbuster/ffuf uniquement."
+  HAS_DIRSEARCH=0
+  warn "dirsearch non détecté (optionnel). Installe-le avec : sudo apt install dirsearch"
 fi
 
 ok "Domaine : ${DOMAIN}"
@@ -381,10 +410,12 @@ fi
 
 ok "Fichier de résultats : ${SCAN_FILE}"
 
+# --- Wordlists ffuf / ferox ---
 FFUF_WL_EFFECTIVE="$FFUF_MASTER"
 if [[ ! -f "$FFUF_WL_EFFECTIVE" ]]; then
   warn "Wordlist ffuf introuvable : $FFUF_WL_EFFECTIVE"
-  echo "Tu peux changer avec --ffuf-master /chemin/vers/ta_wordlist_ffuf.txt"
+  warn "Installe le paquet 'seclists' (Kali/Debian) : sudo apt install seclists"
+  echo "Ou spécifie une wordlist ffuf avec : --ffuf-master /chemin/vers/ta_wordlist.txt"
   exit 1
 fi
 ok "Wordlist ffuf  : $FFUF_WL_EFFECTIVE"
@@ -394,12 +425,26 @@ if (( HAS_FEROX )); then
   FEROX_WL_EFFECTIVE="$FEROX_MASTER"
   if [[ ! -f "$FEROX_WL_EFFECTIVE" ]]; then
     warn "Wordlist ferox introuvable : $FEROX_WL_EFFECTIVE"
+    warn "Elle fait typiquement partie du paquet 'seclists'. Exemple :"
+    echo "  sudo apt install seclists"
     echo "feroxbuster sera désactivé pour ce run."
     HAS_FEROX=0
   else
     ok "Wordlist ferox : $FEROX_WL_EFFECTIVE"
   fi
 fi
+
+# --- Résumé de la chaîne de scans active ---
+SCAN_CHAIN="Nmap"
+if (( HAS_FEROX )); then
+  SCAN_CHAIN+=" -> feroxbuster"
+fi
+SCAN_CHAIN+=" -> ffuf"
+if (( HAS_DIRSEARCH )); then
+  SCAN_CHAIN+=" -> dirsearch"
+fi
+
+info "Chaîne de scans active : ${SCAN_CHAIN}"
 
 TARGET_IP="$(getent hosts "$HOST" | awk '{print $1}' | head -n1 || true)"
 if [[ -z "$TARGET_IP" ]]; then
@@ -428,7 +473,7 @@ if [[ -z "$TARGET_IP" ]]; then
     echo "Codes ffuf     : ${MATCH_CODES}  (strict=${STRICT})"
     echo "Extensions     : ${EXTENSIONS:-"(désactivées)"}"
     echo "feroxbuster    : $([[ $HAS_FEROX -eq 1 ]] && echo 'activé' || echo 'désactivé')"
-    echo "dirsearch      : (désactivé dans cette version)"
+    echo "dirsearch      : $([[ $HAS_DIRSEARCH -eq 1 ]] && echo 'actif' || echo 'non installé / non détecté')"
     echo
     echo "Aucun port HTTP/HTTPS n'a pu être scanné (IP non détectée)."
     echo
@@ -686,14 +731,79 @@ else
     fi
 
     # =====================
-    # 3) dirsearch (placeholder)
+    # 3) dirsearch (apres ffuf)
     # =====================
-    {
-      echo "Port ${PORT} (${SCHEME})"
-      echo "  dirsearch :"
-      echo "    (désactivé dans cette version de mon-nouveau-recoweb)"
-      echo
-    } >> "$DIRSEARCH_DETAILS"
+    if (( HAS_DIRSEARCH )); then
+      # URL bassee sur le domaine, comme pour ferox
+      DIR_URL_BASE="${SCHEME}://${HOST}"
+      if { [[ "$SCHEME" == "http" && "$PORT" != "80" ]] || [[ "$SCHEME" == "https" && "$PORT" != "443" ]]; }; then
+        DIR_URL_BASE="${DIR_URL_BASE}:${PORT}"
+      fi
+      DIR_URL="${DIR_URL_BASE}${PATH_PART}"
+
+      DIR_OUT="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirsearch_${PORT}.out.XXXXXX")"
+      DIR_TXT_PORT_DIR="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirs_dirsearch_${PORT}.XXXXXX")"
+      : > "$DIR_TXT_PORT_DIR"
+
+      # Workdir temporaire pour contenir eventuels reports/
+      DIR_TMP_WORKDIR="$(mktemp -d "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirsearch_work.${PORT}.XXXXXX")"
+
+      # Commande dirsearch (forme tableau pour eviter les soucis d'espaces)
+      DIR_CMD=(dirsearch -u "$DIR_URL")
+
+      if command -v script >/dev/null 2>&1; then
+        # Progress bar propre grace a un pseudo-TTY
+        if [[ $DEBUG -eq 1 ]]; then
+          echo "[*] CMD (dirsearch via script): (cd \"$DIR_TMP_WORKDIR\" && script -q -c '${DIR_CMD[*]}' '$DIR_OUT')"
+        fi
+        (
+          cd "$DIR_TMP_WORKDIR" || exit 0
+          script -q -c "${DIR_CMD[*]}" "$DIR_OUT" </dev/null || true
+        )
+      else
+        # Fallback: progress un peu moins jolie, mais sortie capturee
+        if [[ $DEBUG -eq 1 ]]; then
+          echo "[*] CMD (dirsearch via tee): (cd \"$DIR_TMP_WORKDIR\" && ${DIR_CMD[*]} | tee '$DIR_OUT')"
+        fi
+        (
+          cd "$DIR_TMP_WORKDIR" || exit 0
+          "${DIR_CMD[@]}" 2>/dev/null | tee "$DIR_OUT" || true
+        )
+      fi
+
+      # Extraction des chemins depuis la sortie texte de dirsearch
+      extract_paths_dirsearch "$DIR_OUT" > "$DIR_TXT_PORT_DIR" || true
+      DIR_COUNT_PORT_DIR="$(grep -c '.' "$DIR_TXT_PORT_DIR" || true)"
+
+      {
+        echo "Port ${PORT} (${SCHEME})"
+        echo "  dirsearch :"
+        echo "    DIR (${DIR_COUNT_PORT_DIR})"
+        if [[ "$DIR_COUNT_PORT_DIR" -gt 0 ]]; then
+          sed 's/^/      - /' "$DIR_TXT_PORT_DIR"
+        else
+          echo "      - (aucun)"
+        fi
+        echo
+      } >> "$DIRSEARCH_DETAILS"
+
+      # Ajout au set global
+      if [[ "$DIR_COUNT_PORT_DIR" -gt 0 ]]; then
+        cat "$DIR_TXT_PORT_DIR" >> "$UNION_DIRS"
+        DIR_COUNT_TOTAL=$((DIR_COUNT_TOTAL + DIR_COUNT_PORT_DIR))
+      fi
+
+      # Nettoyage complet du workdir (y compris reports/)
+      rm -rf "$DIR_TMP_WORKDIR" 2>/dev/null || true
+
+    else
+      {
+        echo "Port ${PORT} (${SCHEME})"
+        echo "  dirsearch :"
+        echo "    (dirsearch non installe / non detecte ou desactive)"
+        echo
+      } >> "$DIRSEARCH_DETAILS"
+    fi
 
   done
 
@@ -737,18 +847,22 @@ TMP_BLOCK="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_block.XXXXXX")"
 # Préparer les sections ferox / ffuf / dirsearch
 FEROX_SECTION_BODY=""
 FFUF_SECTION_BODY=""
-DIRSEARCH_SECTION_BODY="  (dirsearch non installe / non detecte ou desactive)"
+DIRSEARCH_SECTION_BODY="  (dirsearch non installé / non détecté ou désactivé)"
 
 if (( HAS_FEROX )) && [[ -s "$FEROX_DETAILS" ]]; then
   FEROX_SECTION_BODY="$(cat "$FEROX_DETAILS")"
 else
-  FEROX_SECTION_BODY="  (feroxbuster non utilise pour ce scan ou aucun resultat)"
+  FEROX_SECTION_BODY="  (feroxbuster non utilisé pour ce scan ou aucun résultat)"
 fi
 
 if [[ -s "$FFUF_DETAILS" ]]; then
   FFUF_SECTION_BODY="$(cat "$FFUF_DETAILS")"
 else
-  FFUF_SECTION_BODY="  (ffuf non utilise pour ce scan ou aucun resultat)"
+  FFUF_SECTION_BODY="  (ffuf non utilisé pour ce scan ou aucun résultat)"
+fi
+
+if [[ -s "$DIRSEARCH_DETAILS" ]]; then
+  DIRSEARCH_SECTION_BODY="$(cat "$DIRSEARCH_DETAILS")"
 fi
 
 {
@@ -764,30 +878,34 @@ fi
   if (( HAS_FEROX )); then
     echo "Wordlist ferox : ${FEROX_WL_EFFECTIVE}"
   else
-    echo "Wordlist ferox : (desactivee ou introuvable)"
+    echo "Wordlist ferox : (désactivée ou introuvable)"
   fi
 
   echo "Codes ffuf     : ${MATCH_CODES}  (strict=${STRICT})"
-  echo "Extensions     : ${EXTENSIONS:-"(desactivees)"}"
+  echo "Extensions     : ${EXTENSIONS:-"(désactivées)"}"
 
   if (( HAS_FEROX )); then
-    echo "feroxbuster    : active"
+    echo "feroxbuster    : actif"
   else
-    echo "feroxbuster    : desactive"
+    echo "feroxbuster    : désactivé"
   fi
 
-  echo "dirsearch      : desactive dans cette version"
+  if (( HAS_DIRSEARCH )); then
+    echo "dirsearch      : actif (exécuté après ffuf)"
+  else
+    echo "dirsearch      : non installé / non détecté"
+  fi
   echo
 
-  echo "=== Resume global ==="
+  echo "=== Résumé global ==="
   if ((${#WEB_ENDPOINTS[@]} > 0)); then
-    echo "Ports HTTP/HTTPS detectes : ${WEB_ENDPOINTS[*]}"
+    echo "Ports HTTP/HTTPS détectés : ${WEB_ENDPOINTS[*]}"
   else
-    echo "Ports HTTP/HTTPS detectes : (aucun)"
+    echo "Ports HTTP/HTTPS détectés : (aucun)"
   fi
 
-  echo "Total chemins bruts (ferox/ffuf apres filtrage) : ${DIR_COUNT_TOTAL}"
-  echo "Chemins uniques normalises                      : ${DIR_UNIQUE_TOTAL}"
+  echo "Total chemins bruts (ferox/ffuf/dirsearch, après filtrage) : ${DIR_COUNT_TOTAL}"
+  echo "Chemins uniques normalisés                                 : ${DIR_UNIQUE_TOTAL}"
   echo
   echo "Chemins uniques :"
 
@@ -798,15 +916,15 @@ fi
   fi
 
   echo
-  echo "=== Resultats feroxbuster (par port) ==="
+  echo "=== Résultats feroxbuster (par port) ==="
   printf "%s\n" "$FEROX_SECTION_BODY"
   echo
 
-  echo "=== Resultats FFUF (par port) ==="
+  echo "=== Résultats FFUF (par port) ==="
   printf "%s\n" "$FFUF_SECTION_BODY"
   echo
 
-  echo "=== Resultats dirsearch (par port) ==="
+  echo "=== Résultats dirsearch (par port) ==="
   printf "%s\n" "$DIRSEARCH_SECTION_BODY"
   echo
 
@@ -815,7 +933,7 @@ fi
 } > "$TMP_BLOCK"
 
 echo
-echo -e "${BLUE}===== Resultats mon-nouveau-recoweb (${DOMAIN}) =====${RESET}"
+echo -e "${BLUE}===== Résultats mon-nouveau-recoweb (${DOMAIN}) =====${RESET}"
 cat "$TMP_BLOCK"
 echo -e "${BLUE}=============================================${RESET}"
 echo
@@ -829,11 +947,11 @@ if [[ -f "$SCAN_FILE" ]]; then
 fi
 
 cat "$TMP_BLOCK" >> "$SCAN_FILE"
-ok "Bloc mis a jour dans ${SCAN_FILE} pour le domaine ${DOMAIN}"
+ok "Bloc mis à jour dans ${SCAN_FILE} pour le domaine ${DOMAIN}"
 
 # Nettoyage
 if [[ $DEBUG -eq 1 ]]; then
-  info "DEBUG : aucun nettoyage des fichiers /tmp effectue."
+  info "DEBUG : aucun nettoyage des fichiers /tmp effectué."
   ls -1 /tmp/mon-nouveau-recoweb_"${DOMAIN//\//_}"_* 2>/dev/null || true
 else
   rm -f /tmp/mon-nouveau-recoweb_"${DOMAIN//\//_}"_* 2>/dev/null || true
