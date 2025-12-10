@@ -1,6 +1,6 @@
 #!/bin/bash
 # NAME=mon-nouveau-recoweb
-# VERSION=v1.7.0
+# VERSION=v1.7.1
 # DESCRIPTION=Découverte web automatisée via feroxbuster + ffuf + dirsearch avec heuristique de bruit (ffuf) et agrégation des chemins filtrés.
 # PRESENTATION_START
 # mon-nouveau-recoweb — Découverte web ciblée pour CTF / pentest (feroxbuster + ffuf + dirsearch)
@@ -253,14 +253,37 @@ extract_paths_dirsearch() {
 
   awk '
     {
-      line=$0
+      line = $0
       # Nettoyage ANSI
       gsub(/\x1B\[[0-9;]*[A-Za-z]/, "", line)
-      if (match(line, /(https?:\/\/[^\/]+(\/[^[:space:]]*))/ , m)) {
+
+      path = ""
+
+      # 1) Cas classique : URL complète http(s)://host/chemin
+      if (match(line, /(https?:\/\/[^\/[:space:]]+(\/[^[:space:]]*))/ , m)) {
         path = m[2]
-        if (path == "" || path == "/") next
-        print path
       }
+      # 2) Sinon, on tente de récupérer un chemin qui commence par /
+      else if (match(line, /(^|[[:space:]])(\/[^[:space:]]*)/, m)) {
+        path = m[2]
+      } else {
+        next
+      }
+
+      # Nettoyage du chemin
+      # - suppression des guillemets, apostrophes et virgules en fin de chaîne
+      gsub(/["\047,]+$/, "", path)
+
+      # - suppression des / finaux multiples
+      gsub(/\/+$/, "", path)
+
+      # On ignore vide et la racine pure
+      if (path == "" || path == "/") next
+
+      # On s’assure que ça commence bien par /
+      if (path !~ /^\//) next
+
+      print path
     }
   ' "$f" | sort -u
 }
