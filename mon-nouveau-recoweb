@@ -288,6 +288,64 @@ extract_paths_dirsearch() {
   ' "$f" | sort -u
 }
 
+# ---------- filtrage générique du bruit ferox (ex: blobs profonds avec hash long) ----------
+filter_ferox_noise_paths() {
+  awk '
+    # Teste si une chaîne est de l’hexadécimal pur
+    function is_hex(s) {
+      return (s ~ /^[0-9a-f]+$/)
+    }
+
+    {
+      path = $0
+      if (path == "") next
+
+      # Découper le chemin en segments séparés par "/"
+      n = split(path, parts, "/")
+      # profondeur = nombre de segments utiles (on enlève le segment vide avant le premier /)
+      depth = n - 1
+      leaf  = parts[n]
+
+      # Règle 1 : heuristique "blob hash profond" (comme avant)
+      # - profondeur >= 4 (ex: /a/b/c/<hash long>)
+      # - dernier segment = hexa pur de longueur >= 20
+      if (depth >= 4 && leaf ~ /^[0-9a-f]{20,}$/) {
+        next
+      }
+
+      # Règle 2 : arbre "hash" générique :
+      #   - chemin assez profond
+      #   - une bonne partie des segments ressemble à de l’hexadécimal
+      hex_count = 0
+      useful = 0
+
+      # on parcourt tous les segments utiles (on ignore le premier vide avant le /)
+      for (i = 2; i <= n; i++) {
+        if (parts[i] == "") {
+          continue
+        }
+        useful++
+
+        # segment considéré "hashy" si :
+        #   - purement hexadécimal
+        #   - et longueur >= 2 (on ignore les trucs comme "a")
+        if (is_hex(parts[i]) && length(parts[i]) >= 2) {
+          hex_count++
+        }
+      }
+
+      # Si le chemin est profond ET que la majorité des segments sont hexa,
+      # on considère que c’est un arbre de blobs => bruit
+      if (depth >= 4 && useful > 0 && hex_count * 2 >= useful) {
+        next
+      }
+
+      # Sinon on garde le chemin
+      print path
+    }
+  '
+}
+
 # ---------- détection des endpoints HTTP/HTTPS à partir d'un Nmap -sV ----------
 detect_web_endpoints_from_nmap() {
   local nmap_file="$1"
@@ -639,8 +697,12 @@ else
       [[ $DEBUG -eq 1 ]] && echo "[*] CMD (feroxbuster): ${FEROX_CMD[*]}"
       "${FEROX_CMD[@]}" || true
 
-      extract_paths_dirsearch "$FEROX_OUT" > "$DIR_TXT_PORT_FEROX" || true
-      DIR_COUNT_PORT_FEROX="$(grep -c '.' "$DIR_TXT_PORT_FEROX" || true)"
+      # Extraction des chemins puis filtrage générique du bruit (hash profonds)
+      extract_paths_dirsearch "$FEROX_OUT" \
+        | filter_ferox_noise_paths \
+        > "$DIR_TXT_PORT_FEROX" || true
+
+      DIR_COUNT_PORT_FEROX="$(grep -c '.' "$DIR_TXT_PORT_FEROX" 2>/dev/null || echo 0)"
 
       {
         echo "Port ${PORT} (${SCHEME})"
