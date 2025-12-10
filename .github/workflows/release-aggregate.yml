@@ -58,7 +58,7 @@ jobs:
       - name: Aggregate & publish release (inline)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RETAIN: "5"
+          RETAIN: "10"
         run: |
           set -euo pipefail
           IFS=$'\n\t'
