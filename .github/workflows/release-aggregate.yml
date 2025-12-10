@@ -205,7 +205,7 @@ jobs:
             log "Release $TAG published with ${#FILES_TO_UPLOAD[@]} assets."
 
             # Prune anciennes releases
-            RETAIN="${RETAIN:-5}"
+            RETAIN="${RETAIN:-10}"
             log "Pruning releases beyond the most recent ${RETAIN}…"
             gh api -H "Accept: application/vnd.github+json" "/repos/${OWNER_REPO}/releases?per_page=100" \
               | jq -r '.[].tag_name' | awk 'NF' | nl -ba \

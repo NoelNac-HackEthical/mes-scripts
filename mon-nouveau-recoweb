@@ -1,6 +1,6 @@
 #!/bin/bash
 # NAME=mon-nouveau-recoweb
-# VERSION=v1.7.1
+# VERSION=v1.7.2
 # DESCRIPTION=Découverte web automatisée via feroxbuster + ffuf + dirsearch avec heuristique de bruit (ffuf) et agrégation des chemins filtrés.
 # PRESENTATION_START
 # mon-nouveau-recoweb — Découverte web ciblée pour CTF / pentest (feroxbuster + ffuf + dirsearch)
