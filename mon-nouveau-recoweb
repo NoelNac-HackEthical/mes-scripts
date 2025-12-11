@@ -1,6 +1,6 @@
 #!/bin/bash
 # NAME=mon-nouveau-recoweb
-# VERSION=v1.7.2
+# VERSION=v1.7.3
 # DESCRIPTION=Découverte web automatisée via feroxbuster + ffuf + dirsearch avec heuristique de bruit (ffuf) et agrégation des chemins filtrés.
 # PRESENTATION_START
 # mon-nouveau-recoweb — Découverte web ciblée pour CTF / pentest (feroxbuster + ffuf + dirsearch)
@@ -288,63 +288,178 @@ extract_paths_dirsearch() {
   ' "$f" | sort -u
 }
 
-# ---------- filtrage générique du bruit ferox (ex: blobs profonds avec hash long) ----------
+# ---------- filtrage générique du bruit ferox (blobs profonds + assets hashés + bruit CMS) ----------
 filter_ferox_noise_paths() {
   awk '
+    # Trim basique
+    function trim(s) {
+      sub(/^[ \t\r\n]+/, "", s)
+      sub(/[ \t\r\n]+$/, "", s)
+      return s
+    }
+
     # Teste si une chaîne est de l’hexadécimal pur
     function is_hex(s) {
       return (s ~ /^[0-9a-f]+$/)
     }
 
+    # Heuristique : nom "hashy" (beaucoup de chiffres/majuscules, assez long)
+    function is_hashy_name(s,   len, i, c, hashchars) {
+      len = length(s)
+      if (len < 24) {
+        # Trop court pour être un vrai hash
+        return 0
+      }
+      # On ne garde que les noms "propres"
+      if (s !~ /^[A-Za-z0-9_-]+$/) {
+        return 0
+      }
+      hashchars = 0
+      for (i = 1; i <= len; i++) {
+        c = substr(s, i, 1)
+        if (c ~ /[0-9]/ || c ~ /[A-Z]/) {
+          hashchars++
+        }
+      }
+      # Si au moins ~40% des caractères sont des chiffres/majuscules -> hash probable
+      if (hashchars * 10 >= len * 4) {
+        return 1
+      }
+      return 0
+    }
+
     {
       path = $0
-      if (path == "") next
 
-      # Découper le chemin en segments séparés par "/"
-      n = split(path, parts, "/")
-      # profondeur = nombre de segments utiles (on enlève le segment vide avant le premier /)
+      # Beaucoup de lignes arrivent comme "  - /truc"
+      sub(/^[ \t-]+/, "", path)
+      path = trim(path)
+
+      if (path == "") next
+      # On ne garde que les chemins absolus
+      if (path !~ /^\//) next
+
+      # Découpage en segments
+      n     = split(path, parts, "/")
       depth = n - 1
       leaf  = parts[n]
 
-      # Règle 1 : heuristique "blob hash profond" (comme avant)
-      # - profondeur >= 4 (ex: /a/b/c/<hash long>)
-      # - dernier segment = hexa pur de longueur >= 20
+      # --------------------------------------------------------------------
+      # Règle 1 : heuristique "blob hash profond" (.git/objects / caches …)
+      # --------------------------------------------------------------------
       if (depth >= 4 && leaf ~ /^[0-9a-f]{20,}$/) {
         next
       }
 
-      # Règle 2 : arbre "hash" générique :
-      #   - chemin assez profond
-      #   - une bonne partie des segments ressemble à de l’hexadécimal
+      # --------------------------------------------------------------------
+      # Règle 2 : arbre "hash" générique (beaucoup de segments hexadécimaux)
+      # --------------------------------------------------------------------
       hex_count = 0
-      useful = 0
+      useful    = 0
 
-      # on parcourt tous les segments utiles (on ignore le premier vide avant le /)
       for (i = 2; i <= n; i++) {
         if (parts[i] == "") {
           continue
         }
         useful++
-
-        # segment considéré "hashy" si :
-        #   - purement hexadécimal
-        #   - et longueur >= 2 (on ignore les trucs comme "a")
         if (is_hex(parts[i]) && length(parts[i]) >= 2) {
           hex_count++
         }
       }
 
-      # Si le chemin est profond ET que la majorité des segments sont hexa,
-      # on considère que c’est un arbre de blobs => bruit
       if (depth >= 4 && useful > 0 && hex_count * 2 >= useful) {
+        # Arbre de blobs => bruit
         next
       }
 
+      # --------------------------------------------------------------------
+      # Préparation base / extension du dernier segment
+      # --------------------------------------------------------------------
+      lastdot = 0
+      for (i = 1; i <= length(leaf); i++) {
+        if (substr(leaf, i, 1) == ".") {
+          lastdot = i
+        }
+      }
+
+      base = leaf
+      ext  = ""
+
+      if (lastdot > 1 && lastdot < length(leaf)) {
+        base = substr(leaf, 1, lastdot - 1)
+        ext  = tolower(substr(leaf, lastdot + 1))
+      }
+
+      # --------------------------------------------------------------------
+      # Règle 3 : fichiers d assets hashés (css/js/images/woff...) avec nom random
+      # --------------------------------------------------------------------
+      if (ext != "" &&
+          (ext == "css"  || ext == "js"   || ext == "map"  ||
+           ext == "png"  || ext == "jpg"  || ext == "jpeg" ||
+           ext == "gif"  || ext == "ico"  || ext == "svg"  ||
+           ext == "webp" || ext == "avif" ||
+           ext == "woff" || ext == "woff2"||
+           ext == "ttf"  || ext == "eot") &&
+          is_hashy_name(base)) {
+        # Asset fortement hashé => bruit
+        next
+      }
+
+      # --------------------------------------------------------------------
+      # Règle 4 : bruit de polices en profondeur (générique)
+      #   - les .ttf/.eot/.woff/.woff2 ne sont quasiment jamais utiles pour un CTF
+      # --------------------------------------------------------------------
+      if (depth >= 3 &&
+          (ext == "woff" || ext == "woff2" || ext == "ttf" || ext == "eot")) {
+        next
+      }
+
+      # --------------------------------------------------------------------
+      # Règle 5 : bruit "code interne CMS" très profond
+      #   - extensions internes: .inc, .info, .install, .module, .theme, .test
+      #   - suffixes très internes: *.api.php, *.admin.inc, *.pages.inc,
+      #                             *.theme.inc, *.tokens.inc
+      #   - on n applique ça que pour depth >= 4 pour ne pas masquer des trucs
+      #     trop proches de la racine.
+      # --------------------------------------------------------------------
+      if (depth >= 4) {
+        # extensions internes "classiques"
+        if (ext == "inc"    ||
+            ext == "info"   ||
+            ext == "install"||
+            ext == "module" ||
+            ext == "theme"  ||
+            ext == "test") {
+          next
+        }
+
+        # suffixes internes très verbeux
+        if (leaf ~ /\.api\.php$/      ||
+            leaf ~ /\.admin\.inc$/    ||
+            leaf ~ /\.pages\.inc$/    ||
+            leaf ~ /\.theme\.inc$/    ||
+            leaf ~ /\.tokens\.inc$/) {
+          next
+        }
+      }
+
+      # --------------------------------------------------------------------
+      # Règle 6 : README / LICENSE perdus en profondeur
+      # --------------------------------------------------------------------
+      lname = tolower(leaf)
+      if (depth >= 3 &&
+          (lname ~ /^readme(\.|$)/ || lname ~ /^license(\.|$)/)) {
+        next
+      }
+
+      # --------------------------------------------------------------------
       # Sinon on garde le chemin
+      # --------------------------------------------------------------------
       print path
     }
   '
 }
+
 
 # ---------- détection des endpoints HTTP/HTTPS à partir d'un Nmap -sV ----------
 detect_web_endpoints_from_nmap() {
