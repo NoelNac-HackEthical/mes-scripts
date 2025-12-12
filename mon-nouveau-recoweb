@@ -1,6 +1,6 @@
 #!/bin/bash
 # NAME=mon-nouveau-recoweb
-# VERSION=v1.7.3
+# VERSION=v1.7.5
 # DESCRIPTION=Découverte web automatisée via feroxbuster + ffuf + dirsearch avec heuristique de bruit (ffuf) et agrégation des chemins filtrés.
 # PRESENTATION_START
 # mon-nouveau-recoweb — Découverte web ciblée pour CTF / pentest (feroxbuster + ffuf + dirsearch)
@@ -101,6 +101,82 @@ GREEN="\e[32m"; BLUE="\e[34m"; YELLOW="\e[33m"; RESET="\e[0m"
 ok()   { echo -e "${GREEN}[✓]${RESET} $*"; }
 info() { echo -e "${BLUE}[*]${RESET} $*"; }
 warn() { echo -e "${YELLOW}[!]${RESET} $*"; }
+
+# --- Warmup HTTP (HTB : services parfois "froids") ---
+warmup_http() {
+  local url="$1"
+  local tries="${2:-3}"
+  local delay="${3:-1}"
+  local i
+
+  for ((i=1; i<=tries; i++)); do
+    [[ ${DEBUG:-0} -eq 1 ]] && info "Warmup HTTP (${i}/${tries}) : ${url}"
+    curl -sk --max-time 5 -o /dev/null "$url" && return 0
+    sleep "$delay"
+  done
+
+  warn "Warmup HTTP : pas de réponse stable après ${tries} tentatives (${url})"
+  return 0
+}
+
+warmup_http_with_host() {
+  local url="$1"
+  local host="$2"
+  local tries="${3:-3}"
+  local delay="${4:-1}"
+  local i
+
+  for ((i=1; i<=tries; i++)); do
+    [[ ${DEBUG:-0} -eq 1 ]] && info "Warmup HTTP Host (${i}/${tries}) : ${url} (Host: ${host})"
+    curl -sk --max-time 5 -H "Host: ${host}" -o /dev/null "$url" && return 0
+    sleep "$delay"
+  done
+
+  warn "Warmup HTTP Host : pas de réponse stable après ${tries} tentatives (${url})"
+  return 0
+}
+
+# --- Wrapper ferox avec retries (3 tentatives) ---
+run_ferox_with_retry() {
+  local url="$1"
+  local wl="$2"
+  local out="$3"
+  local max_tries=3
+  local try err_file
+  local cmd
+
+  for ((try=1; try<=max_tries; try++)); do
+    err_file="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_ferox_err.${PORT:-0}.${try}.XXXXXX")"
+    cmd=(feroxbuster -u "$url" -w "$wl" -o "$out")
+
+    [[ ${DEBUG:-0} -eq 1 ]] && echo "[*] CMD (feroxbuster tentative ${try}/${max_tries}): ${cmd[*]}"
+
+    if "${cmd[@]}" 2> >(tee "$err_file" >&2); then
+      [[ ${DEBUG:-0} -eq 1 ]] && info "feroxbuster OK sur ${url} (tentative ${try})"
+      rm -f "$err_file"
+      return 0
+    fi
+
+    if grep -q "Could not connect to any target provided" "$err_file"; then
+      warn "feroxbuster: problème de connexion vers ${url} (tentative ${try}/${max_tries})"
+    else
+      warn "feroxbuster: échec sur ${url} (tentative ${try}/${max_tries})"
+      if [[ ${DEBUG:-0} -eq 1 ]]; then
+        warn "  Détails (stderr ferox, tentative ${try}):"
+        sed 's/^/    /' "$err_file"
+      fi
+    fi
+
+    rm -f "$err_file"
+
+    if (( try < max_tries )); then
+      sleep 3
+    fi
+  done
+
+  warn "feroxbuster: abandon après ${max_tries} tentatives sur ${url}"
+  return 1
+}
 
 usage(){
   cat <<'USAGE'
@@ -460,7 +536,6 @@ filter_ferox_noise_paths() {
   '
 }
 
-
 # ---------- détection des endpoints HTTP/HTTPS à partir d'un Nmap -sV ----------
 detect_web_endpoints_from_nmap() {
   local nmap_file="$1"
@@ -533,7 +608,6 @@ EXTENSIONS_DEFAULT=".php,.txt,"
 EXTENSIONS="$EXTENSIONS_DEFAULT"
 
 # --- Plan de scans (modifiable facilement) ---
-# Mettre à 0 pour désactiver temporairement un outil lors d'un run :
 HAS_FEROX=1      # 1 = lancer feroxbuster, 0 = ignorer
 HAS_FFUF=1       # 1 = lancer ffuf,        0 = ignorer
 HAS_DIRSEARCH=1  # 1 = lancer dirsearch,   0 = ignorer
@@ -558,10 +632,8 @@ while (( "$#" )); do
 done
 
 # --- binaires nécessaires (feroxbuster / ffuf / dirsearch) ---
-# On considère que curl et nmap sont présents sur la machine.
 MISSING=0
 
-# feroxbuster
 if ! command -v feroxbuster >/dev/null 2>&1; then
   warn "feroxbuster non détecté. Installe-le avec : sudo apt install feroxbuster"
   if (( HAS_FEROX )); then
@@ -570,7 +642,6 @@ if ! command -v feroxbuster >/dev/null 2>&1; then
   HAS_FEROX=0
 fi
 
-# ffuf
 if ! command -v ffuf >/dev/null 2>&1; then
   warn "ffuf non détecté. Installe-le (Kali/Debian) avec : sudo apt install ffuf"
   if (( HAS_FFUF )); then
@@ -579,7 +650,6 @@ if ! command -v ffuf >/dev/null 2>&1; then
   HAS_FFUF=0
 fi
 
-# dirsearch
 if ! command -v dirsearch >/dev/null 2>&1; then
   warn "dirsearch non détecté. Installe-le avec : sudo apt install dirsearch"
   if (( HAS_DIRSEARCH )); then
@@ -588,16 +658,11 @@ if ! command -v dirsearch >/dev/null 2>&1; then
   HAS_DIRSEARCH=0
 fi
 
-
 if (( MISSING )); then
   warn "Un ou plusieurs outils requis (feroxbuster, ffuf, dirsearch) sont manquants."
   warn "Installe-les puis relance mon-nouveau-recoweb."
   exit 1
 fi
-
-# À partir d'ici :
-#   - HAS_FEROX/HAS_FFUF/HAS_DIRSEARCH = 1 → outil installé ET scan souhaité
-#   - HAS_FEROX/HAS_FFUF/HAS_DIRSEARCH = 0 → scan désactivé (ou binaire absent)
 
 ok "Domaine : ${DOMAIN}"
 
@@ -775,6 +840,10 @@ if ((${#WEB_ENDPOINTS[@]} == 0)); then
 else
   info "Ports HTTP/HTTPS détectés : ${WEB_ENDPOINTS[*]}"
 
+  # Warmup global : réveille la cible (HTB peut être "froide")
+  warmup_http "http://${HOST}/" 3 1 || true
+  warmup_http "https://${HOST}/" 2 1 || true
+
   for ep in "${WEB_ENDPOINTS[@]}"; do
     PORT="${ep%%:*}"
     SCHEME="${ep##*:}"
@@ -783,6 +852,14 @@ else
       CURL_TLS="--insecure"
       FFUF_TLS="-k"
     fi
+
+    # Warmup par port : stabilise l'endpoint avant les outils (ferox/ffuf/dirsearch)
+    URL_BASE="${SCHEME}://${HOST}"
+    if [[ "$SCHEME" == "http" && "$PORT" != "80" ]] || [[ "$SCHEME" == "https" && "$PORT" != "443" ]]; then
+      URL_BASE="${URL_BASE}:${PORT}"
+    fi
+    warmup_http "${URL_BASE}${PATH_PART}" 3 1 || true
+    warmup_http_with_host "${SCHEME}://${TARGET_IP}:${PORT}${PATH_PART}" "${HOST}" 2 1 || true
 
     DIR_TXT_PORT_FFUF=""
     DIR_COUNT_PORT_FFUF=0
@@ -803,16 +880,10 @@ else
       DIR_TXT_PORT_FEROX="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirs_ferox_${PORT}.XXXXXX")"
       : > "$DIR_TXT_PORT_FEROX"
 
-      FEROX_CMD=(feroxbuster
-        -u "$FEROX_URL"
-        -w "$FEROX_WL_EFFECTIVE"
-        -o "$FEROX_OUT"
-      )
+      # ferox : wrapper avec retries (3 tentatives)
+      run_ferox_with_retry "$FEROX_URL" "$FEROX_WL_EFFECTIVE" "$FEROX_OUT" || true
 
-      [[ $DEBUG -eq 1 ]] && echo "[*] CMD (feroxbuster): ${FEROX_CMD[*]}"
-      "${FEROX_CMD[@]}" || true
-
-      # Extraction des chemins puis filtrage générique du bruit (hash profonds)
+      # Extraction des chemins puis filtrage générique du bruit (hash profonds + bruit CMS)
       extract_paths_dirsearch "$FEROX_OUT" \
         | filter_ferox_noise_paths \
         > "$DIR_TXT_PORT_FEROX" || true
@@ -970,7 +1041,6 @@ else
     # 3) dirsearch (apres ffuf)
     # =====================
     if (( HAS_DIRSEARCH )); then
-      # URL bassee sur le domaine, comme pour ferox
       DIR_URL_BASE="${SCHEME}://${HOST}"
       if { [[ "$SCHEME" == "http" && "$PORT" != "80" ]] || [[ "$SCHEME" == "https" && "$PORT" != "443" ]]; }; then
         DIR_URL_BASE="${DIR_URL_BASE}:${PORT}"
@@ -981,14 +1051,11 @@ else
       DIR_TXT_PORT_DIR="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirs_dirsearch_${PORT}.XXXXXX")"
       : > "$DIR_TXT_PORT_DIR"
 
-      # Workdir temporaire pour contenir eventuels reports/
       DIR_TMP_WORKDIR="$(mktemp -d "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_dirsearch_work.${PORT}.XXXXXX")"
 
-      # Commande dirsearch (forme tableau pour eviter les soucis d'espaces)
       DIR_CMD=(dirsearch -u "$DIR_URL")
 
       if command -v script >/dev/null 2>&1; then
-        # Progress bar propre grace a un pseudo-TTY
         if [[ $DEBUG -eq 1 ]]; then
           echo "[*] CMD (dirsearch via script): (cd \"$DIR_TMP_WORKDIR\" && script -q -c '${DIR_CMD[*]}' '$DIR_OUT')"
         fi
@@ -997,7 +1064,6 @@ else
           script -q -c "${DIR_CMD[*]}" "$DIR_OUT" </dev/null || true
         )
       else
-        # Fallback: progress un peu moins jolie, mais sortie capturee
         if [[ $DEBUG -eq 1 ]]; then
           echo "[*] CMD (dirsearch via tee): (cd \"$DIR_TMP_WORKDIR\" && ${DIR_CMD[*]} | tee '$DIR_OUT')"
         fi
@@ -1007,7 +1073,6 @@ else
         )
       fi
 
-      # Extraction des chemins depuis la sortie texte de dirsearch
       extract_paths_dirsearch "$DIR_OUT" > "$DIR_TXT_PORT_DIR" || true
       DIR_COUNT_PORT_DIR="$(grep -c '.' "$DIR_TXT_PORT_DIR" || true)"
 
@@ -1023,13 +1088,11 @@ else
         echo
       } >> "$DIRSEARCH_DETAILS"
 
-      # Ajout au set global
       if [[ "$DIR_COUNT_PORT_DIR" -gt 0 ]]; then
         cat "$DIR_TXT_PORT_DIR" >> "$UNION_DIRS"
         DIR_COUNT_TOTAL=$((DIR_COUNT_TOTAL + DIR_COUNT_PORT_DIR))
       fi
 
-      # Nettoyage complet du workdir (y compris reports/)
       rm -rf "$DIR_TMP_WORKDIR" 2>/dev/null || true
 
     else
@@ -1050,10 +1113,8 @@ else
     awk '
       {
         s = $0
-        # Nettoyage ANSI (progress bar, etc.)
         gsub(/\x1B\[[0-9;]*[A-Za-z]/, "", s)
 
-        # Si on voit une URL complète, extraire juste le /chemin
         if (match(s, /(https?:\/\/[^\/]+(\/[^[:space:]]*))/ , m)) {
           s = m[2]
         } else {
@@ -1061,13 +1122,8 @@ else
         }
 
         if (s == "" || s !~ /^\//) next
-
-        # Supprimer les / finaux multiples
         gsub(/\/+$/, "", s)
-
         if (s == "" || s == ".") next
-
-        # On conserve la casse originale
         print s
       }
     ' "$UNION_DIRS" | sort -u > "$UNION_DIRS_NORM"
@@ -1080,7 +1136,6 @@ fi
 
 TMP_BLOCK="$(mktemp "/tmp/mon-nouveau-recoweb_${DOMAIN//\//_}_block.XXXXXX")"
 
-# Préparer les sections ferox / ffuf / dirsearch
 FEROX_SECTION_BODY=""
 FFUF_SECTION_BODY=""
 DIRSEARCH_SECTION_BODY="  (dirsearch désactivé pour ce run ou aucun résultat)"
@@ -1181,7 +1236,6 @@ echo -e "${BLUE}=============================================${RESET}"
 echo
 
 # Mise à jour du fichier scan_repertoires*.txt
-
 if [[ -f "$SCAN_FILE" ]]; then
   sed -e "\#^=== mon-nouveau-recoweb ${DOMAIN} START ===\$#,\#^=== mon-nouveau-recoweb ${DOMAIN} END ===\$#d" \
     "$SCAN_FILE" > "${SCAN_FILE}.tmp" || true
