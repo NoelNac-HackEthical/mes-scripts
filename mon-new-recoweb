@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # NAME=mon-new-recoweb
 # VERSION=1.1.6
-# DESCRIPTION=Recon web "stable" multi-vhosts: garde-fous anti-explosion (CMS/.git/assets) + web-discovery nmap + listing-mode + watchdog ferox (heartbeat mono-ligne) + SUMMARY enrichi (discovered dirs/files) + no-deep /docs + dossier de sortie sans timestamp (écrasé) + ffuf hits en URLs complètes (08_all_urls fiable).
+# DESCRIPTION=Recon web stable multi-vhosts: garde-fous anti-explosion (CMS/.git/assets) + web-discovery nmap + listing-mode + watchdog ferox (heartbeat mono-ligne) + SUMMARY enrichi (discovered dirs/files) + no-deep /docs + dossier de sortie sans timestamp (écrasé) + ffuf hits en URLs complètes (08_all_urls fiable).
 # PRESENTATION_START
 # **mon-new-recoweb — Recon web stable (CTF/HTB)**
 #
@@ -158,6 +158,21 @@ IMPORTANT_PATHS=(
   "/clientaccesspolicy.xml"
 )
 
+WELL_KNOWN_PATHS=(
+  # --- Sécurité / bonnes pratiques ---
+  "/.well-known/security.txt"
+  "/.well-known/change-password"
+
+  # --- Auth / fédération / API ---
+  "/.well-known/openid-configuration"
+  "/.well-known/oauth-authorization-server"
+  "/.well-known/jwks.json"
+
+  # --- Services fédérés / discovery ---
+  "/.well-known/webfinger"
+  "/.well-known/host-meta"
+)
+
 CMS_HINT_PATHS=(
   "/wp-login.php"
   "/wp-config.php"
@@ -248,6 +263,14 @@ probe_important_files() {
     r="$(curl_probe "$url")"; code="${r%% *}"
     if [[ "$code" =~ ^(200|204|301|302|307|308|401|403)$ ]]; then
       echo "$code $url" | tee -a "$out" >/dev/null
+    fi
+  done
+
+  for p in "${WELL_KNOWN_PATHS[@]}"; do
+    local url="${base}${p}" r code
+    r="$(curl_probe "$url")"; code="${r%% *}"
+    if [[ "$code" =~ ^(200|204|301|302|307|308|401|403)$ ]]; then
+        echo "$code $url" | tee -a "$out" >/dev/null
     fi
   done
 }
