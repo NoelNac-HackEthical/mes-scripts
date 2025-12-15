@@ -1,0 +1,939 @@
+#!/usr/bin/env bash
+# NAME=mon-new-recoweb
+# VERSION=1.1.6
+# DESCRIPTION=Recon web "stable" multi-vhosts: garde-fous anti-explosion (CMS/.git/assets) + web-discovery nmap + listing-mode + watchdog ferox (heartbeat mono-ligne) + SUMMARY enrichi (discovered dirs/files) + no-deep /docs + dossier de sortie sans timestamp (écrasé) + ffuf hits en URLs complètes (08_all_urls fiable).
+# PRESENTATION_START
+# **mon-new-recoweb — Recon web stable (CTF/HTB)**
+#
+# Objectif : découvrir la structure d’un ou plusieurs vhosts/sous-domaines sans “exploser” (CMS, assets, .git),
+# tout en détectant des fichiers importants (robots.txt, sitemap.xml…) et en gardant des trouvailles utiles.
+#
+# v1.1.6 :
+# - Dossier de sortie SANS timestamp : recoweb_<host> (écrasé à chaque run)
+# - FFUF hits => URLs complètes (05/06) => 08_all_urls.txt contient vraiment les URLs
+# - Exclusion deep-scan dédiée : NO_DEEP_DIR_REGEX inclut /docs (visible mais pas approfondi)
+# - Watchdog heartbeat mono-ligne (idle=XXs)
+# - SUMMARY : [DISCOVERED_DIRS] (max 50) + [DISCOVERED_FILES] (max 30)
+#
+# Usage rapide :
+# `mon-new-recoweb -t manage.htb`
+# `mon-new-recoweb -t manage.htb:8080`
+# PRESENTATION_END
+# HOMEPAGE=https://github.com/NoelNac-HackEthical/mes-scripts
+#____________________________________________________________________________
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Helpers version (ne pas modifier)
+_self_path="${BASH_SOURCE[0]:-$0}"
+if command -v readlink >/dev/null 2>&1; then
+  _resolved="$(readlink -f -- "$_self_path" 2>/dev/null || true)"
+  [ -n "$_resolved" ] && _self_path="$_resolved"
+fi
+_self_base="$(basename "$_self_path")"
+
+_version_str(){
+  local v
+  v="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$_self_path" 2>/dev/null || true)"
+  v="${v:-0.0.0}"
+  printf '%s v%s\n' "$_self_base" "$v"
+}
+_print_version_and_exit(){ _version_str; exit 0; }
+# ---------------------------------------------------------------------------
+
+usage(){
+  cat <<USAGE
+Usage: ${_self_base} [OPTIONS]
+
+Short description:
+  Recon web stable multi-vhosts (ffuf + ferox) avec garde-fous anti-explosion.
+  Détecte les ports web (nmap web-only) et scanne ensuite par base URL.
+
+Targets:
+  -t <target>           Single target (vhost or URL)  (ex: manage.htb, manage.htb:8080, http://manage.htb:8080)
+  -l <file>             File with targets (one per line)
+
+Options:
+  -o <dir>              Output directory (default: mes_scans)
+  --http|--https        Default scheme if target is a bare vhost (default: http)
+
+  --threads <N>         Concurrency (default: 20)
+  --timeout <N>         Timeout seconds (default: 7)
+
+  --depth-global <N>        Ferox global depth (default: 2)
+  --depth-interesting <N>   Ferox targeted depth (default: 4)
+
+  --max-hits-dirs <N>   Safety cap for ffuf dirs hits (default: 120)
+  --max-hits-files <N>  Safety cap for ffuf files hits (default: 120)
+  --max-queue <N>       Max interesting bases to deep-scan (default: 40)
+
+  --wl-dirs <path>      Wordlist for directories
+  --wl-files <path>     Wordlist for files
+  --exts <csv>          Extensions list (CSV) used for ferox/ffuf files
+
+  --ferox-idle <sec>        Legacy: applique le même idle aux 2 phases (global+deep)
+  --ferox-idle-global <sec> Idle watchdog pour le ferox global (défaut: 30)
+  --ferox-idle-deep <sec>   Idle watchdog pour les deep-scans (défaut: 60)
+  --watchdog-heartbeat <sec> Heartbeat watchdog mono-ligne (défaut: 10 ; 0=off)
+  --no-watchdog         Disable ferox watchdog
+
+  --no-web-discovery    Disable nmap phase 0 (only use the provided URL/host)
+  --web-ports <csv>     Ports to probe in phase 0 (default: 80,443,8000,8080,8081,8443,8888,9000,9090,3000,5000)
+
+  -h, --help            Show this help
+  -V, --version         Show version
+  --debug               Debug mode (set -x)
+USAGE
+}
+
+# ---------------------------------------------------------------------------
+# Defaults
+TIMEOUT="${TIMEOUT:-7}"
+THREADS="${THREADS:-20}"
+DEPTH_GLOBAL="${DEPTH_GLOBAL:-2}"
+DEPTH_INTERESTING="${DEPTH_INTERESTING:-4}"
+MAX_HITS_DIRS="${MAX_HITS_DIRS:-120}"
+MAX_HITS_FILES="${MAX_HITS_FILES:-120}"
+MAX_QUEUE="${MAX_QUEUE:-40}"
+OUTDIR="${OUTDIR:-mes_scans}"
+SCHEME_DEFAULT="${SCHEME_DEFAULT:-http}"
+
+WL_DIRS="${WL_DIRS:-/usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt}"
+WL_FILES="${WL_FILES:-/usr/share/seclists/Discovery/Web-Content/raft-small-files.txt}"
+EXTS="${EXTS:-php,asp,aspx,jsp,js,json,txt,xml,yml,yaml,conf,config,ini,log,bak,old,zip,tar,gz,7z}"
+
+MATCH_CODES="${MATCH_CODES:-200,204,301,302,307,308,401,403}"
+
+WATCHDOG=true
+
+# Watchdog idle (par phase)
+FEROX_IDLE_GLOBAL_SEC="${FEROX_IDLE_GLOBAL_SEC:-30}"
+FEROX_IDLE_DEEP_SEC="${FEROX_IDLE_DEEP_SEC:-60}"
+# Valeur legacy (si --ferox-idle est utilisée, elle s'applique aux deux phases)
+FEROX_IDLE_SEC="${FEROX_IDLE_SEC:-0}"
+# Heartbeat pendant watchdog (toutes les X secondes)
+WATCHDOG_HEARTBEAT_SEC="${WATCHDOG_HEARTBEAT_SEC:-10}"
+
+# SUMMARY discovered caps
+DISCOVERED_DIRS_MAX="${DISCOVERED_DIRS_MAX:-50}"
+DISCOVERED_FILES_MAX="${DISCOVERED_FILES_MAX:-30}"
+
+WEB_DISCOVERY=true
+WEB_PORTS="${WEB_PORTS:-80,443,8000,8080,8081,8443,8888,9000,9090,3000,5000}"
+
+# Bruit structurel (assets & gros répertoires d'assets)
+NOISE_DIR_REGEX='/(wp-content/uploads|wp-includes|wp-admin|node_modules|vendor|dist|build|assets|static|img|images|css|js|fonts|files/styles|files/css|files/js)(/|$)'
+
+# Exclure uniquement de l'approfondissement (deep-scan), mais garder visible dans les découvertes
+NO_DEEP_DIR_REGEX='/(docs|doc)(/|$)'
+
+# Dossiers "intéressants" (pour la queue deep-scan), avant exclusions
+INTERESTING_DIR_REGEX='/(themes|theme|templates|template|skins|skin|config|configs|conf|include|includes|admin|backup|backups|data|db|database|git|\.git|api|docs|doc|dev|test|staging|manager|host-manager)(/|$)'
+
+IMPORTANT_PATHS=(
+  # --- Indexation / structure ---
+  "/robots.txt"
+  "/sitemap.xml"
+  "/sitemap_index.xml"
+  "/sitemap.xml.gz"
+  "/sitemap_index.xml.gz"
+
+  # --- Sécurité / policies ---
+  "/security.txt"
+  "/.well-known/security.txt"
+  "/.well-known/change-password"
+
+  # --- Meta / PWA / fingerprints légers ---
+  "/favicon.ico"
+  "/manifest.json"
+  "/site.webmanifest"
+  "/browserconfig.xml"
+  "/apple-touch-icon.png"
+
+  # --- “humans” / infos bonus (faible bruit) ---
+  "/humans.txt"
+
+  # --- Héritage (rare mais gratuit à tester) ---
+  "/crossdomain.xml"
+  "/clientaccesspolicy.xml"
+)
+
+CMS_HINT_PATHS=(
+  "/wp-login.php"
+  "/wp-config.php"
+  "/administrator/"
+  "/user/login"
+  "/core/"
+  "/sites/default/settings.php"
+)
+
+GIT_PROBES=(
+  "/.git/HEAD"
+  "/.git/config"
+  "/.git/index"
+)
+
+LISTING_INTERESTING_EXT_REGEX='\.(md|txt|log|ini|yml|yaml|conf|config|bak|old|zip|tar|gz|7z|sql|db)$'
+
+# "informationnel" files for SUMMARY
+DISCOVERED_FILES_EXT_REGEX='(^|/)(README(\.[a-zA-Z0-9]+)?|CHANGELOG(\.[a-zA-Z0-9]+)?|CHANGES(\.[a-zA-Z0-9]+)?|LICENSE(\.[a-zA-Z0-9]+)?|COPYING(\.[a-zA-Z0-9]+)?|SECURITY(\.[a-zA-Z0-9]+)?)(/|$)|\.(md|txt|log|ini|yml|yaml|conf|config|bak|old|zip|tar|gz|7z|sql|db)$'
+ASSET_EXT_REGEX='\.(png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|map|css|js)$'
+
+# ---------------------------------------------------------------------------
+# Helpers
+log()  { echo -e "[*] $*"; }
+ok()   { echo -e "[+] $*"; }
+warn() { echo -e "[!] $*" >&2; }
+die()  { echo -e "[X] $*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "Outil manquant: $1"; }
+
+# Heartbeat mono-ligne (stderr)
+_hb_print(){
+  local msg="$1"
+  printf '\r%-100s' "$msg" >&2
+}
+_hb_clear(){
+  printf '\r%-100s\r' " " >&2
+}
+_hb_newline(){
+  echo >&2
+}
+
+norm_url() {
+  local u="$1"
+  if [[ "$u" =~ ^https?:// ]]; then
+    echo "$u"
+  else
+    echo "${SCHEME_DEFAULT}://${u}"
+  fi
+}
+
+host_from_url() {
+  local u="$1"
+  u="${u#http://}"; u="${u#https://}"
+  echo "${u%%/*}"
+}
+
+curl_probe() {
+  local url="$1"
+  curl -k -sS -L --max-time "$TIMEOUT" -o /dev/null -w "%{http_code} %{url_effective}" "$url" 2>/dev/null || true
+}
+
+curl_body_snip() {
+  local url="$1"
+  curl -k -sS -L --max-time "$TIMEOUT" "$url" 2>/dev/null | head -n 60 || true
+}
+
+baseline_404_size() {
+  local base="$1"
+  local rnd="/$(openssl rand -hex 8)"
+  curl -k -sS -L --max-time "$TIMEOUT" "${base}${rnd}" 2>/dev/null | wc -c | tr -d ' '
+}
+
+detect_markers() {
+  local base="$1"
+  local body; body="$(curl_body_snip "$base")"
+  local cms="none"
+  if echo "$body" | grep -qiE 'wp-content|wp-includes|wordpress'; then cms="wordpress"; fi
+  if echo "$body" | grep -qiE 'drupal|sites/default|drupal-settings-json|/core/'; then cms="drupal"; fi
+  if echo "$body" | grep -qiE 'joomla|/administrator/'; then cms="joomla"; fi
+  echo "$cms"
+}
+
+probe_important_files() {
+  local base="$1" out="$2"
+  : > "$out"
+  for p in "${IMPORTANT_PATHS[@]}"; do
+    local url="${base}${p}" r code
+    r="$(curl_probe "$url")"; code="${r%% *}"
+    if [[ "$code" =~ ^(200|204|301|302|307|308|401|403)$ ]]; then
+      echo "$code $url" | tee -a "$out" >/dev/null
+    fi
+  done
+}
+
+probe_cms_hints() {
+  local base="$1" out="$2"
+  : > "$out"
+  for p in "${CMS_HINT_PATHS[@]}"; do
+    local url="${base}${p}" r code
+    r="$(curl_probe "$url")"; code="${r%% *}"
+    if [[ "$code" =~ ^(200|204|301|302|307|308|401|403)$ ]]; then
+      echo "$code $url" | tee -a "$out" >/dev/null
+    fi
+  done
+}
+
+probe_git_minimal() {
+  local base="$1" out="$2"
+  : > "$out"
+  local found=0
+  for p in "${GIT_PROBES[@]}"; do
+    local url="${base}${p}" r code
+    r="$(curl_probe "$url")"; code="${r%% *}"
+    if [[ "$code" =~ ^(200|401|403)$ ]]; then
+      echo "$code $url" | tee -a "$out" >/dev/null
+      found=1
+    fi
+  done
+  echo "$found"
+}
+
+mtime_epoch(){
+  local f="$1"
+  if [[ -f "$f" ]]; then stat -c %Y "$f" 2>/dev/null || echo 0; else echo 0; fi
+}
+
+# URL helpers
+path_from_url(){
+  local u="$1"
+  u="${u#http://}"; u="${u#https://}"
+  if [[ "$u" == */* ]]; then
+    echo "/${u#*/}"
+  else
+    echo "/"
+  fi
+}
+
+is_dir_like_url(){
+  local u="$1"
+  local p last
+  p="$(path_from_url "$u")"
+  [[ "$p" == */ ]] && return 0
+  last="${p##*/}"
+  [[ -z "$last" ]] && return 0
+  if [[ "$last" == *.* ]]; then
+    return 1
+  fi
+  return 0
+}
+
+ensure_trailing_slash_if_dir_like(){
+  local u="$1"
+  if is_dir_like_url "$u"; then
+    [[ "$u" == */ ]] && echo "$u" || echo "${u}/"
+  else
+    echo "$u"
+  fi
+}
+
+url_to_path(){
+  local u="$1"
+  local p
+  p="$(path_from_url "$u")"
+  echo "$p" | sed -E 's#//+#/#g'
+}
+
+build_discovered_dirs(){
+  local urls_file="$1" out_file="$2"
+  : > "$out_file"
+  [[ -f "$urls_file" ]] || return 0
+
+  sed -n 's/.*\(https\?:\/\/[^ ]\+\).*/\1/p' "$urls_file" 2>/dev/null \
+    | while IFS= read -r u; do
+        [[ -z "$u" ]] && continue
+        if echo "$u" | grep -Eqi "$ASSET_EXT_REGEX"; then
+          continue
+        fi
+        if is_dir_like_url "$u"; then
+          url_to_path "$(ensure_trailing_slash_if_dir_like "$u")"
+        fi
+      done \
+    | sed -E 's#/$##' \
+    | grep -E '^/' \
+    | grep -Ev '^/$' \
+    | grep -Ev "$NOISE_DIR_REGEX" \
+    | sort -u \
+    | head -n "$DISCOVERED_DIRS_MAX" \
+    > "$out_file" || true
+}
+
+build_discovered_files(){
+  local urls_file="$1" listing_file="$2" out_file="$3"
+  : > "$out_file"
+
+  {
+    [[ -f "$urls_file" ]] && sed -n 's/.*\(https\?:\/\/[^ ]\+\).*/\1/p' "$urls_file" 2>/dev/null || true
+    [[ -f "$listing_file" ]] && cat "$listing_file" 2>/dev/null || true
+  } | while IFS= read -r u; do
+        [[ -z "$u" ]] && continue
+        [[ "$u" =~ ^https?:// ]] || continue
+        if echo "$u" | grep -Eqi "$ASSET_EXT_REGEX"; then
+          continue
+        fi
+        if echo "$u" | grep -Eqi "$DISCOVERED_FILES_EXT_REGEX"; then
+          url_to_path "$u"
+        fi
+      done \
+    | grep -E '^/' \
+    | sort -u \
+    | head -n "$DISCOVERED_FILES_MAX" \
+    > "$out_file" || true
+}
+
+# ---------------------------------------------------------------------------
+# Phase 0: Web discovery (nmap web-only) — prints only base URLs to STDOUT
+web_discovery(){
+  local target="$1"
+
+  if [[ "$target" =~ ^https?:// ]]; then
+    echo "$target"
+    return 0
+  fi
+
+  if [[ "$target" =~ :[0-9]+$ ]]; then
+    echo "${SCHEME_DEFAULT}://${target}"
+    return 0
+  fi
+
+  if [[ "$WEB_DISCOVERY" != true ]]; then
+    echo "${SCHEME_DEFAULT}://${target}"
+    return 0
+  fi
+
+  echo "[+] Phase 0: web-discovery (nmap ports: $WEB_PORTS) sur $target" >&2
+
+  local g
+  g="$(nmap -Pn -n -p "$WEB_PORTS" --open -oG - "$target" 2>/dev/null || true)"
+
+  local ports=()
+  while IFS= read -r p; do
+    [[ -n "$p" ]] && ports+=( "$p" )
+  done < <(echo "$g" | grep -oE '[0-9]+/open' | cut -d/ -f1 | sort -n -u)
+
+  if [[ "${#ports[@]}" -eq 0 ]]; then
+    echo "[!] web-discovery: aucun port trouvé via nmap (open). Fallback ${SCHEME_DEFAULT}://$target" >&2
+    echo "${SCHEME_DEFAULT}://${target}"
+    return 0
+  fi
+
+  local bases=()
+  for port in "${ports[@]}"; do
+    local http_url="http://${target}:${port}"
+    local https_url="https://${target}:${port}"
+    local r1 r2 c1 c2
+    r1="$(curl_probe "$http_url")"; c1="${r1%% *}"
+    r2="$(curl_probe "$https_url")"; c2="${r2%% *}"
+
+    if [[ "$c1" != "000" && -n "$c1" ]]; then bases+=( "$http_url" ); fi
+    if [[ "$c2" != "000" && -n "$c2" ]]; then bases+=( "$https_url" ); fi
+  done
+
+  if [[ "${#bases[@]}" -eq 0 ]]; then
+    echo "[!] web-discovery: ports open mais aucun endpoint http/https validé par curl. Fallback ${SCHEME_DEFAULT}://$target" >&2
+    echo "${SCHEME_DEFAULT}://${target}"
+    return 0
+  fi
+
+  printf "%s\n" "${bases[@]}" | sort -u
+}
+
+# ---------------------------------------------------------------------------
+# Listing mode
+parse_directory_listing(){
+  local listing_url="$1" out="$2"
+  : > "$out"
+  ok "Listing mode: inventaire sur $listing_url"
+
+  local html
+  html="$(curl -k -sS -L --max-time "$TIMEOUT" "$listing_url" 2>/dev/null || true)"
+  [[ -z "$html" ]] && { warn "Listing mode: HTML vide."; return 0; }
+
+  echo "$html" \
+    | grep -Eoi 'href="[^"]+"' \
+    | sed 's/^href="//;s/"$//' \
+    | grep -vE '^\.\./?$' \
+    | grep -Ei "$LISTING_INTERESTING_EXT_REGEX" \
+    | while IFS= read -r href; do
+        if [[ "$href" =~ ^https?:// ]]; then
+          echo "$href"
+        else
+          if [[ "$listing_url" != */ ]]; then
+            echo "${listing_url}/${href}"
+          else
+            echo "${listing_url}${href}"
+          fi
+        fi
+      done \
+    | sort -u \
+    | tee -a "$out" >/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# FFUF
+run_ffuf_dirs() {
+  local base="$1" host="$2" out_csv="$3" hits_out="$4" max_hits="$5"
+  local f404; f404="$(baseline_404_size "$base")"
+
+  ffuf -s \
+    -u "${base}/FUZZ" \
+    -H "Host: ${host}" \
+    -w "$WL_DIRS" \
+    -mc "$MATCH_CODES" \
+    -t "$THREADS" \
+    -timeout "$TIMEOUT" \
+    -ac \
+    -fs "$f404" \
+    -of csv -o "$out_csv" \
+    || true
+
+  awk -F',' 'NR>1 {print $2}' "$out_csv" 2>/dev/null \
+    | sed 's/^"//;s/"$//' \
+    | while IFS= read -r p; do
+        [[ -z "$p" ]] && continue
+        p="${p#/}"
+        echo "${base}/${p}"
+      done \
+    | tee "$hits_out" >/dev/null || true
+
+  local n; n="$(wc -l < "$hits_out" 2>/dev/null | tr -d ' ')"
+  if [[ "${n:-0}" -gt "$max_hits" ]]; then
+    warn "FFUF dirs: $n résultats (>${max_hits}) => tronqué."
+    head -n "$max_hits" "$hits_out" > "${hits_out}.tmp" && mv "${hits_out}.tmp" "$hits_out"
+  fi
+}
+
+run_ffuf_files() {
+  local base="$1" host="$2" out_csv="$3" hits_out="$4" max_hits="$5"
+  local f404; f404="$(baseline_404_size "$base")"
+
+  ffuf -s \
+    -u "${base}/FUZZ" \
+    -H "Host: ${host}" \
+    -w "$WL_FILES" \
+    -mc "$MATCH_CODES" \
+    -t "$THREADS" \
+    -timeout "$TIMEOUT" \
+    -ac \
+    -fs "$f404" \
+    -e ".$(echo "$EXTS" | tr ',' '.,')" \
+    -of csv -o "$out_csv" \
+    || true
+
+  awk -F',' 'NR>1 {print $2}' "$out_csv" 2>/dev/null \
+    | sed 's/^"//;s/"$//' \
+    | while IFS= read -r p; do
+        [[ -z "$p" ]] && continue
+        p="${p#/}"
+        echo "${base}/${p}"
+      done \
+    | tee "$hits_out" >/dev/null || true
+
+  local n; n="$(wc -l < "$hits_out" 2>/dev/null | tr -d ' ')"
+  if [[ "${n:-0}" -gt "$max_hits" ]]; then
+    warn "FFUF files: $n résultats (>${max_hits}) => tronqué."
+    head -n "$max_hits" "$hits_out" > "${hits_out}.tmp" && mv "${hits_out}.tmp" "$hits_out"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Ferox
+ferox_exclude_mode(){
+  local h
+  h="$(feroxbuster --help 2>/dev/null || true)"
+  if echo "$h" | grep -q -- '--dont-scan'; then echo "dont-scan"; return 0; fi
+  if echo "$h" | grep -q -- '--filter-url'; then echo "filter-url"; return 0; fi
+  echo "none"
+}
+
+ferox_exclude_args(){
+  local mode="$1"
+  local patterns=(
+    "/files/" "/files/css/" "/files/js/" "/files/styles/" "/assets/" "/static/" "/img/" "/images/" "/css/" "/js/" "/fonts/"
+    "/wp-content/uploads/" "/node_modules/" "/vendor/" "/dist/" "/build/"
+  )
+
+  case "$mode" in
+    dont-scan)
+      printf -- "--dont-scan"
+      for p in "${patterns[@]}"; do printf " %s" "$p"; done
+      ;;
+    filter-url)
+      printf -- "--filter-url"
+      printf " %s" "(/files/|/assets/|/static/|/wp-content/uploads/|/node_modules/|/vendor/|/dist/|/build/|/css/|/js/|/images?/|/fonts/)"
+      ;;
+    none)
+      printf -- ""
+      ;;
+  esac
+}
+
+run_ferox_light_watchdog() {
+  local base="$1" host="$2" out_txt="$3" depth="$4" wdir="$5" idle_sec="${6:-}"
+
+  local exclude_mode exclude_args
+  exclude_mode="$(ferox_exclude_mode)"
+  exclude_args="$(ferox_exclude_args "$exclude_mode")"
+
+  if [[ "$exclude_mode" == "none" ]]; then
+    warn "Ferox: aucune option d'exclusion détectée -> scan sans exclusions (watchdog actif)."
+  else
+    ok "Ferox: exclusions actives (mode=${exclude_mode})."
+  fi
+
+  : > "$out_txt"
+
+  local cmd=(
+    feroxbuster
+    -u "$base"
+    -H "Host: ${host}"
+    -t "$THREADS"
+    --timeout "$TIMEOUT"
+    -d "$depth"
+    -x "$EXTS"
+    --auto-tune
+    -k
+    --no-state
+    --silent
+    -o "$out_txt"
+  )
+
+  if [[ -n "${exclude_args:-}" ]]; then
+    # shellcheck disable=SC2206
+    local extra=( $exclude_args )
+    cmd+=( "${extra[@]}" )
+  fi
+
+  "${cmd[@]}" &
+  local pid=$!
+
+  if [[ "$WATCHDOG" != true ]]; then
+    wait "$pid" || true
+    return 0
+  fi
+
+  if [[ -z "${idle_sec:-}" ]]; then
+    idle_sec="$FEROX_IDLE_GLOBAL_SEC"
+  fi
+  if [[ "${FEROX_IDLE_SEC:-0}" -gt 0 ]]; then
+    idle_sec="$FEROX_IDLE_SEC"
+  fi
+
+  ok "Watchdog ferox: idle=${idle_sec}s (pid=${pid})"
+  local last_hb=0
+  local hb_active=false
+
+  local last_mtime now idle_for
+  last_mtime="$(mtime_epoch "$out_txt")"
+  local start_epoch; start_epoch="$(date +%s)"
+
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 3
+    now="$(date +%s)"
+    local m; m="$(mtime_epoch "$out_txt")"
+    if [[ "$m" -gt "$last_mtime" ]]; then
+      last_mtime="$m"
+      continue
+    fi
+    idle_for=$(( now - last_mtime ))
+
+    if [[ "${WATCHDOG_HEARTBEAT_SEC:-10}" -gt 0 ]]; then
+      if (( (now - last_hb) >= WATCHDOG_HEARTBEAT_SEC )); then
+        _hb_print "    … watchdog: ferox vivant (idle=${idle_for}s)"
+        hb_active=true
+        last_hb="$now"
+      fi
+    fi
+
+    if [[ "$last_mtime" -eq 0 ]]; then
+      idle_for=$(( now - start_epoch ))
+    fi
+
+    if [[ "$idle_for" -ge "$idle_sec" ]]; then
+      if [[ "$hb_active" == true ]]; then _hb_clear; _hb_newline; hb_active=false; fi
+      warn "Watchdog: ferox inactif depuis ${idle_for}s -> arrêt (SIGINT)."
+      kill -INT "$pid" 2>/dev/null || true
+      sleep 4
+      if kill -0 "$pid" 2>/dev/null; then
+        warn "Watchdog: ferox n'a pas quitté -> kill (SIGKILL)."
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
+      break
+    fi
+  done
+
+  wait "$pid" 2>/dev/null || true
+  if [[ "$hb_active" == true ]]; then _hb_clear; _hb_newline; fi
+
+  local listing_urls_file="${wdir}/07b_directory_listings.txt"
+  grep -Eo 'detected directory listing: https?://[^ ]+' "$out_txt" 2>/dev/null \
+    | sed 's/.*detected directory listing: //' \
+    | sort -u > "$listing_urls_file" || true
+
+  local ln; ln="$(wc -l < "$listing_urls_file" 2>/dev/null | tr -d ' ')"
+  if [[ "${ln:-0}" -gt 0 ]]; then
+    ok "Directory listing détecté: ${ln} URL(s)."
+    local listing_out="${wdir}/07c_listing_interesting.txt"
+    : > "$listing_out"
+    while IFS= read -r lu; do
+      [[ -z "$lu" ]] && continue
+      parse_directory_listing "$lu" "${wdir}/listing_$(echo "$lu" | sed 's#https\?://##;s#[^a-zA-Z0-9._-]#_#g').txt"
+    done < "$listing_urls_file"
+    cat "${wdir}"/listing_*.txt 2>/dev/null | sort -u > "$listing_out" || true
+  fi
+}
+
+enqueue_interesting_dirs() {
+  local urls_in="$1" queue_out="$2"
+  : > "$queue_out"
+
+  while IFS= read -r u; do
+    [[ -z "$u" ]] && continue
+    [[ "$u" =~ ^https?:// ]] || continue
+
+    echo "$u" | grep -Eq "$INTERESTING_DIR_REGEX" || continue
+    echo "$u" | grep -Eqv "$NOISE_DIR_REGEX" || continue
+    echo "$u" | grep -Eqv "$NO_DEEP_DIR_REGEX" || continue
+
+    if is_dir_like_url "$u"; then
+      ensure_trailing_slash_if_dir_like "$u" >> "$queue_out"
+    fi
+  done < <(sort -u "$urls_in" 2>/dev/null || true)
+
+  sort -u "$queue_out" | head -n "$MAX_QUEUE" > "${queue_out}.tmp" 2>/dev/null || true
+  mv -f "${queue_out}.tmp" "$queue_out" 2>/dev/null || true
+}
+
+deep_scan_interesting() {
+  local queue="$1" host="$2" wdir="$3"
+  local idx=0
+  while IFS= read -r u; do
+    [[ -z "$u" ]] && continue
+    idx=$((idx+1))
+    local subout="${wdir}/ferox_deep_${idx}.txt"
+    ok "Deep-scan #$idx: $u (depth=${DEPTH_INTERESTING})"
+    run_ferox_light_watchdog "$u" "$host" "$subout" "$DEPTH_INTERESTING" "$wdir" "$FEROX_IDLE_DEEP_SEC"
+  done < "$queue"
+}
+
+scan_one_base(){
+  local base="$1"
+  local host; host="$(host_from_url "$base")"
+
+  mkdir -p "$OUTDIR"
+  local safehost wdir
+  safehost="${host//[^a-zA-Z0-9._-]/_}"
+  wdir="${OUTDIR}/recoweb_${safehost}"
+
+  # Écrasement volontaire à chaque run
+  rm -rf -- "$wdir"
+  mkdir -p "$wdir"
+
+  log "======================================="
+  log "Cible : $base"
+  log "Host  : $host"
+  log "Sortie: $wdir"
+  log "======================================="
+
+  local pr code
+  pr="$(curl_probe "$base")"
+  code="${pr%% *}"
+  if [[ -z "$code" || "$code" == "000" ]]; then
+    warn "Injoignable (curl): $base"
+    return 0
+  fi
+  ok "HTTP: $pr" | tee "${wdir}/00_probe.txt" >/dev/null
+
+  ok "Phase 1: endpoints importants"
+  probe_important_files "$base" "${wdir}/01_important.txt"
+
+  ok "Phase 2: détection (indices CMS)"
+  local cms; cms="$(detect_markers "$base")"
+  echo "cms=$cms" | tee "${wdir}/02_detect.txt" >/dev/null
+  ok "Indice CMS: $cms"
+
+  ok "Phase 3: chemins CMS connus (sans bruteforce massif)"
+  probe_cms_hints "$base" "${wdir}/03_cms_hints.txt"
+
+  ok "Phase 4: .git minimal"
+  local git_found; git_found="$(probe_git_minimal "$base" "${wdir}/04_git_probes.txt")"
+  if [[ "$git_found" == "1" ]]; then
+    warn ".git semble exposé -> on note seulement (pas de bruteforce)."
+  fi
+
+  ok "Phase 5: découverte 1 couche (ffuf dirs + ffuf files)"
+  run_ffuf_dirs  "$base" "$host" "${wdir}/05_ffuf_dirs.csv"  "${wdir}/05_ffuf_dirs_hits.txt"  "$MAX_HITS_DIRS"
+  run_ffuf_files "$base" "$host" "${wdir}/06_ffuf_files.csv" "${wdir}/06_ffuf_files_hits.txt" "$MAX_HITS_FILES"
+
+  ok "Phase 6: ferox global light (depth=${DEPTH_GLOBAL}) + watchdog"
+  run_ferox_light_watchdog "$base" "$host" "${wdir}/07_ferox_light.txt" "$DEPTH_GLOBAL" "$wdir" "$FEROX_IDLE_GLOBAL_SEC"
+
+  ok "Phase 7: sélection dossiers intéressants (anti-bruit)"
+  cat "${wdir}/05_ffuf_dirs_hits.txt" "${wdir}/06_ffuf_files_hits.txt" "${wdir}/07_ferox_light.txt" 2>/dev/null \
+    | sed -n 's/.*\(https\?:\/\/[^ ]\+\).*/\1/p' \
+    | sort -u \
+    > "${wdir}/08_all_urls.txt" || true
+
+  enqueue_interesting_dirs "${wdir}/08_all_urls.txt" "${wdir}/09_queue_interesting.txt"
+
+  local qn; qn="$(wc -l < "${wdir}/09_queue_interesting.txt" 2>/dev/null | tr -d ' ')"
+  ok "Queue intéressante: ${qn:-0} entrées (max=${MAX_QUEUE})"
+  if [[ "${qn:-0}" -gt 0 ]]; then
+    ok "Phase 8: approfondissement ciblé (deep-scan sur bases intéressantes)"
+    deep_scan_interesting "${wdir}/09_queue_interesting.txt" "$host" "$wdir"
+  else
+    warn "Aucun dossier intéressant détecté -> pas d'approfondissement."
+  fi
+
+  build_discovered_dirs "${wdir}/08_all_urls.txt" "${wdir}/10_discovered_dirs.txt"
+  build_discovered_files "${wdir}/08_all_urls.txt" "${wdir}/07c_listing_interesting.txt" "${wdir}/11_discovered_files.txt"
+
+  {
+    echo "=== Synthèse $(_version_str) ==="
+    echo "Cible: $base"
+    echo "Host : $host"
+    echo "CMS  : $cms"
+    echo
+
+    echo "[DISCOVERED_DIRS] (max=${DISCOVERED_DIRS_MAX})"
+    cat "${wdir}/10_discovered_dirs.txt" 2>/dev/null || true
+    echo
+
+    echo "[DISCOVERED_FILES] (max=${DISCOVERED_FILES_MAX})"
+    cat "${wdir}/11_discovered_files.txt" 2>/dev/null || true
+    echo
+
+    echo "[IMPORTANT]"
+    cat "${wdir}/01_important.txt" 2>/dev/null || true
+    echo
+
+    echo "[CMS_HINTS]"
+    cat "${wdir}/03_cms_hints.txt" 2>/dev/null || true
+    echo
+
+    echo "[GIT_MINIMAL]"
+    cat "${wdir}/04_git_probes.txt" 2>/dev/null || true
+    echo
+
+    echo "[FFUF_DIRS] (sample)"
+    head -n 30 "${wdir}/05_ffuf_dirs_hits.txt" 2>/dev/null || true
+    echo
+
+    echo "[FFUF_FILES] (sample)"
+    head -n 30 "${wdir}/06_ffuf_files_hits.txt" 2>/dev/null || true
+    echo
+
+    echo "[DIRECTORY_LISTINGS]"
+    cat "${wdir}/07b_directory_listings.txt" 2>/dev/null || true
+    echo
+
+    echo "[LISTING_INTERESTING_FILES]"
+    cat "${wdir}/07c_listing_interesting.txt" 2>/dev/null || true
+    echo
+
+    echo "[INTERESTING_QUEUE]"
+    cat "${wdir}/09_queue_interesting.txt" 2>/dev/null || true
+  } | tee "${wdir}/SUMMARY.txt" >/dev/null
+
+  ok "Terminé: $wdir"
+}
+
+# ---------------------------------------------------------------------------
+# Parsing CLI
+DEBUG=false
+TARGET=""
+LIST=""
+
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then _print_version_and_exit; fi
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then _version_str; usage; exit 0; fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --debug) DEBUG=true; shift ;;
+    -V|--version) _print_version_and_exit ;;
+    -h|--help) _version_str; usage; exit 0 ;;
+
+    -t) TARGET="${2:-}"; shift 2 ;;
+    -l) LIST="${2:-}"; shift 2 ;;
+    -o) OUTDIR="${2:-}"; shift 2 ;;
+
+    --http)  SCHEME_DEFAULT="http"; shift ;;
+    --https) SCHEME_DEFAULT="https"; shift ;;
+
+    --threads) THREADS="${2:-}"; shift 2 ;;
+    --timeout) TIMEOUT="${2:-}"; shift 2 ;;
+
+    --depth-global) DEPTH_GLOBAL="${2:-}"; shift 2 ;;
+    --depth-interesting) DEPTH_INTERESTING="${2:-}"; shift 2 ;;
+
+    --max-hits-dirs) MAX_HITS_DIRS="${2:-}"; shift 2 ;;
+    --max-hits-files) MAX_HITS_FILES="${2:-}"; shift 2 ;;
+    --max-queue) MAX_QUEUE="${2:-}"; shift 2 ;;
+
+    --wl-dirs) WL_DIRS="${2:-}"; shift 2 ;;
+    --wl-files) WL_FILES="${2:-}"; shift 2 ;;
+    --exts) EXTS="${2:-}"; shift 2 ;;
+
+    --ferox-idle) FEROX_IDLE_SEC="${2:-}"; shift 2 ;;
+    --ferox-idle-global) FEROX_IDLE_GLOBAL_SEC="${2:-}"; shift 2 ;;
+    --ferox-idle-deep) FEROX_IDLE_DEEP_SEC="${2:-}"; shift 2 ;;
+    --watchdog-heartbeat) WATCHDOG_HEARTBEAT_SEC="${2:-}"; shift 2 ;;
+
+    --no-watchdog) WATCHDOG=false; shift ;;
+
+    --no-web-discovery) WEB_DISCOVERY=false; shift ;;
+    --web-ports) WEB_PORTS="${2:-}"; shift 2 ;;
+
+    --) shift; break ;;
+    -*) echo "Unknown option: $1" >&2; usage; exit 2 ;;
+    *) break ;;
+  esac
+done
+
+_main(){
+  if [ "$DEBUG" = true ]; then set -x; fi
+
+  need curl
+  need ffuf
+  need feroxbuster
+  need awk
+  need sed
+  need grep
+  need openssl
+  need wc
+  need head
+  need sort
+  need stat
+  need nmap
+
+  [[ -z "$TARGET" && -z "$LIST" ]] && { usage; return 2; }
+  [[ -n "$TARGET" && -n "$LIST" ]] && warn "Note: -t et -l fournis; je scanne d’abord -t puis -l."
+
+  [[ -f "$WL_DIRS" ]]  || die "Wordlist dirs introuvable: $WL_DIRS"
+  [[ -f "$WL_FILES" ]] || die "Wordlist files introuvable: $WL_FILES"
+
+  ok "Script: $(_version_str)"
+  log "threads=$THREADS timeout=$TIMEOUT scheme_default=$SCHEME_DEFAULT outdir=$OUTDIR"
+  log "depth_global=$DEPTH_GLOBAL depth_interestng=$DEPTH_INTERESTING max_queue=$MAX_QUEUE"
+  log "watchdog=$WATCHDOG ferox_idle_global=${FEROX_IDLE_GLOBAL_SEC}s ferox_idle_deep=${FEROX_IDLE_DEEP_SEC}s"
+  log "watchdog_heartbeat=${WATCHDOG_HEARTBEAT_SEC}s"
+  log "web_discovery=$WEB_DISCOVERY web_ports=$WEB_PORTS"
+  log "no_deep_dir_regex=$NO_DEEP_DIR_REGEX"
+  log "summary_discovered_dirs_max=${DISCOVERED_DIRS_MAX} summary_discovered_files_max=${DISCOVERED_FILES_MAX}"
+
+  if [[ -n "$TARGET" ]]; then
+    while IFS= read -r base; do
+      [[ -z "$base" ]] && continue
+      scan_one_base "$(norm_url "$base")"
+    done < <(web_discovery "$TARGET")
+  fi
+
+  if [[ -n "$LIST" ]]; then
+    [[ -f "$LIST" ]] || die "Fichier introuvable: $LIST"
+    while IFS= read -r line; do
+      line="$(echo "$line" | sed 's/[[:space:]]\+$//')"
+      [[ -z "$line" ]] && continue
+      [[ "$line" =~ ^# ]] && continue
+      while IFS= read -r base; do
+        [[ -z "$base" ]] && continue
+        scan_one_base "$(norm_url "$base")"
+      done < <(web_discovery "$line")
+    done < "$LIST"
+  fi
+
+  return 0
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  _main "$@"
+fi

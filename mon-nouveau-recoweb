@@ -883,6 +883,11 @@ else
       # ferox : wrapper avec retries (3 tentatives)
       run_ferox_with_retry "$FEROX_URL" "$FEROX_WL_EFFECTIVE" "$FEROX_OUT" || true
 
+        echo
+        info "Pause après ferox — vérifie la progress bar (found / errors)."
+        read -r -p "Appuie sur Entrée pour continuer…" _
+        echo
+
       # Extraction des chemins puis filtrage générique du bruit (hash profonds + bruit CMS)
       extract_paths_dirsearch "$FEROX_OUT" \
         | filter_ferox_noise_paths \
