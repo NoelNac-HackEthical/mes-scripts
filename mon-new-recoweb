@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # NAME=mon-new-recoweb
-# VERSION=1.1.6
+# VERSION=1.0.0
 # DESCRIPTION=Recon web stable multi-vhosts: garde-fous anti-explosion (CMS/.git/assets) + web-discovery nmap + listing-mode + watchdog ferox (heartbeat mono-ligne) + SUMMARY enrichi (discovered dirs/files) + no-deep /docs + dossier de sortie sans timestamp (écrasé) + ffuf hits en URLs complètes (08_all_urls fiable).
 # PRESENTATION_START
 # **mon-new-recoweb — Recon web stable (CTF/HTB)**
