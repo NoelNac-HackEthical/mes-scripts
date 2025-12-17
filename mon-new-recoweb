@@ -1,19 +1,31 @@
 #!/usr/bin/env bash
 # NAME=mon-new-recoweb
-# VERSION=1.0.5
-# DESCRIPTION=Recon web stable multi-vhosts: garde-fous anti-explosion (CMS/.git/assets) + web-discovery nmap + listing-mode + watchdog ferox (heartbeat mono-ligne) + SUMMARY enrichi (discovered dirs/files) + no-deep /docs + dossier de sortie sans timestamp (écrasé) + ffuf hits en URLs complètes (08_all_urls fiable) + --host-header + watchdog ferox fiable (stdbuf|tee) + watchdog anti-stall (TCP activity) + clamp idle + budget temps max ferox (global/deep).
+# VERSION=1.0.8
+# DESCRIPTION=Recon web stable multi-vhosts: garde-fous anti-explosion (CMS/.git/assets) + web-discovery nmap + listing-mode + watchdog ferox (kill PGID anti-orphelins) + anti-double-run (flock) + phase 5 ffuf silencieuse + spinner fiable + SUMMARY enrichi + FFUF pretty (/dir/ vs /file).
 # PRESENTATION_START
 # **mon-new-recoweb — Recon web stable (CTF/HTB)**
 #
-# v1.0.5 :
-# - Ferox output -> stdbuf -oL -eL -> tee -a out_txt (mtime fiable)
-# - Watchdog: anti-faux-idle via clamp (idle >= TIMEOUT*10)
-# - Watchdog: anti-stall via activité TCP (si connexions en cours, on ne kill pas pour "idle")
-# - Budget MAX par run ferox (global/deep) pour garantir un run "stable & reproductible"
+# v1.0.8 :
+# - Phase 5: ffuf n’affiche plus de lignes “raw” (stdout/stderr redirigé) + spinner fiable (démarre/stoppe correctement)
+# - Ferox: lancement en nouveau process-group (setsid) + kill par PGID => fini les ferox orphelins
+# - Anti-double-run: lockfile flock pour éviter 2 instances en parallèle
 # PRESENTATION_END
 # HOMEPAGE=https://github.com/NoelNac-HackEthical/mes-scripts
 #____________________________________________________________________________
 set -euo pipefail
+
+# --- Curseur invisible pendant le run ---
+_hide_cursor()   { command -v tput >/dev/null 2>&1 && tput civis 2>/dev/null || true; }
+_show_cursor()   { command -v tput >/dev/null 2>&1 && tput cnorm 2>/dev/null || true; }
+
+_cleanup_on_exit(){
+  _show_cursor
+  # (optionnel) si tu as un heartbeat/spinner en \r :
+  # printf '\r\033[K' 2>/dev/null || true
+}
+
+trap _cleanup_on_exit EXIT INT TERM
+_hide_cursor
 
 # ---------------------------------------------------------------------------
 # Helpers version (ne pas modifier)
@@ -49,8 +61,6 @@ Options:
   -o <dir>              Output directory (default: mes_scans)
   --http|--https        Default scheme if target is a bare vhost (default: http)
 
-  --host-header <vhost> Force Host header for ffuf/ferox (useful if base is IP:PORT)
-
   --threads <N>         Concurrency (default: 20)
   --timeout <N>         Timeout seconds (default: 7)
 
@@ -66,12 +76,13 @@ Options:
   --exts <csv>          Extensions list (CSV) used for ferox/ffuf files
 
   --ferox-idle <sec>        Legacy: applique le même idle aux 2 phases (global+deep)
-  --ferox-idle-global <sec> Idle watchdog pour le ferox global (défaut: 30) (clamp >= TIMEOUT*10)
-  --ferox-idle-deep <sec>   Idle watchdog pour les deep-scans (défaut: 60) (clamp >= TIMEOUT*10)
-  --ferox-max-global <sec>  Temps MAX global ferox (défaut: 180 ; 0=off)
-  --ferox-max-deep <sec>    Temps MAX deep ferox (défaut: 240 ; 0=off)
+  --ferox-idle-global <sec> Idle watchdog pour le ferox global (défaut: 30)
+  --ferox-idle-deep <sec>   Idle watchdog pour les deep-scans (défaut: 60)
   --watchdog-heartbeat <sec> Heartbeat watchdog mono-ligne (défaut: 10 ; 0=off)
   --no-watchdog         Disable ferox watchdog
+
+  --ferox-max-global <sec>  Budget max runtime ferox global (défaut: 180)
+  --ferox-max-deep <sec>    Budget max runtime ferox deep (défaut: 240)
 
   --no-web-discovery    Disable nmap phase 0 (only use the provided URL/host)
   --web-ports <csv>     Ports to probe in phase 0 (default: 80,443,8000,8080,8081,8443,8888,9000,9090,3000,5000)
@@ -110,9 +121,9 @@ FEROX_IDLE_SEC="${FEROX_IDLE_SEC:-0}"
 # Heartbeat pendant watchdog (toutes les X secondes)
 WATCHDOG_HEARTBEAT_SEC="${WATCHDOG_HEARTBEAT_SEC:-10}"
 
-# Budget temps max par run ferox (pour éviter les stalls)
-FEROX_MAX_GLOBAL_SEC="${FEROX_MAX_GLOBAL_SEC:-180}"   # 0=off
-FEROX_MAX_DEEP_SEC="${FEROX_MAX_DEEP_SEC:-240}"       # 0=off
+# Budgets max runtime
+FEROX_MAX_GLOBAL_SEC="${FEROX_MAX_GLOBAL_SEC:-180}"
+FEROX_MAX_DEEP_SEC="${FEROX_MAX_DEEP_SEC:-240}"
 
 # SUMMARY discovered caps
 DISCOVERED_DIRS_MAX="${DISCOVERED_DIRS_MAX:-50}"
@@ -120,9 +131,6 @@ DISCOVERED_FILES_MAX="${DISCOVERED_FILES_MAX:-30}"
 
 WEB_DISCOVERY=true
 WEB_PORTS="${WEB_PORTS:-80,443,8000,8080,8081,8443,8888,9000,9090,3000,5000}"
-
-# Override Host header (ffuf/ferox)
-HOST_HEADER_OVERRIDE="${HOST_HEADER_OVERRIDE:-}"
 
 # Bruit structurel (assets & gros répertoires d'assets)
 NOISE_DIR_REGEX='/(wp-content/uploads|wp-includes|wp-admin|node_modules|vendor|dist|build|assets|static|img|images|css|js|fonts|files/styles|files/css|files/js)(/|$)'
@@ -190,13 +198,48 @@ warn() { echo -e "[!] $*" >&2; }
 die()  { echo -e "[X] $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "Outil manquant: $1"; }
 
-_hb_print(){ local msg="$1"; printf '\r%-100s' "$msg" >&2; }
-_hb_clear(){ printf '\r%-100s\r' " " >&2; }
-_hb_newline(){ echo >&2; }
+# Heartbeat mono-ligne (stderr), tronqué à la largeur du terminal
+_hb_cols(){
+  local cols=140
+  if command -v tput >/dev/null 2>&1; then
+    cols="$(tput cols 2>/dev/null || echo 140)"
+  fi
+  # garde-fou
+  [[ "$cols" =~ ^[0-9]+$ ]] || cols=140
+  (( cols < 40 )) && cols=40
+  echo "$cols"
+}
+
+_hb_print(){
+  local msg="$1"
+  local cols cut
+  cols="$(_hb_cols)"
+  cut=$(( cols - 1 ))
+
+  # tronque le message pour éviter le wrap
+  msg="${msg:0:cut}"
+
+  # \r : retour début de ligne ; \033[K : efface jusqu'à fin de ligne
+  printf '\r\033[K%s' "$msg" >&2
+}
+
+_hb_clear(){
+  # efface la ligne courante
+  printf '\r\033[K' >&2
+}
+
+_hb_newline(){
+  # termine proprement la ligne
+  printf '\n' >&2
+}
 
 norm_url() {
   local u="$1"
-  if [[ "$u" =~ ^https?:// ]]; then echo "$u"; else echo "${SCHEME_DEFAULT}://${u}"; fi
+  if [[ "$u" =~ ^https?:// ]]; then
+    echo "$u"
+  else
+    echo "${SCHEME_DEFAULT}://${u}"
+  fi
 }
 
 host_from_url() {
@@ -205,8 +248,8 @@ host_from_url() {
   echo "${u%%/*}"
 }
 
-host_no_port_from_url() {
-  local h; h="$(host_from_url "$1")"
+hosth_from_host(){
+  local h="$1"
   echo "${h%%:*}"
 }
 
@@ -246,6 +289,7 @@ probe_important_files() {
       echo "$code $url" | tee -a "$out" >/dev/null
     fi
   done
+
   for p in "${WELL_KNOWN_PATHS[@]}"; do
     local url="${base}${p}" r code
     r="$(curl_probe "$url")"; code="${r%% *}"
@@ -287,20 +331,14 @@ mtime_epoch(){
   if [[ -f "$f" ]]; then stat -c %Y "$f" 2>/dev/null || echo 0; else echo 0; fi
 }
 
-# Nombre (approximatif) de connexions TCP du process (Linux /proc)
-proc_tcp_conn_count(){
-  local pid="$1"
-  local f="/proc/${pid}/net/tcp"
-  [[ -r "$f" ]] || { echo 0; return 0; }
-  local n
-  n="$(wc -l < "$f" 2>/dev/null | tr -d ' ')"
-  [[ "${n:-0}" -gt 0 ]] && echo $(( n - 1 )) || echo 0
-}
-
 path_from_url(){
   local u="$1"
   u="${u#http://}"; u="${u#https://}"
-  if [[ "$u" == */* ]]; then echo "/${u#*/}"; else echo "/"; fi
+  if [[ "$u" == */* ]]; then
+    echo "/${u#*/}"
+  else
+    echo "/"
+  fi
 }
 
 is_dir_like_url(){
@@ -316,12 +354,17 @@ is_dir_like_url(){
 
 ensure_trailing_slash_if_dir_like(){
   local u="$1"
-  if is_dir_like_url "$u"; then [[ "$u" == */ ]] && echo "$u" || echo "${u}/"; else echo "$u"; fi
+  if is_dir_like_url "$u"; then
+    [[ "$u" == */ ]] && echo "$u" || echo "${u}/"
+  else
+    echo "$u"
+  fi
 }
 
 url_to_path(){
   local u="$1"
-  local p; p="$(path_from_url "$u")"
+  local p
+  p="$(path_from_url "$u")"
   echo "$p" | sed -E 's#//+#/#g'
 }
 
@@ -334,7 +377,9 @@ build_discovered_dirs(){
     | while IFS= read -r u; do
         [[ -z "$u" ]] && continue
         echo "$u" | grep -Eqi "$ASSET_EXT_REGEX" && continue
-        if is_dir_like_url "$u"; then url_to_path "$(ensure_trailing_slash_if_dir_like "$u")"; fi
+        if is_dir_like_url "$u"; then
+          url_to_path "$(ensure_trailing_slash_if_dir_like "$u")"
+        fi
       done \
     | sed -E 's#/$##' \
     | grep -E '^/' \
@@ -356,7 +401,9 @@ build_discovered_files(){
         [[ -z "$u" ]] && continue
         [[ "$u" =~ ^https?:// ]] || continue
         echo "$u" | grep -Eqi "$ASSET_EXT_REGEX" && continue
-        if echo "$u" | grep -Eqi "$DISCOVERED_FILES_EXT_REGEX"; then url_to_path "$u"; fi
+        if echo "$u" | grep -Eqi "$DISCOVERED_FILES_EXT_REGEX"; then
+          url_to_path "$u"
+        fi
       done \
     | grep -E '^/' \
     | sort -u \
@@ -365,20 +412,52 @@ build_discovered_files(){
 }
 
 # ---------------------------------------------------------------------------
-# Phase 0: Web discovery (nmap web-only)
+# Spinner (fiable): s'arrête quand le PID s'arrête + ligne nettoyée
+_spinner_run(){
+  local pid="$1" label="$2"
+  local start now elapsed i=0
+  local frames='-\|/'
+
+  start="$(date +%s)"
+  while kill -0 "$pid" 2>/dev/null; do
+    now="$(date +%s)"
+    elapsed=$(( now - start ))
+    printf '\r[*] %s ... %c (%ss)' "$label" "${frames:i%4:1}" "$elapsed" >&2
+    i=$((i+1))
+    sleep 0.2
+  done
+  printf '\r%-140s\r' " " >&2
+}
+
+# ---------------------------------------------------------------------------
+# Phase 0: Web discovery (nmap web-only) — prints only base URLs to STDOUT
 web_discovery(){
   local target="$1"
 
-  if [[ "$target" =~ ^https?:// ]]; then echo "$target"; return 0; fi
-  if [[ "$target" =~ :[0-9]+$ ]]; then echo "${SCHEME_DEFAULT}://${target}"; return 0; fi
-  if [[ "$WEB_DISCOVERY" != true ]]; then echo "${SCHEME_DEFAULT}://${target}"; return 0; fi
+  if [[ "$target" =~ ^https?:// ]]; then
+    echo "$target"
+    return 0
+  fi
+
+  if [[ "$target" =~ :[0-9]+$ ]]; then
+    echo "${SCHEME_DEFAULT}://${target}"
+    return 0
+  fi
+
+  if [[ "$WEB_DISCOVERY" != true ]]; then
+    echo "${SCHEME_DEFAULT}://${target}"
+    return 0
+  fi
 
   echo "[+] Phase 0: web-discovery (nmap ports: $WEB_PORTS) sur $target" >&2
 
-  local g; g="$(nmap -Pn -n -p "$WEB_PORTS" --open -oG - "$target" 2>/dev/null || true)"
+  local g
+  g="$(nmap -Pn -n -p "$WEB_PORTS" --open -oG - "$target" 2>/dev/null || true)"
 
   local ports=()
-  while IFS= read -r p; do [[ -n "$p" ]] && ports+=( "$p" ); done < <(echo "$g" | grep -oE '[0-9]+/open' | cut -d/ -f1 | sort -n -u)
+  while IFS= read -r p; do
+    [[ -n "$p" ]] && ports+=( "$p" )
+  done < <(echo "$g" | grep -oE '[0-9]+/open' | cut -d/ -f1 | sort -n -u)
 
   if [[ "${#ports[@]}" -eq 0 ]]; then
     echo "[!] web-discovery: aucun port trouvé via nmap (open). Fallback ${SCHEME_DEFAULT}://$target" >&2
@@ -393,6 +472,7 @@ web_discovery(){
     local r1 r2 c1 c2
     r1="$(curl_probe "$http_url")"; c1="${r1%% *}"
     r2="$(curl_probe "$https_url")"; c2="${r2%% *}"
+
     [[ "$c1" != "000" && -n "$c1" ]] && bases+=( "$http_url" )
     [[ "$c2" != "000" && -n "$c2" ]] && bases+=( "$https_url" )
   done
@@ -413,7 +493,8 @@ parse_directory_listing(){
   : > "$out"
   ok "Listing mode: inventaire sur $listing_url"
 
-  local html; html="$(curl -k -sS -L --max-time "$TIMEOUT" "$listing_url" 2>/dev/null || true)"
+  local html
+  html="$(curl -k -sS -L --max-time "$TIMEOUT" "$listing_url" 2>/dev/null || true)"
   [[ -z "$html" ]] && { warn "Listing mode: HTML vide."; return 0; }
 
   echo "$html" \
@@ -434,13 +515,23 @@ parse_directory_listing(){
 
 # ---------------------------------------------------------------------------
 # FFUF
+_extract_ffuf_urls_from_csv(){
+  local csv="$1"
+  [[ -f "$csv" ]] || return 0
+  awk -F',' 'NR>1 {print $2}' "$csv" 2>/dev/null | sed 's/^"//;s/"$//' || true
+}
+
 run_ffuf_dirs() {
-  local base="$1" host_hdr="$2" out_csv="$3" hits_out="$4" max_hits="$5"
+  local base="$1" host="$2" out_csv="$3" hits_out="$4" max_hits="$5"
   local f404; f404="$(baseline_404_size "$base")"
 
+  : > "$out_csv"
+  : > "$hits_out"
+
+  # IMPORTANT: on masque toute sortie ffuf (sinon "raw" à l’écran)
   ffuf -s \
     -u "${base}/FUZZ" \
-    -H "Host: ${host_hdr}" \
+    -H "Host: ${host}" \
     -w "$WL_DIRS" \
     -mc "$MATCH_CODES" \
     -t "$THREADS" \
@@ -448,15 +539,23 @@ run_ffuf_dirs() {
     -ac \
     -fs "$f404" \
     -of csv -o "$out_csv" \
-    || true
+    >/dev/null 2>&1 &
+  local ffpid=$!
 
-  awk -F',' 'NR>1 {print $2}' "$out_csv" 2>/dev/null \
-    | sed 's/^"//;s/"$//' \
+  _spinner_run "$ffpid" "ffuf dirs en cours"
+  wait "$ffpid" 2>/dev/null || true
+
+  _extract_ffuf_urls_from_csv "$out_csv" \
     | while IFS= read -r p; do
         [[ -z "$p" ]] && continue
-        p="${p#/}"
-        echo "${base}/${p}"
+        if [[ "$p" =~ ^https?:// ]]; then
+          echo "$p"
+        else
+          p="${p#/}"
+          echo "${base}/${p}"
+        fi
       done \
+    | sort -u \
     | tee "$hits_out" >/dev/null || true
 
   local n; n="$(wc -l < "$hits_out" 2>/dev/null | tr -d ' ')"
@@ -467,12 +566,15 @@ run_ffuf_dirs() {
 }
 
 run_ffuf_files() {
-  local base="$1" host_hdr="$2" out_csv="$3" hits_out="$4" max_hits="$5"
+  local base="$1" host="$2" out_csv="$3" hits_out="$4" max_hits="$5"
   local f404; f404="$(baseline_404_size "$base")"
+
+  : > "$out_csv"
+  : > "$hits_out"
 
   ffuf -s \
     -u "${base}/FUZZ" \
-    -H "Host: ${host_hdr}" \
+    -H "Host: ${host}" \
     -w "$WL_FILES" \
     -mc "$MATCH_CODES" \
     -t "$THREADS" \
@@ -481,15 +583,23 @@ run_ffuf_files() {
     -fs "$f404" \
     -e ".$(echo "$EXTS" | tr ',' '.,')" \
     -of csv -o "$out_csv" \
-    || true
+    >/dev/null 2>&1 &
+  local ffpid=$!
 
-  awk -F',' 'NR>1 {print $2}' "$out_csv" 2>/dev/null \
-    | sed 's/^"//;s/"$//' \
+  _spinner_run "$ffpid" "ffuf files en cours"
+  wait "$ffpid" 2>/dev/null || true
+
+  _extract_ffuf_urls_from_csv "$out_csv" \
     | while IFS= read -r p; do
         [[ -z "$p" ]] && continue
-        p="${p#/}"
-        echo "${base}/${p}"
+        if [[ "$p" =~ ^https?:// ]]; then
+          echo "$p"
+        else
+          p="${p#/}"
+          echo "${base}/${p}"
+        fi
       done \
+    | sort -u \
     | tee "$hits_out" >/dev/null || true
 
   local n; n="$(wc -l < "$hits_out" 2>/dev/null | tr -d ' ')"
@@ -499,10 +609,30 @@ run_ffuf_files() {
   fi
 }
 
+_print_ffuf_pretty(){
+  local wdir="$1"
+  echo "--- FFUF (pretty) ---"
+  {
+    cat "${wdir}/05_ffuf_dirs_hits.txt" 2>/dev/null || true
+    cat "${wdir}/06_ffuf_files_hits.txt" 2>/dev/null || true
+  } | while IFS= read -r u; do
+      [[ -z "$u" ]] && continue
+      [[ "$u" =~ ^https?:// ]] || continue
+      if is_dir_like_url "$u"; then
+        # dir => toujours /dir/
+        echo "$(url_to_path "$(ensure_trailing_slash_if_dir_like "$u")")"
+      else
+        echo "$(url_to_path "$u")"
+      fi
+    done \
+    | sed -E 's#//+#/#g'
+}
+
 # ---------------------------------------------------------------------------
 # Ferox
 ferox_exclude_mode(){
-  local h; h="$(feroxbuster --help 2>/dev/null || true)"
+  local h
+  h="$(feroxbuster --help 2>/dev/null || true)"
   if echo "$h" | grep -q -- '--dont-scan'; then echo "dont-scan"; return 0; fi
   if echo "$h" | grep -q -- '--filter-url'; then echo "filter-url"; return 0; fi
   echo "none"
@@ -522,14 +652,16 @@ ferox_exclude_args(){
       ;;
     filter-url)
       printf -- "--filter-url"
-      printf " %s" "(/files/|/assets/|/static/|/wp-content/uploads/|/node_modules/|/vendor/|/dist/|/build/|/css/|/js/|/images?/|/fonts/)"
+      printf " %s" "(/files/|/assets/|/static/|/wp-content/uploads/|/node_modules/|/vendor/|/dist/|/build/|/css/|/js|/images?/|/fonts/)"
       ;;
-    none) printf -- "" ;;
+    none)
+      printf -- ""
+      ;;
   esac
 }
 
 run_ferox_light_watchdog() {
-  local base="$1" host_hdr="$2" out_txt="$3" depth="$4" wdir="$5" idle_sec="${6:-}" max_sec="${7:-0}"
+  local base="$1" host="$2" out_txt="$3" depth="$4" wdir="$5" idle_sec="${6:-}" max_sec="${7:-}"
 
   local exclude_mode exclude_args
   exclude_mode="$(ferox_exclude_mode)"
@@ -543,11 +675,10 @@ run_ferox_light_watchdog() {
 
   : > "$out_txt"
 
-  # Ferox command: on pipe vers tee (mtime fiable)
-  local ferox_cmd=(
+  local cmd=(
     feroxbuster
     -u "$base"
-    -H "Host: ${host_hdr}"
+    -H "Host: ${host}"
     -t "$THREADS"
     --timeout "$TIMEOUT"
     -d "$depth"
@@ -555,18 +686,21 @@ run_ferox_light_watchdog() {
     --auto-tune
     -k
     --no-state
+    --silent
+    -o "$out_txt"
   )
 
   if [[ -n "${exclude_args:-}" ]]; then
     # shellcheck disable=SC2206
     local extra=( $exclude_args )
-    ferox_cmd+=( "${extra[@]}" )
+    cmd+=( "${extra[@]}" )
   fi
 
-  if command -v stdbuf >/dev/null 2>&1; then
-    stdbuf -oL -eL "${ferox_cmd[@]}" 2>&1 | tee -a "$out_txt" >/dev/null &
+  # --- start ferox in a NEW process group (anti-orphelins) ---
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "${cmd[@]}" >/dev/null 2>&1 &
   else
-    "${ferox_cmd[@]}" 2>&1 | tee -a "$out_txt" >/dev/null &
+    "${cmd[@]}" >/dev/null 2>&1 &
   fi
   local pid=$!
 
@@ -578,34 +712,47 @@ run_ferox_light_watchdog() {
   if [[ -z "${idle_sec:-}" ]]; then idle_sec="$FEROX_IDLE_GLOBAL_SEC"; fi
   if [[ "${FEROX_IDLE_SEC:-0}" -gt 0 ]]; then idle_sec="$FEROX_IDLE_SEC"; fi
 
-  # Clamp idle: ne pas être plus agressif que le TIMEOUT réseau
   local min_idle=$(( TIMEOUT * 10 ))
   if [[ "$idle_sec" -lt "$min_idle" ]]; then
     idle_sec="$min_idle"
   fi
 
-  ok "Watchdog ferox: idle=${idle_sec}s (pid=${pid})"
-  local last_hb=0
-  local hb_active=false
+  if [[ -z "${max_sec:-}" ]]; then
+    max_sec="$FEROX_MAX_GLOBAL_SEC"
+  fi
 
-  local last_mtime now idle_for
+  local pgid my_pgid
+  pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+  my_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ' || true)"
+  ok "Watchdog debug: pid=${pid} pgid=${pgid:-?} my_pgid=${my_pgid:-?}"
+  ok "Watchdog ferox: idle=${idle_sec}s (pid=${pid})"
+
+  _kill_ferox_tree(){
+    local sig="$1" # INT / KILL
+    if [[ -n "${pgid:-}" && "${pgid:-0}" -gt 0 ]]; then
+      kill "-${sig}" "-${pgid}" 2>/dev/null || true
+    fi
+    kill "-${sig}" "${pid}" 2>/dev/null || true
+  }
+
+  local last_hb=0 hb_active=false
+  local last_mtime now idle_for runtime_for
   last_mtime="$(mtime_epoch "$out_txt")"
   local start_epoch; start_epoch="$(date +%s)"
 
   while kill -0 "$pid" 2>/dev/null; do
-    sleep 3
+    sleep 1
     now="$(date +%s)"
+    runtime_for=$(( now - start_epoch ))
 
-    # Budget temps MAX (anti-stall)
-    local runtime=$(( now - start_epoch ))
-    if [[ "${max_sec:-0}" -gt 0 && "$runtime" -ge "$max_sec" ]]; then
+    if [[ "${max_sec:-0}" -gt 0 && "$runtime_for" -ge "$max_sec" ]]; then
       if [[ "$hb_active" == true ]]; then _hb_clear; _hb_newline; hb_active=false; fi
-      warn "Watchdog: ferox dépasse max=${max_sec}s (runtime=${runtime}s) -> arrêt (SIGINT)."
-      kill -INT "$pid" 2>/dev/null || true
+      warn "Watchdog: ferox dépasse max=${max_sec}s (runtime=${runtime_for}s) -> arrêt (SIGINT)."
+      _kill_ferox_tree INT
       sleep 4
       if kill -0 "$pid" 2>/dev/null; then
         warn "Watchdog: ferox n'a pas quitté -> kill (SIGKILL)."
-        kill -KILL "$pid" 2>/dev/null || true
+        _kill_ferox_tree KILL
       fi
       break
     fi
@@ -615,34 +762,29 @@ run_ferox_light_watchdog() {
       last_mtime="$m"
       continue
     fi
-    idle_for=$(( now - last_mtime ))
+
+    if [[ "$last_mtime" -eq 0 ]]; then
+      idle_for=$runtime_for
+    else
+      idle_for=$(( now - last_mtime ))
+    fi
 
     if [[ "${WATCHDOG_HEARTBEAT_SEC:-10}" -gt 0 ]]; then
       if (( (now - last_hb) >= WATCHDOG_HEARTBEAT_SEC )); then
-        _hb_print "    … watchdog: ferox vivant (idle=${idle_for}s)"
+        _hb_print "    … watchdog: ferox vivant | runtime=${runtime_for}s | idle=${idle_for}s | max=${max_sec}s"
         hb_active=true
         last_hb="$now"
       fi
     fi
 
-    if [[ "$last_mtime" -eq 0 ]]; then
-      idle_for=$(( now - start_epoch ))
-    fi
-
     if [[ "$idle_for" -ge "$idle_sec" ]]; then
-      # si ferox a encore des connexions TCP actives, on considère qu'il travaille
-      local tcpn; tcpn="$(proc_tcp_conn_count "$pid")"
-      if [[ "${tcpn:-0}" -gt 0 ]]; then
-        continue
-      fi
-
       if [[ "$hb_active" == true ]]; then _hb_clear; _hb_newline; hb_active=false; fi
       warn "Watchdog: ferox inactif depuis ${idle_for}s -> arrêt (SIGINT)."
-      kill -INT "$pid" 2>/dev/null || true
+      _kill_ferox_tree INT
       sleep 4
       if kill -0 "$pid" 2>/dev/null; then
         warn "Watchdog: ferox n'a pas quitté -> kill (SIGKILL)."
-        kill -KILL "$pid" 2>/dev/null || true
+        _kill_ferox_tree KILL
       fi
       break
     fi
@@ -652,10 +794,7 @@ run_ferox_light_watchdog() {
   if [[ "$hb_active" == true ]]; then _hb_clear; _hb_newline; fi
 
   local listing_urls_file="${wdir}/07b_directory_listings.txt"
-
-  # Robustesse si ferox ajoute des codes ANSI (couleurs)
-  sed -r 's/\x1B\[[0-9;]*[mK]//g' "$out_txt" 2>/dev/null \
-    | grep -Eo 'detected directory listing: https?://[^ ]+' 2>/dev/null \
+  grep -Eo 'detected directory listing: https?://[^ ]+' "$out_txt" 2>/dev/null \
     | sed 's/.*detected directory listing: //' \
     | sort -u > "$listing_urls_file" || true
 
@@ -694,40 +833,34 @@ enqueue_interesting_dirs() {
 }
 
 deep_scan_interesting() {
-  local queue="$1" host_hdr="$2" wdir="$3"
+  local queue="$1" host="$2" wdir="$3"
   local idx=0
   while IFS= read -r u; do
     [[ -z "$u" ]] && continue
     idx=$((idx+1))
     local subout="${wdir}/ferox_deep_${idx}.txt"
     ok "Deep-scan #$idx: $u (depth=${DEPTH_INTERESTING})"
-    run_ferox_light_watchdog "$u" "$host_hdr" "$subout" "$DEPTH_INTERESTING" "$wdir" "$FEROX_IDLE_DEEP_SEC" "$FEROX_MAX_DEEP_SEC"
+    run_ferox_light_watchdog "$u" "$host" "$subout" "$DEPTH_INTERESTING" "$wdir" "$FEROX_IDLE_DEEP_SEC" "$FEROX_MAX_DEEP_SEC"
   done < "$queue"
 }
 
 scan_one_base(){
   local base="$1"
   local host; host="$(host_from_url "$base")"
-
-  local host_hdr
-  if [[ -n "${HOST_HEADER_OVERRIDE:-}" ]]; then
-    host_hdr="$HOST_HEADER_OVERRIDE"
-  else
-    host_hdr="$(host_no_port_from_url "$base")"
-  fi
+  local hosth; hosth="$(hosth_from_host "$host")"
 
   mkdir -p "$OUTDIR"
   local safehost wdir
   safehost="${host//[^a-zA-Z0-9._-]/_}"
   wdir="${OUTDIR}/recoweb_${safehost}"
 
-  rm -rf -- "$wdir"
+  rm -rf -- "$wdir" 2>/dev/null || true
   mkdir -p "$wdir"
 
   log "======================================="
   log "Cible : $base"
   log "Host  : $host"
-  log "HostH : $host_hdr"
+  log "HostH : $hosth"
   log "Sortie: $wdir"
   log "======================================="
 
@@ -753,14 +886,22 @@ scan_one_base(){
 
   ok "Phase 4: .git minimal"
   local git_found; git_found="$(probe_git_minimal "$base" "${wdir}/04_git_probes.txt")"
-  [[ "$git_found" == "1" ]] && warn ".git semble exposé -> on note seulement (pas de bruteforce)."
+  if [[ "$git_found" == "1" ]]; then
+    warn ".git semble exposé -> on note seulement (pas de bruteforce)."
+  fi
 
   ok "Phase 5: découverte 1 couche (ffuf dirs + ffuf files)"
-  run_ffuf_dirs  "$base" "$host_hdr" "${wdir}/05_ffuf_dirs.csv"  "${wdir}/05_ffuf_dirs_hits.txt"  "$MAX_HITS_DIRS"
-  run_ffuf_files "$base" "$host_hdr" "${wdir}/06_ffuf_files.csv" "${wdir}/06_ffuf_files_hits.txt" "$MAX_HITS_FILES"
+  log "  → ffuf dirs (spinner)…"
+  run_ffuf_dirs  "$base" "$hosth" "${wdir}/05_ffuf_dirs.csv"  "${wdir}/05_ffuf_dirs_hits.txt"  "$MAX_HITS_DIRS"
+  ok  "  → ffuf dirs terminé."
+  log "  → ffuf files (spinner)…"
+  run_ffuf_files "$base" "$hosth" "${wdir}/06_ffuf_files.csv" "${wdir}/06_ffuf_files_hits.txt" "$MAX_HITS_FILES"
+  ok  "  → ffuf files terminé."
+
+  _print_ffuf_pretty "$wdir"
 
   ok "Phase 6: ferox global light (depth=${DEPTH_GLOBAL}) + watchdog"
-  run_ferox_light_watchdog "$base" "$host_hdr" "${wdir}/07_ferox_light.txt" "$DEPTH_GLOBAL" "$wdir" "$FEROX_IDLE_GLOBAL_SEC" "$FEROX_MAX_GLOBAL_SEC"
+  run_ferox_light_watchdog "$base" "$hosth" "${wdir}/07_ferox_light.txt" "$DEPTH_GLOBAL" "$wdir" "$FEROX_IDLE_GLOBAL_SEC" "$FEROX_MAX_GLOBAL_SEC"
 
   ok "Phase 7: sélection dossiers intéressants (anti-bruit)"
   cat "${wdir}/05_ffuf_dirs_hits.txt" "${wdir}/06_ffuf_files_hits.txt" "${wdir}/07_ferox_light.txt" 2>/dev/null \
@@ -774,7 +915,7 @@ scan_one_base(){
   ok "Queue intéressante: ${qn:-0} entrées (max=${MAX_QUEUE})"
   if [[ "${qn:-0}" -gt 0 ]]; then
     ok "Phase 8: approfondissement ciblé (deep-scan sur bases intéressantes)"
-    deep_scan_interesting "${wdir}/09_queue_interesting.txt" "$host_hdr" "$wdir"
+    deep_scan_interesting "${wdir}/09_queue_interesting.txt" "$hosth" "$wdir"
   else
     warn "Aucun dossier intéressant détecté -> pas d'approfondissement."
   fi
@@ -786,7 +927,7 @@ scan_one_base(){
     echo "=== Synthèse $(_version_str) ==="
     echo "Cible: $base"
     echo "Host : $host"
-    echo "HostH: $host_hdr"
+    echo "HostH: $hosth"
     echo "CMS  : $cms"
     echo
 
@@ -860,8 +1001,6 @@ while [[ $# -gt 0 ]]; do
     --http)  SCHEME_DEFAULT="http"; shift ;;
     --https) SCHEME_DEFAULT="https"; shift ;;
 
-    --host-header) HOST_HEADER_OVERRIDE="${2:-}"; shift 2 ;;
-
     --threads) THREADS="${2:-}"; shift 2 ;;
     --timeout) TIMEOUT="${2:-}"; shift 2 ;;
 
@@ -879,9 +1018,10 @@ while [[ $# -gt 0 ]]; do
     --ferox-idle) FEROX_IDLE_SEC="${2:-}"; shift 2 ;;
     --ferox-idle-global) FEROX_IDLE_GLOBAL_SEC="${2:-}"; shift 2 ;;
     --ferox-idle-deep) FEROX_IDLE_DEEP_SEC="${2:-}"; shift 2 ;;
+    --watchdog-heartbeat) WATCHDOG_HEARTBEAT_SEC="${2:-}"; shift 2 ;;
+
     --ferox-max-global) FEROX_MAX_GLOBAL_SEC="${2:-}"; shift 2 ;;
     --ferox-max-deep) FEROX_MAX_DEEP_SEC="${2:-}"; shift 2 ;;
-    --watchdog-heartbeat) WATCHDOG_HEARTBEAT_SEC="${2:-}"; shift 2 ;;
 
     --no-watchdog) WATCHDOG=false; shift ;;
 
@@ -897,6 +1037,25 @@ done
 _main(){
   if [ "$DEBUG" = true ]; then set -x; fi
 
+  need flock
+
+  # --- Anti double-run (lockfile) ---
+  LOCKFILE="/tmp/mon-new-recoweb.lock"
+  exec 9>"$LOCKFILE"
+  if ! flock -n 9; then
+    die "Une autre instance de ${_self_base} tourne déjà (lock=$LOCKFILE). Stoppe-la avant de relancer."
+  fi
+
+  # --- Curseur invisible pendant le run + cleanup robuste ---
+  _restore_tty(){
+    _hb_clear || true
+    if command -v tput >/dev/null 2>&1; then tput cnorm 2>/dev/null || true; fi
+    rm -f "$LOCKFILE" 2>/dev/null || true
+  }
+  trap _restore_tty EXIT INT TERM
+
+  if command -v tput >/dev/null 2>&1; then tput civis 2>/dev/null || true; fi
+
   need curl
   need ffuf
   need feroxbuster
@@ -909,8 +1068,7 @@ _main(){
   need sort
   need stat
   need nmap
-  need tee
-  # stdbuf est optionnel (fallback sans stdbuf), mais présent sur Kali
+  need ps
 
   [[ -z "$TARGET" && -z "$LIST" ]] && { usage; return 2; }
   [[ -n "$TARGET" && -n "$LIST" ]] && warn "Note: -t et -l fournis; je scanne d’abord -t puis -l."
@@ -920,13 +1078,13 @@ _main(){
 
   ok "Script: $(_version_str)"
   log "threads=$THREADS timeout=$TIMEOUT scheme_default=$SCHEME_DEFAULT outdir=$OUTDIR"
-  log "depth_global=$DEPTH_GLOBAL depth_interesting=$DEPTH_INTERESTING max_queue=$MAX_QUEUE"
+  log "depth_global=$DEPTH_GLOBAL depth_interestng=$DEPTH_INTERESTING max_queue=$MAX_QUEUE"
   log "watchdog=$WATCHDOG ferox_idle_global=${FEROX_IDLE_GLOBAL_SEC}s ferox_idle_deep=${FEROX_IDLE_DEEP_SEC}s"
   log "ferox_max_global=${FEROX_MAX_GLOBAL_SEC}s ferox_max_deep=${FEROX_MAX_DEEP_SEC}s"
   log "watchdog_heartbeat=${WATCHDOG_HEARTBEAT_SEC}s"
   log "web_discovery=$WEB_DISCOVERY web_ports=$WEB_PORTS"
   log "no_deep_dir_regex=$NO_DEEP_DIR_REGEX"
-  log "host_header_override=${HOST_HEADER_OVERRIDE:-<none>}"
+  log "host_header_override=<none>"
   log "summary_discovered_dirs_max=${DISCOVERED_DIRS_MAX} summary_discovered_files_max=${DISCOVERED_FILES_MAX}"
 
   if [[ -n "$TARGET" ]]; then
