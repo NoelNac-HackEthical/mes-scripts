@@ -1,30 +1,77 @@
 #!/usr/bin/env bash
 # NAME=mon-new-recoweb
-# VERSION=1.0.8
-# DESCRIPTION=Recon web stable multi-vhosts: garde-fous anti-explosion (CMS/.git/assets) + web-discovery nmap + listing-mode + watchdog ferox (kill PGID anti-orphelins) + anti-double-run (flock) + phase 5 ffuf silencieuse + spinner fiable + SUMMARY enrichi + FFUF pretty (/dir/ vs /file).
+# VERSION=1.0.9
+# DESCRIPTION=Recon web stable multi-vhosts: garde-fous anti-explosion (CMS/.git/assets) + web-discovery nmap + listing-mode + watchdog ferox (kill PGID anti-orphelins) + anti-double-run (flock FD) + phase 5 ffuf silencieuse + spinner fiable + SUMMARY enrichi + FFUF pretty (/dir/ vs /file) + SUMMARY.md prêt writeup.
 # PRESENTATION_START
 # **mon-new-recoweb — Recon web stable (CTF/HTB)**
 #
-# v1.0.8 :
-# - Phase 5: ffuf n’affiche plus de lignes “raw” (stdout/stderr redirigé) + spinner fiable (démarre/stoppe correctement)
-# - Ferox: lancement en nouveau process-group (setsid) + kill par PGID => fini les ferox orphelins
-# - Anti-double-run: lockfile flock pour éviter 2 instances en parallèle
+# v1.0.9 :
+# - Lock: flock sur FD dédié (libération auto même Ctrl+C) + message clair si déjà en cours
+# - Cleanup: centralisé (curseur, heartbeat, kill enfants du process-group) + suppression double trap
+# - Summary: ajoute SUMMARY.md (copier-coller writeup) + affichage console lisible
 # PRESENTATION_END
 # HOMEPAGE=https://github.com/NoelNac-HackEthical/mes-scripts
 #____________________________________________________________________________
 set -euo pipefail
 
-# --- Curseur invisible pendant le run ---
-_hide_cursor()   { command -v tput >/dev/null 2>&1 && tput civis 2>/dev/null || true; }
-_show_cursor()   { command -v tput >/dev/null 2>&1 && tput cnorm 2>/dev/null || true; }
+# ---------------------------------------------------------------------------
+# Curseur invisible pendant le run
+_hide_cursor() { command -v tput >/dev/null 2>&1 && tput civis 2>/dev/null || true; }
+_show_cursor() { command -v tput >/dev/null 2>&1 && tput cnorm 2>/dev/null || true; }
 
-_cleanup_on_exit(){
+# ---------------------------------------------------------------------------
+# Lock (FD dédié) — valeurs par défaut compatibles set -u
+LOCKFILE="${LOCKFILE:-/tmp/mon-new-recoweb.lock}"
+LOCK_FD="${LOCK_FD:-}"
+
+# PGID du script (sert à tuer proprement ffuf/ferox/spinners lancés par CE run)
+_SCRIPT_PGID="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ' || true)"
+
+_cleanup_done=0
+_cleanup_on_exit() {
+  # évite double-exécution
+  (( _cleanup_done )) && return 0
+  _cleanup_done=1
+
+  # on désarme les traps pour éviter re-entrée
+  trap - EXIT INT TERM
+
+  # Nettoie une éventuelle ligne de spinner/heartbeat
+  printf '\r\033[K' 2>/dev/null || true
+
+  # Remet le curseur
   _show_cursor
-  # (optionnel) si tu as un heartbeat/spinner en \r :
-  # printf '\r\033[K' 2>/dev/null || true
+
+  # Tue tout ce qui appartient au PGID du run, SANS s'auto-tuer pendant le cleanup
+  if [[ -n "${_SCRIPT_PGID:-}" ]]; then
+    # récupère les pids du même PGID et exclut $$ (le script)
+    local pids=""
+    pids="$(ps -o pid= --no-headers --pgid "${_SCRIPT_PGID}" 2>/dev/null | tr -d ' ' | grep -E '^[0-9]+$' || true)"
+    if [[ -n "$pids" ]]; then
+      # shellcheck disable=SC2001
+      pids="$(echo "$pids" | tr '\n' ' ' | sed -E "s/(^| )${$}( |$)/ /g" | tr -s ' ')"
+      if [[ -n "${pids// /}" ]]; then
+        kill -TERM $pids 2>/dev/null || true
+        sleep 0.2
+        kill -KILL $pids 2>/dev/null || true
+      fi
+    fi
+  fi
+
+  # Libération du lock: automatique à la fermeture du FD (fin du process).
+  # On ne supprime pas le fichier lock: il peut rester sans gêner (le verrou est sur le FD).
+  # Si tu veux absolument le supprimer, décommente :
+  # rm -f -- "$LOCKFILE" 2>/dev/null || true
 }
 
-trap _cleanup_on_exit EXIT INT TERM
+_on_signal() {
+  # EXIT trap fera le cleanup
+  exit 130
+}
+
+trap '_cleanup_on_exit' EXIT
+trap '_on_signal' INT TERM
+
 _hide_cursor
 
 # ---------------------------------------------------------------------------
@@ -204,7 +251,6 @@ _hb_cols(){
   if command -v tput >/dev/null 2>&1; then
     cols="$(tput cols 2>/dev/null || echo 140)"
   fi
-  # garde-fou
   [[ "$cols" =~ ^[0-9]+$ ]] || cols=140
   (( cols < 40 )) && cols=40
   echo "$cols"
@@ -215,23 +261,12 @@ _hb_print(){
   local cols cut
   cols="$(_hb_cols)"
   cut=$(( cols - 1 ))
-
-  # tronque le message pour éviter le wrap
   msg="${msg:0:cut}"
-
-  # \r : retour début de ligne ; \033[K : efface jusqu'à fin de ligne
   printf '\r\033[K%s' "$msg" >&2
 }
 
-_hb_clear(){
-  # efface la ligne courante
-  printf '\r\033[K' >&2
-}
-
-_hb_newline(){
-  # termine proprement la ligne
-  printf '\n' >&2
-}
+_hb_clear(){ printf '\r\033[K' >&2; }
+_hb_newline(){ printf '\n' >&2; }
 
 norm_url() {
   local u="$1"
@@ -528,7 +563,6 @@ run_ffuf_dirs() {
   : > "$out_csv"
   : > "$hits_out"
 
-  # IMPORTANT: on masque toute sortie ffuf (sinon "raw" à l’écran)
   ffuf -s \
     -u "${base}/FUZZ" \
     -H "Host: ${host}" \
@@ -619,7 +653,6 @@ _print_ffuf_pretty(){
       [[ -z "$u" ]] && continue
       [[ "$u" =~ ^https?:// ]] || continue
       if is_dir_like_url "$u"; then
-        # dir => toujours /dir/
         echo "$(url_to_path "$(ensure_trailing_slash_if_dir_like "$u")")"
       else
         echo "$(url_to_path "$u")"
@@ -696,7 +729,7 @@ run_ferox_light_watchdog() {
     cmd+=( "${extra[@]}" )
   fi
 
-  # --- start ferox in a NEW process group (anti-orphelins) ---
+  # start ferox in new process group (anti-orphelins)
   if command -v setsid >/dev/null 2>&1; then
     setsid "${cmd[@]}" >/dev/null 2>&1 &
   else
@@ -844,6 +877,103 @@ deep_scan_interesting() {
   done < "$queue"
 }
 
+# ---------------------------------------------------------------------------
+# Summary helpers
+_write_summary_md(){
+  local wdir="$1" base="$2" host="$3" hosth="$4" cms="$5"
+
+  local md="${wdir}/SUMMARY.md"
+  {
+    echo "# Recon summary"
+    echo
+    echo "- **Cible**: \`${base}\`"
+    echo "- **Host**: \`${host}\`"
+    echo "- **Host header**: \`${hosth}\`"
+    echo "- **Indice CMS**: \`${cms}\`"
+    echo
+    echo "## Découvertes"
+    echo
+    echo "### Dossiers"
+    echo
+    echo '```'
+    cat "${wdir}/10_discovered_dirs.txt" 2>/dev/null || true
+    echo '```'
+    echo
+    echo "### Fichiers"
+    echo
+    echo '```'
+    cat "${wdir}/11_discovered_files.txt" 2>/dev/null || true
+    echo '```'
+    echo
+    echo "## Endpoints importants"
+    echo
+    echo '```'
+    cat "${wdir}/01_important.txt" 2>/dev/null || true
+    echo '```'
+    echo
+    echo "## Indices CMS (chemins connus)"
+    echo
+    echo '```'
+    cat "${wdir}/03_cms_hints.txt" 2>/dev/null || true
+    echo '```'
+    echo
+    echo "## .git minimal"
+    echo
+    echo '```'
+    cat "${wdir}/04_git_probes.txt" 2>/dev/null || true
+    echo '```'
+    echo
+    echo "## Fuzzing (extraits)"
+    echo
+    echo "### ffuf dirs (sample)"
+    echo
+    echo '```'
+    head -n 30 "${wdir}/05_ffuf_dirs_hits.txt" 2>/dev/null || true
+    echo '```'
+    echo
+    echo "### ffuf files (sample)"
+    echo
+    echo '```'
+    head -n 30 "${wdir}/06_ffuf_files_hits.txt" 2>/dev/null || true
+    echo '```'
+    echo
+    echo "## Directory listings"
+    echo
+    echo "### Listings détectés"
+    echo
+    echo '```'
+    cat "${wdir}/07b_directory_listings.txt" 2>/dev/null || true
+    echo '```'
+    echo
+    echo "### Fichiers intéressants trouvés via listing"
+    echo
+    echo '```'
+    cat "${wdir}/07c_listing_interesting.txt" 2>/dev/null || true
+    echo '```'
+    echo
+    echo "## Queue approfondissement"
+    echo
+    echo '```'
+    cat "${wdir}/09_queue_interesting.txt" 2>/dev/null || true
+    echo '```'
+    echo
+    echo "## Budgets ferox"
+    echo
+    echo "- ferox_max_global_sec=\`${FEROX_MAX_GLOBAL_SEC}\`"
+    echo "- ferox_max_deep_sec=\`${FEROX_MAX_DEEP_SEC}\`"
+  } > "$md"
+}
+
+_print_summary_screen(){
+  local wdir="$1"
+  echo
+  echo "================== SUMMARY (écran) =================="
+  sed -n '1,140p' "${wdir}/SUMMARY.txt" 2>/dev/null || true
+  echo "====================================================="
+  echo
+  ok "Résumé writeup: ${wdir}/SUMMARY.md"
+}
+
 scan_one_base(){
   local base="$1"
   local host; host="$(host_from_url "$base")"
@@ -976,6 +1106,9 @@ scan_one_base(){
     echo "ferox_max_deep_sec=${FEROX_MAX_DEEP_SEC}"
   } | tee "${wdir}/SUMMARY.txt" >/dev/null
 
+  _write_summary_md "$wdir" "$base" "$host" "$hosth" "$cms"
+  _print_summary_screen "$wdir"
+
   ok "Terminé: $wdir"
 }
 
@@ -1034,27 +1167,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# ---------------------------------------------------------------------------
 _main(){
   if [ "$DEBUG" = true ]; then set -x; fi
 
   need flock
 
-  # --- Anti double-run (lockfile) ---
-  LOCKFILE="/tmp/mon-new-recoweb.lock"
-  exec 9>"$LOCKFILE"
-  if ! flock -n 9; then
-    die "Une autre instance de ${_self_base} tourne déjà (lock=$LOCKFILE). Stoppe-la avant de relancer."
+  # --- Anti double-run (lock via FD dédié) ---
+  # FD alloué automatiquement, évite collision et reste simple avec set -u
+  exec {LOCK_FD}>"$LOCKFILE"
+  if ! flock -n "$LOCK_FD"; then
+    die "Une autre instance de ${_self_base} tourne déjà (lockfile=$LOCKFILE). Stoppe-la avant de relancer."
   fi
-
-  # --- Curseur invisible pendant le run + cleanup robuste ---
-  _restore_tty(){
-    _hb_clear || true
-    if command -v tput >/dev/null 2>&1; then tput cnorm 2>/dev/null || true; fi
-    rm -f "$LOCKFILE" 2>/dev/null || true
-  }
-  trap _restore_tty EXIT INT TERM
-
-  if command -v tput >/dev/null 2>&1; then tput civis 2>/dev/null || true; fi
 
   need curl
   need ffuf
@@ -1070,10 +1194,10 @@ _main(){
   need nmap
   need ps
 
-  [[ -z "$TARGET" && -z "$LIST" ]] && { usage; return 2; }
-  [[ -n "$TARGET" && -n "$LIST" ]] && warn "Note: -t et -l fournis; je scanne d’abord -t puis -l."
+  [[ -z "${TARGET:-}" && -z "${LIST:-}" ]] && { usage; return 2; }
+  [[ -n "${TARGET:-}" && -n "${LIST:-}" ]] && warn "Note: -t et -l fournis; je scanne d’abord -t puis -l."
 
-  [[ -f "$WL_DIRS" ]]  || die "Wordlist dirs introuvable: $WL_DIRS"
+  [[ -f "$WL_DIRS"  ]] || die "Wordlist dirs introuvable: $WL_DIRS"
   [[ -f "$WL_FILES" ]] || die "Wordlist files introuvable: $WL_FILES"
 
   ok "Script: $(_version_str)"
@@ -1087,14 +1211,14 @@ _main(){
   log "host_header_override=<none>"
   log "summary_discovered_dirs_max=${DISCOVERED_DIRS_MAX} summary_discovered_files_max=${DISCOVERED_FILES_MAX}"
 
-  if [[ -n "$TARGET" ]]; then
+  if [[ -n "${TARGET:-}" ]]; then
     while IFS= read -r base; do
       [[ -z "$base" ]] && continue
       scan_one_base "$(norm_url "$base")"
     done < <(web_discovery "$TARGET")
   fi
 
-  if [[ -n "$LIST" ]]; then
+  if [[ -n "${LIST:-}" ]]; then
     [[ -f "$LIST" ]] || die "Fichier introuvable: $LIST"
     while IFS= read -r line; do
       line="$(echo "$line" | sed 's/[[:space:]]\+$//')"
