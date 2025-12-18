@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # NAME=mon-new-recoweb
-# VERSION=1.0.9
+# VERSION=1.0.10
 # DESCRIPTION=Recon web stable multi-vhosts: garde-fous anti-explosion (CMS/.git/assets) + web-discovery nmap + listing-mode + watchdog ferox (kill PGID anti-orphelins) + anti-double-run (flock FD) + phase 5 ffuf silencieuse + spinner fiable + SUMMARY enrichi + FFUF pretty (/dir/ vs /file) + SUMMARY.md prêt writeup.
 # PRESENTATION_START
 # **mon-new-recoweb — Recon web stable (CTF/HTB)**
 #
-# v1.0.9 :
+# v1.0.10 :
+# - Affichage à l'écran des résultats intermédiaires
 # - Lock: flock sur FD dédié (libération auto même Ctrl+C) + message clair si déjà en cours
 # - Cleanup: centralisé (curseur, heartbeat, kill enfants du process-group) + suppression double trap
 # - Summary: ajoute SUMMARY.md (copier-coller writeup) + affichage console lisible
@@ -645,7 +646,7 @@ run_ffuf_files() {
 
 _print_ffuf_pretty(){
   local wdir="$1"
-  echo "--- FFUF (pretty) ---"
+  echo "[PHASE 5] Résultats ffuf"
   {
     cat "${wdir}/05_ffuf_dirs_hits.txt" 2>/dev/null || true
     cat "${wdir}/06_ffuf_files_hits.txt" 2>/dev/null || true
@@ -868,12 +869,36 @@ enqueue_interesting_dirs() {
 deep_scan_interesting() {
   local queue="$1" host="$2" wdir="$3"
   local idx=0
+
   while IFS= read -r u; do
     [[ -z "$u" ]] && continue
     idx=$((idx+1))
     local subout="${wdir}/ferox_deep_${idx}.txt"
+
     ok "Deep-scan #$idx: $u (depth=${DEPTH_INTERESTING})"
     run_ferox_light_watchdog "$u" "$host" "$subout" "$DEPTH_INTERESTING" "$wdir" "$FEROX_IDLE_DEEP_SEC" "$FEROX_MAX_DEEP_SEC"
+
+    # --- Phase 8: mini-bilan deep-scan (écran) ---
+    {
+      echo "[PHASE 8] Résultat deep-scan #${idx}"
+      local tmp
+      tmp="$(mktemp "/tmp/mon-new-recoweb_deep_urls.XXXXXX")"
+      _extract_urls_any "$subout" | sort -u > "$tmp" || true
+      local n
+      n="$(_count_lines "$tmp")"
+      echo "  - URLs (unique) extraites: ${n}"
+      if [[ "${n:-0}" -gt 0 ]]; then
+        echo "  - Aperçu (top 10 /path):"
+        head -n 10 "$tmp" 2>/dev/null \
+          | while IFS= read -r uu; do
+              [[ -z "$uu" ]] && continue
+              echo "    $(url_to_path "$uu")"
+            done
+        [[ "${n:-0}" -gt 10 ]] && echo "    …"
+      fi
+      rm -f "$tmp" 2>/dev/null || true
+      echo
+    }
   done < "$queue"
 }
 
@@ -974,6 +999,126 @@ _print_summary_screen(){
   ok "Résumé writeup: ${wdir}/SUMMARY.md"
 }
 
+# ---------------------------------------------------------------------------
+# Screen: writeup-ready (terminal)
+_print_section(){
+  local title="$1"
+  echo
+  echo "### $title"
+}
+
+_print_kv(){
+  local k="$1" v="$2"
+  printf -- "- **%s**: %s\n" "$k" "$v"
+}
+
+_print_file_block(){
+  local label="$1" file="$2" max="${3:-50}"
+  _print_section "$label"
+  if [[ -f "$file" ]]; then
+    local n
+    n="$(wc -l < "$file" 2>/dev/null | tr -d ' ')"
+    if [[ "${n:-0}" -eq 0 ]]; then
+      echo "(vide)"
+    else
+      head -n "$max" "$file"
+      if [[ "${n:-0}" -gt "$max" ]]; then
+        echo "… (${n} lignes, affichage tronqué à ${max})"
+      fi
+    fi
+  else
+    echo "(fichier absent: $file)"
+  fi
+}
+
+_print_writeup_ready_screen(){
+  local wdir="$1" base="$2" host="$3" hosth="$4" cms="$5"
+
+  echo
+  echo "================ WRITEUP-READY (écran) ================"
+  _print_kv "Cible" "\`${base}\`"
+  _print_kv "Host" "\`${host}\`"
+  _print_kv "Host header" "\`${hosth}\`"
+  _print_kv "Indice CMS" "\`${cms}\`"
+  _print_kv "Dossier sortie" "\`${wdir}\`"
+  echo "-------------------------------------------------------"
+
+  _print_file_block "DISCOVERED_DIRS (top)" "${wdir}/10_discovered_dirs.txt" 25
+  _print_file_block "DISCOVERED_FILES (top)" "${wdir}/11_discovered_files.txt" 25
+
+  _print_file_block "IMPORTANT endpoints" "${wdir}/01_important.txt" 40
+  _print_file_block "CMS hints" "${wdir}/03_cms_hints.txt" 40
+  _print_file_block ".git minimal probes" "${wdir}/04_git_probes.txt" 20
+
+  # Directory listings (si présents)
+  if [[ -s "${wdir}/07b_directory_listings.txt" ]]; then
+    _print_file_block "Directory listings détectés" "${wdir}/07b_directory_listings.txt" 50
+  fi
+  if [[ -s "${wdir}/07c_listing_interesting.txt" ]]; then
+    _print_file_block "Fichiers intéressants via listing" "${wdir}/07c_listing_interesting.txt" 50
+  fi
+
+  # Queue deep-scan
+  if [[ -f "${wdir}/09_queue_interesting.txt" ]]; then
+    local qn
+    qn="$(wc -l < "${wdir}/09_queue_interesting.txt" 2>/dev/null | tr -d ' ')"
+    _print_section "Queue deep-scan"
+    if [[ "${qn:-0}" -gt 0 ]]; then
+      echo "(total: ${qn})"
+      head -n 20 "${wdir}/09_queue_interesting.txt"
+      [[ "${qn:-0}" -gt 20 ]] && echo "…"
+    else
+      echo "(aucune)"
+    fi
+  fi
+
+  # Next commands (prêts writeup)
+  _print_section "Next commands (copier-coller)"
+  cat <<CMDS
+# Vérifier rapidement une page clé
+curl -skL --max-time ${TIMEOUT} "${base}/robots.txt" | head
+
+# Re-check .git (si suspect)
+cat "${wdir}/04_git_probes.txt"
+
+# Rejouer un hit intéressant (exemple)
+# curl -skI --max-time ${TIMEOUT} "${base}/<path>"
+
+# Ouvrir le résumé writeup-ready (Markdown)
+sed -n '1,200p' "${wdir}/SUMMARY.md"
+CMDS
+
+  echo "======================================================="
+  echo
+}
+
+# ---------------------------------------------------------------------------
+# Helpers: extraction URLs & stats (écran)
+_extract_urls_any(){
+  # extrait toutes URLs http(s) d'un fichier, robustement
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  grep -Eo 'https?://[^ )"]+' "$f" 2>/dev/null || true
+}
+
+_count_lines(){
+  local f="$1"
+  [[ -f "$f" ]] || { echo 0; return 0; }
+  wc -l < "$f" 2>/dev/null | tr -d ' ' || echo 0
+}
+
+_print_sample_block(){
+  local title="$1" f="$2" max="${3:-20}"
+  local n
+  n="$(_count_lines "$f")"
+  echo "    - ${title}: ${n}"
+  if [[ "${n:-0}" -gt 0 ]]; then
+    head -n "$max" "$f" 2>/dev/null | sed 's/^/      /'
+    [[ "${n:-0}" -gt "$max" ]] && echo "      … (tronqué à ${max})"
+  fi
+}
+
+
 scan_one_base(){
   local base="$1"
   local host; host="$(host_from_url "$base")"
@@ -1033,6 +1178,41 @@ scan_one_base(){
   ok "Phase 6: ferox global light (depth=${DEPTH_GLOBAL}) + watchdog"
   run_ferox_light_watchdog "$base" "$hosth" "${wdir}/07_ferox_light.txt" "$DEPTH_GLOBAL" "$wdir" "$FEROX_IDLE_GLOBAL_SEC" "$FEROX_MAX_GLOBAL_SEC"
 
+  # --- Phase 6: affichage résultats ferox (écran) ---
+  {
+    echo
+    echo "[PHASE 6] Résultats ferox (global)"
+    local ferox_u_tmp
+    ferox_u_tmp="$(mktemp "/tmp/mon-new-recoweb_ferox_urls.XXXXXX")"
+    _extract_urls_any "${wdir}/07_ferox_light.txt" | sort -u > "$ferox_u_tmp" || true
+
+    local ferox_urls
+    ferox_urls="$(_count_lines "$ferox_u_tmp")"
+    echo "  - URLs (unique) extraites: ${ferox_urls}"
+
+    # Aperçu “paths” (plus lisible en writeup)
+    if [[ "${ferox_urls:-0}" -gt 0 ]]; then
+      echo "  - Aperçu (top 20, format /path):"
+      head -n 20 "$ferox_u_tmp" 2>/dev/null \
+        | while IFS= read -r u; do
+            [[ -z "$u" ]] && continue
+            echo "    $(url_to_path "$u")"
+          done
+      [[ "${ferox_urls:-0}" -gt 20 ]] && echo "    …"
+    fi
+
+    # Listings détectés (si présents)
+    if [[ -f "${wdir}/07b_directory_listings.txt" ]]; then
+      local ln
+      ln="$(_count_lines "${wdir}/07b_directory_listings.txt")"
+      echo "  - Directory listings détectés: ${ln}"
+    fi
+
+    rm -f "$ferox_u_tmp" 2>/dev/null || true
+    echo
+  }
+
+
   ok "Phase 7: sélection dossiers intéressants (anti-bruit)"
   cat "${wdir}/05_ffuf_dirs_hits.txt" "${wdir}/06_ffuf_files_hits.txt" "${wdir}/07_ferox_light.txt" 2>/dev/null \
     | sed -n 's/.*\(https\?:\/\/[^ ]\+\).*/\1/p' \
@@ -1040,6 +1220,39 @@ scan_one_base(){
     > "${wdir}/08_all_urls.txt" || true
 
   enqueue_interesting_dirs "${wdir}/08_all_urls.txt" "${wdir}/09_queue_interesting.txt"
+
+  # --- Phase 7: affichage parlant (sources -> all_urls -> queue) ---
+  {
+    echo
+    echo "[PHASE 7] Sélection dossiers intéressants (anti-bruit)"
+
+    local n_ffuf_dirs n_ffuf_files n_ferox_urls n_all_urls n_queue
+    n_ffuf_dirs="$(wc -l < "${wdir}/05_ffuf_dirs_hits.txt" 2>/dev/null | tr -d ' ' || echo 0)"
+    n_ffuf_files="$(wc -l < "${wdir}/06_ffuf_files_hits.txt" 2>/dev/null | tr -d ' ' || echo 0)"
+
+    # ferox_light.txt n'est pas un fichier 1 URL/ligne, on compte les URLs extraites
+    n_ferox_urls="$(grep -Eo 'https?://[^ ]+' "${wdir}/07_ferox_light.txt" 2>/dev/null | sort -u | wc -l | tr -d ' ' || echo 0)"
+
+    n_all_urls="$(wc -l < "${wdir}/08_all_urls.txt" 2>/dev/null | tr -d ' ' || echo 0)"
+    n_queue="$(wc -l < "${wdir}/09_queue_interesting.txt" 2>/dev/null | tr -d ' ' || echo 0)"
+
+    echo "  - Sources:"
+    echo "    - ffuf dirs hits : ${n_ffuf_dirs}"
+    echo "    - ffuf files hits: ${n_ffuf_files}"
+    echo "    - ferox URLs (unique extraites): ${n_ferox_urls}"
+    echo "  - Fusion all URLs (08_all_urls.txt): ${n_all_urls}"
+    echo "  - Queue deep-scan (09_queue_interesting.txt) [max=${MAX_QUEUE}]: ${n_queue}"
+
+    if [[ "${n_queue:-0}" -gt 0 ]]; then
+      echo "  - Aperçu queue (top 15):"
+      head -n 15 "${wdir}/09_queue_interesting.txt" 2>/dev/null | sed 's/^/    /'
+      [[ "${n_queue:-0}" -gt 15 ]] && echo "    …"
+    else
+      echo "  - Aperçu queue: (aucune)"
+    fi
+    echo
+  }
+
 
   local qn; qn="$(wc -l < "${wdir}/09_queue_interesting.txt" 2>/dev/null | tr -d ' ')"
   ok "Queue intéressante: ${qn:-0} entrées (max=${MAX_QUEUE})"
@@ -1108,6 +1321,7 @@ scan_one_base(){
 
   _write_summary_md "$wdir" "$base" "$host" "$hosth" "$cms"
   _print_summary_screen "$wdir"
+  _print_writeup_ready_screen "$wdir" "$base" "$host" "$hosth" "$cms"
 
   ok "Terminé: $wdir"
 }
