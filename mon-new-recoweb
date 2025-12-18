@@ -1,18 +1,18 @@
-#!/usr/bin/env bash
 # NAME=mon-new-recoweb
-# VERSION=1.0.10
-# DESCRIPTION=Recon web stable multi-vhosts: garde-fous anti-explosion (CMS/.git/assets) + web-discovery nmap + listing-mode + watchdog ferox (kill PGID anti-orphelins) + anti-double-run (flock FD) + phase 5 ffuf silencieuse + spinner fiable + SUMMARY enrichi + FFUF pretty (/dir/ vs /file) + SUMMARY.md prêt writeup.
+# VERSION=1.0.12
+# DESCRIPTION=Recon web stable multi-vhosts: watchdog ferox fiabilisé (idle effectif loggué + clamp TIMEOUT*10 explicite), aperçus deep-scan toujours remplis, nettoyage du bruit (/%%3Fq), anti-orphelins PGID, anti-double-run (flock), ffuf silencieux + SUMMARY writeup-ready.
 # PRESENTATION_START
 # **mon-new-recoweb — Recon web stable (CTF/HTB)**
 #
-# v1.0.10 :
-# - Affichage à l'écran des résultats intermédiaires
-# - Lock: flock sur FD dédié (libération auto même Ctrl+C) + message clair si déjà en cours
-# - Cleanup: centralisé (curseur, heartbeat, kill enfants du process-group) + suppression double trap
-# - Summary: ajoute SUMMARY.md (copier-coller writeup) + affichage console lisible
+# v1.0.12 :
+# - Watchdog ferox : idle réellement explicité (idle demandé vs idle effectif, clamp TIMEOUT*10 visible)
+# - Deep-scan : aperçus “top /path” corrigés (plus jamais vides)
+# - Nettoyage du bruit Drupal (/%%3Fq) dans les résultats ferox
+# - Comportement idle cohérent entre global / deep / override CLI
+# - Aucune régression sur ffuf silencieux, anti-orphelins (PGID) et anti-double-run
 # PRESENTATION_END
 # HOMEPAGE=https://github.com/NoelNac-HackEthical/mes-scripts
-#____________________________________________________________________________
+
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -25,16 +25,28 @@ _show_cursor() { command -v tput >/dev/null 2>&1 && tput cnorm 2>/dev/null || tr
 LOCKFILE="${LOCKFILE:-/tmp/mon-new-recoweb.lock}"
 LOCK_FD="${LOCK_FD:-}"
 
-# PGID du script (sert à tuer proprement ffuf/ferox/spinners lancés par CE run)
+# PGID du script (sert à tuer proprement ffuf/spinners/enfants du process-group)
 _SCRIPT_PGID="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ' || true)"
+
+# PGID ferox lancés via setsid (nouveaux process-groups) => à tuer au cleanup (Ctrl+C)
+declare -a _FEROX_PGIDS=()
+
+_register_ferox_pgid(){
+  local pgid="$1"
+  [[ -z "${pgid:-}" ]] && return 0
+  [[ ! "$pgid" =~ ^[0-9]+$ ]] && return 0
+  # évite d'enregistrer le PGID du script
+  if [[ -n "${_SCRIPT_PGID:-}" && "$pgid" == "$_SCRIPT_PGID" ]]; then
+    return 0
+  fi
+  _FEROX_PGIDS+=( "$pgid" )
+}
 
 _cleanup_done=0
 _cleanup_on_exit() {
-  # évite double-exécution
   (( _cleanup_done )) && return 0
   _cleanup_done=1
 
-  # on désarme les traps pour éviter re-entrée
   trap - EXIT INT TERM
 
   # Nettoie une éventuelle ligne de spinner/heartbeat
@@ -43,30 +55,44 @@ _cleanup_on_exit() {
   # Remet le curseur
   _show_cursor
 
-  # Tue tout ce qui appartient au PGID du run, SANS s'auto-tuer pendant le cleanup
+  # 1) Tue les process-groups ferox (setsid) enregistrés
+  if [[ "${#_FEROX_PGIDS[@]}" -gt 0 ]]; then
+    # uniq
+    local uniq_pgids=""
+    uniq_pgids="$(printf "%s\n" "${_FEROX_PGIDS[@]}" | grep -E '^[0-9]+$' | sort -u | tr '\n' ' ' || true)"
+    if [[ -n "${uniq_pgids// /}" ]]; then
+      # TERM puis KILL
+      # shellcheck disable=SC2086
+      for g in $uniq_pgids; do
+        kill -TERM "-${g}" 2>/dev/null || true
+      done
+      sleep 0.2
+      # shellcheck disable=SC2086
+      for g in $uniq_pgids; do
+        kill -KILL "-${g}" 2>/dev/null || true
+      done
+    fi
+  fi
+
+  # 2) Tue tout ce qui appartient au PGID du run (ffuf/spinners/…),
+  #    SANS s'auto-tuer pendant le cleanup
   if [[ -n "${_SCRIPT_PGID:-}" ]]; then
-    # récupère les pids du même PGID et exclut $$ (le script)
     local pids=""
     pids="$(ps -o pid= --no-headers --pgid "${_SCRIPT_PGID}" 2>/dev/null | tr -d ' ' | grep -E '^[0-9]+$' || true)"
     if [[ -n "$pids" ]]; then
-      # shellcheck disable=SC2001
       pids="$(echo "$pids" | tr '\n' ' ' | sed -E "s/(^| )${$}( |$)/ /g" | tr -s ' ')"
       if [[ -n "${pids// /}" ]]; then
+        # shellcheck disable=SC2086
         kill -TERM $pids 2>/dev/null || true
         sleep 0.2
+        # shellcheck disable=SC2086
         kill -KILL $pids 2>/dev/null || true
       fi
     fi
   fi
-
-  # Libération du lock: automatique à la fermeture du FD (fin du process).
-  # On ne supprime pas le fichier lock: il peut rester sans gêner (le verrou est sur le FD).
-  # Si tu veux absolument le supprimer, décommente :
-  # rm -f -- "$LOCKFILE" 2>/dev/null || true
 }
 
 _on_signal() {
-  # EXIT trap fera le cleanup
   exit 130
 }
 
@@ -166,6 +192,7 @@ FEROX_IDLE_GLOBAL_SEC="${FEROX_IDLE_GLOBAL_SEC:-30}"
 FEROX_IDLE_DEEP_SEC="${FEROX_IDLE_DEEP_SEC:-60}"
 # Valeur legacy (si --ferox-idle est utilisée, elle s'applique aux deux phases)
 FEROX_IDLE_SEC="${FEROX_IDLE_SEC:-0}"
+FEROX_IDLE_OVERRIDE=false
 # Heartbeat pendant watchdog (toutes les X secondes)
 WATCHDOG_HEARTBEAT_SEC="${WATCHDOG_HEARTBEAT_SEC:-10}"
 
@@ -238,6 +265,9 @@ LISTING_INTERESTING_EXT_REGEX='\.(md|txt|log|ini|yml|yaml|conf|config|bak|old|zi
 DISCOVERED_FILES_EXT_REGEX='(^|/)(README(\.[a-zA-Z0-9]+)?|CHANGELOG(\.[a-zA-Z0-9]+)?|CHANGES(\.[a-zA-Z0-9]+)?|LICENSE(\.[a-zA-Z0-9]+)?|COPYING(\.[a-zA-Z0-9]+)?|SECURITY(\.[a-zA-Z0-9]+)?)(/|$)|\.(md|txt|log|ini|yml|yaml|conf|config|bak|old|zip|tar|gz|7z|sql|db)$'
 ASSET_EXT_REGEX='\.(png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|map|css|js)$'
 
+# Drupal (clean URLs off) => ?q=xxx / %3Fq=xxx (bruit)
+QPARAM_NOISE_PATH_REGEX='^/(%3Fq=|\?q=)'
+
 # ---------------------------------------------------------------------------
 # Helpers
 log()  { echo -e "[*] $*"; }
@@ -256,7 +286,6 @@ _hb_cols(){
   (( cols < 40 )) && cols=40
   echo "$cols"
 }
-
 _hb_print(){
   local msg="$1"
   local cols cut
@@ -265,7 +294,6 @@ _hb_print(){
   msg="${msg:0:cut}"
   printf '\r\033[K%s' "$msg" >&2
 }
-
 _hb_clear(){ printf '\r\033[K' >&2; }
 _hb_newline(){ printf '\n' >&2; }
 
@@ -277,34 +305,28 @@ norm_url() {
     echo "${SCHEME_DEFAULT}://${u}"
   fi
 }
-
 host_from_url() {
   local u="$1"
   u="${u#http://}"; u="${u#https://}"
   echo "${u%%/*}"
 }
-
 hosth_from_host(){
   local h="$1"
   echo "${h%%:*}"
 }
-
 curl_probe() {
   local url="$1"
   curl -k -sS -L --max-time "$TIMEOUT" -o /dev/null -w "%{http_code} %{url_effective}" "$url" 2>/dev/null || true
 }
-
 curl_body_snip() {
   local url="$1"
   curl -k -sS -L --max-time "$TIMEOUT" "$url" 2>/dev/null | head -n 60 || true
 }
-
 baseline_404_size() {
   local base="$1"
   local rnd="/$(openssl rand -hex 8)"
   curl -k -sS -L --max-time "$TIMEOUT" "${base}${rnd}" 2>/dev/null | wc -c | tr -d ' '
 }
-
 detect_markers() {
   local base="$1"
   local body; body="$(curl_body_snip "$base")"
@@ -334,7 +356,6 @@ probe_important_files() {
     fi
   done
 }
-
 probe_cms_hints() {
   local base="$1" out="$2"
   : > "$out"
@@ -346,7 +367,6 @@ probe_cms_hints() {
     fi
   done
 }
-
 probe_git_minimal() {
   local base="$1" out="$2"
   : > "$out"
@@ -376,7 +396,6 @@ path_from_url(){
     echo "/"
   fi
 }
-
 is_dir_like_url(){
   local u="$1"
   local p last
@@ -387,7 +406,6 @@ is_dir_like_url(){
   [[ "$last" == *.* ]] && return 1
   return 0
 }
-
 ensure_trailing_slash_if_dir_like(){
   local u="$1"
   if is_dir_like_url "$u"; then
@@ -396,7 +414,6 @@ ensure_trailing_slash_if_dir_like(){
     echo "$u"
   fi
 }
-
 url_to_path(){
   local u="$1"
   local p
@@ -419,6 +436,7 @@ build_discovered_dirs(){
       done \
     | sed -E 's#/$##' \
     | grep -E '^/' \
+    | grep -Ev "$QPARAM_NOISE_PATH_REGEX" \
     | grep -Ev '^/$' \
     | grep -Ev "$NOISE_DIR_REGEX" \
     | sort -u \
@@ -438,7 +456,9 @@ build_discovered_files(){
         [[ "$u" =~ ^https?:// ]] || continue
         echo "$u" | grep -Eqi "$ASSET_EXT_REGEX" && continue
         if echo "$u" | grep -Eqi "$DISCOVERED_FILES_EXT_REGEX"; then
-          url_to_path "$u"
+          # On ignore aussi les legacy /?q=... si ça tombe ici
+          local p; p="$(url_to_path "$u")"
+          echo "$p" | grep -Eqv "$QPARAM_NOISE_PATH_REGEX" && echo "$p"
         fi
       done \
     | grep -E '^/' \
@@ -743,13 +763,23 @@ run_ferox_light_watchdog() {
     return 0
   fi
 
+  # Idle: param (6) sinon global ; override legacy si --ferox-idle est défini
   if [[ -z "${idle_sec:-}" ]]; then idle_sec="$FEROX_IDLE_GLOBAL_SEC"; fi
   if [[ "${FEROX_IDLE_SEC:-0}" -gt 0 ]]; then idle_sec="$FEROX_IDLE_SEC"; fi
+
+  # ----- Idle effective (avec plancher TIMEOUT*10) + log si clamp -----
+  local requested_idle
+  requested_idle="$idle_sec"
 
   local min_idle=$(( TIMEOUT * 10 ))
   if [[ "$idle_sec" -lt "$min_idle" ]]; then
     idle_sec="$min_idle"
   fi
+
+  if [[ -n "${requested_idle:-}" && "${requested_idle:-0}" -ne "${idle_sec:-0}" ]]; then
+    ok "Watchdog ferox: idle demandé=${requested_idle}s -> idle effectif=${idle_sec}s (min=TIMEOUT*10, timeout=${TIMEOUT}s)"
+  fi
+  # -------------------------------------------------------------------
 
   if [[ -z "${max_sec:-}" ]]; then
     max_sec="$FEROX_MAX_GLOBAL_SEC"
@@ -761,7 +791,12 @@ run_ferox_light_watchdog() {
   ok "Watchdog debug: pid=${pid} pgid=${pgid:-?} my_pgid=${my_pgid:-?}"
   ok "Watchdog ferox: idle=${idle_sec}s (pid=${pid})"
 
-  _kill_ferox_tree(){
+  # Enregistre le PGID ferox pour cleanup Ctrl+C (si la fonction existe)
+  if declare -F _register_ferox_pgid >/dev/null 2>&1; then
+    _register_ferox_pgid "${pgid:-}"
+  fi
+
+  _kill_ferox_tree() {
     local sig="$1" # INT / KILL
     if [[ -n "${pgid:-}" && "${pgid:-0}" -gt 0 ]]; then
       kill "-${sig}" "-${pgid}" 2>/dev/null || true
@@ -857,6 +892,9 @@ enqueue_interesting_dirs() {
     echo "$u" | grep -Eqv "$NOISE_DIR_REGEX" || continue
     echo "$u" | grep -Eqv "$NO_DEEP_DIR_REGEX" || continue
 
+    # évite de mettre des legacy ?q= en queue (au cas où)
+    url_to_path "$u" | grep -Eq "$QPARAM_NOISE_PATH_REGEX" && continue
+
     if is_dir_like_url "$u"; then
       ensure_trailing_slash_if_dir_like "$u" >> "$queue_out"
     fi
@@ -864,6 +902,19 @@ enqueue_interesting_dirs() {
 
   sort -u "$queue_out" | head -n "$MAX_QUEUE" > "${queue_out}.tmp" 2>/dev/null || true
   mv -f "${queue_out}.tmp" "$queue_out" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Helpers: extraction URLs & stats (écran)
+_extract_urls_any(){
+  local f="$1"
+  [[ -f "$f" ]] || return 0
+  grep -Eo 'https?://[^ )"]+' "$f" 2>/dev/null || true
+}
+_count_lines(){
+  local f="$1"
+  [[ -f "$f" ]] || { echo 0; return 0; }
+  wc -l < "$f" 2>/dev/null | tr -d ' ' || echo 0
 }
 
 deep_scan_interesting() {
@@ -876,29 +927,38 @@ deep_scan_interesting() {
     local subout="${wdir}/ferox_deep_${idx}.txt"
 
     ok "Deep-scan #$idx: $u (depth=${DEPTH_INTERESTING})"
-    run_ferox_light_watchdog "$u" "$host" "$subout" "$DEPTH_INTERESTING" "$wdir" "$FEROX_IDLE_DEEP_SEC" "$FEROX_MAX_DEEP_SEC"
+    run_ferox_light_watchdog "$u" "$host" "$subout" "$DEPTH_INTERESTING" "$wdir" "$FEROX_IDLE_DEEP_SEC" "$FEROX_MAX_DEEP_SEC" || true
 
-    # --- Phase 8: mini-bilan deep-scan (écran) ---
     {
       echo "[PHASE 8] Résultat deep-scan #${idx}"
       local tmp
       tmp="$(mktemp "/tmp/mon-new-recoweb_deep_urls.XXXXXX")"
+
       _extract_urls_any "$subout" | sort -u > "$tmp" || true
+
       local n
       n="$(_count_lines "$tmp")"
       echo "  - URLs (unique) extraites: ${n}"
+
       if [[ "${n:-0}" -gt 0 ]]; then
+        # sécurité visuelle: casse une éventuelle ligne heartbeat/spinner en \r
+        _hb_clear; _hb_newline
+
         echo "  - Aperçu (top 10 /path):"
-        head -n 10 "$tmp" 2>/dev/null \
-          | while IFS= read -r uu; do
-              [[ -z "$uu" ]] && continue
-              echo "    $(url_to_path "$uu")"
-            done
+
+        # Convertit URL -> /path, filtre le bruit Drupal ?q= (et %3Fq=), puis top 10
+        sed -E 's#https?://[^/]+##; s#^$#/#' "$tmp" 2>/dev/null \
+          | grep -Ev "$QPARAM_NOISE_PATH_REGEX" \
+          | head -n 10 \
+          | sed 's/^/    /' || true
+
         [[ "${n:-0}" -gt 10 ]] && echo "    …"
       fi
+
       rm -f "$tmp" 2>/dev/null || true
       echo
     }
+
   done < "$queue"
 }
 
@@ -1006,12 +1066,10 @@ _print_section(){
   echo
   echo "### $title"
 }
-
 _print_kv(){
   local k="$1" v="$2"
   printf -- "- **%s**: %s\n" "$k" "$v"
 }
-
 _print_file_block(){
   local label="$1" file="$2" max="${3:-50}"
   _print_section "$label"
@@ -1030,7 +1088,6 @@ _print_file_block(){
     echo "(fichier absent: $file)"
   fi
 }
-
 _print_writeup_ready_screen(){
   local wdir="$1" base="$2" host="$3" hosth="$4" cms="$5"
 
@@ -1050,7 +1107,6 @@ _print_writeup_ready_screen(){
   _print_file_block "CMS hints" "${wdir}/03_cms_hints.txt" 40
   _print_file_block ".git minimal probes" "${wdir}/04_git_probes.txt" 20
 
-  # Directory listings (si présents)
   if [[ -s "${wdir}/07b_directory_listings.txt" ]]; then
     _print_file_block "Directory listings détectés" "${wdir}/07b_directory_listings.txt" 50
   fi
@@ -1058,7 +1114,6 @@ _print_writeup_ready_screen(){
     _print_file_block "Fichiers intéressants via listing" "${wdir}/07c_listing_interesting.txt" 50
   fi
 
-  # Queue deep-scan
   if [[ -f "${wdir}/09_queue_interesting.txt" ]]; then
     local qn
     qn="$(wc -l < "${wdir}/09_queue_interesting.txt" 2>/dev/null | tr -d ' ')"
@@ -1072,7 +1127,6 @@ _print_writeup_ready_screen(){
     fi
   fi
 
-  # Next commands (prêts writeup)
   _print_section "Next commands (copier-coller)"
   cat <<CMDS
 # Vérifier rapidement une page clé
@@ -1093,32 +1147,7 @@ CMDS
 }
 
 # ---------------------------------------------------------------------------
-# Helpers: extraction URLs & stats (écran)
-_extract_urls_any(){
-  # extrait toutes URLs http(s) d'un fichier, robustement
-  local f="$1"
-  [[ -f "$f" ]] || return 0
-  grep -Eo 'https?://[^ )"]+' "$f" 2>/dev/null || true
-}
-
-_count_lines(){
-  local f="$1"
-  [[ -f "$f" ]] || { echo 0; return 0; }
-  wc -l < "$f" 2>/dev/null | tr -d ' ' || echo 0
-}
-
-_print_sample_block(){
-  local title="$1" f="$2" max="${3:-20}"
-  local n
-  n="$(_count_lines "$f")"
-  echo "    - ${title}: ${n}"
-  if [[ "${n:-0}" -gt 0 ]]; then
-    head -n "$max" "$f" 2>/dev/null | sed 's/^/      /'
-    [[ "${n:-0}" -gt "$max" ]] && echo "      … (tronqué à ${max})"
-  fi
-}
-
-
+# Phase 0..8
 scan_one_base(){
   local base="$1"
   local host; host="$(host_from_url "$base")"
@@ -1178,7 +1207,6 @@ scan_one_base(){
   ok "Phase 6: ferox global light (depth=${DEPTH_GLOBAL}) + watchdog"
   run_ferox_light_watchdog "$base" "$hosth" "${wdir}/07_ferox_light.txt" "$DEPTH_GLOBAL" "$wdir" "$FEROX_IDLE_GLOBAL_SEC" "$FEROX_MAX_GLOBAL_SEC"
 
-  # --- Phase 6: affichage résultats ferox (écran) ---
   {
     echo
     echo "[PHASE 6] Résultats ferox (global)"
@@ -1190,18 +1218,18 @@ scan_one_base(){
     ferox_urls="$(_count_lines "$ferox_u_tmp")"
     echo "  - URLs (unique) extraites: ${ferox_urls}"
 
-    # Aperçu “paths” (plus lisible en writeup)
     if [[ "${ferox_urls:-0}" -gt 0 ]]; then
       echo "  - Aperçu (top 20, format /path):"
       head -n 20 "$ferox_u_tmp" 2>/dev/null \
         | while IFS= read -r u; do
             [[ -z "$u" ]] && continue
-            echo "    $(url_to_path "$u")"
+            local p; p="$(url_to_path "$u")"
+            echo "$p" | grep -Eq "$QPARAM_NOISE_PATH_REGEX" && continue
+            echo "    $p"
           done
       [[ "${ferox_urls:-0}" -gt 20 ]] && echo "    …"
     fi
 
-    # Listings détectés (si présents)
     if [[ -f "${wdir}/07b_directory_listings.txt" ]]; then
       local ln
       ln="$(_count_lines "${wdir}/07b_directory_listings.txt")"
@@ -1212,16 +1240,15 @@ scan_one_base(){
     echo
   }
 
-
   ok "Phase 7: sélection dossiers intéressants (anti-bruit)"
   cat "${wdir}/05_ffuf_dirs_hits.txt" "${wdir}/06_ffuf_files_hits.txt" "${wdir}/07_ferox_light.txt" 2>/dev/null \
     | sed -n 's/.*\(https\?:\/\/[^ ]\+\).*/\1/p' \
+    | grep -Evi 'https?://[^ ]+/%3Fq=|https?://[^ ]+\?q=' \
     | sort -u \
     > "${wdir}/08_all_urls.txt" || true
 
   enqueue_interesting_dirs "${wdir}/08_all_urls.txt" "${wdir}/09_queue_interesting.txt"
 
-  # --- Phase 7: affichage parlant (sources -> all_urls -> queue) ---
   {
     echo
     echo "[PHASE 7] Sélection dossiers intéressants (anti-bruit)"
@@ -1229,10 +1256,7 @@ scan_one_base(){
     local n_ffuf_dirs n_ffuf_files n_ferox_urls n_all_urls n_queue
     n_ffuf_dirs="$(wc -l < "${wdir}/05_ffuf_dirs_hits.txt" 2>/dev/null | tr -d ' ' || echo 0)"
     n_ffuf_files="$(wc -l < "${wdir}/06_ffuf_files_hits.txt" 2>/dev/null | tr -d ' ' || echo 0)"
-
-    # ferox_light.txt n'est pas un fichier 1 URL/ligne, on compte les URLs extraites
-    n_ferox_urls="$(grep -Eo 'https?://[^ ]+' "${wdir}/07_ferox_light.txt" 2>/dev/null | sort -u | wc -l | tr -d ' ' || echo 0)"
-
+    n_ferox_urls="$(grep -Eo 'https?://[^ ]+' "${wdir}/07_ferox_light.txt" 2>/dev/null | grep -Evi '/%3Fq=|\?q=' | sort -u | wc -l | tr -d ' ' || echo 0)"
     n_all_urls="$(wc -l < "${wdir}/08_all_urls.txt" 2>/dev/null | tr -d ' ' || echo 0)"
     n_queue="$(wc -l < "${wdir}/09_queue_interesting.txt" 2>/dev/null | tr -d ' ' || echo 0)"
 
@@ -1252,7 +1276,6 @@ scan_one_base(){
     fi
     echo
   }
-
 
   local qn; qn="$(wc -l < "${wdir}/09_queue_interesting.txt" 2>/dev/null | tr -d ' ')"
   ok "Queue intéressante: ${qn:-0} entrées (max=${MAX_QUEUE})"
@@ -1362,7 +1385,12 @@ while [[ $# -gt 0 ]]; do
     --wl-files) WL_FILES="${2:-}"; shift 2 ;;
     --exts) EXTS="${2:-}"; shift 2 ;;
 
-    --ferox-idle) FEROX_IDLE_SEC="${2:-}"; shift 2 ;;
+    --ferox-idle)
+      FEROX_IDLE_SEC="${2:-}"
+      FEROX_IDLE_OVERRIDE=true
+      shift 2
+      ;;
+
     --ferox-idle-global) FEROX_IDLE_GLOBAL_SEC="${2:-}"; shift 2 ;;
     --ferox-idle-deep) FEROX_IDLE_DEEP_SEC="${2:-}"; shift 2 ;;
     --watchdog-heartbeat) WATCHDOG_HEARTBEAT_SEC="${2:-}"; shift 2 ;;
@@ -1388,7 +1416,6 @@ _main(){
   need flock
 
   # --- Anti double-run (lock via FD dédié) ---
-  # FD alloué automatiquement, évite collision et reste simple avec set -u
   exec {LOCK_FD}>"$LOCKFILE"
   if ! flock -n "$LOCK_FD"; then
     die "Une autre instance de ${_self_base} tourne déjà (lockfile=$LOCKFILE). Stoppe-la avant de relancer."
