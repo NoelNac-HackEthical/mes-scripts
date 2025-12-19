@@ -58,7 +58,7 @@ jobs:
       - name: Aggregate & publish release (inline)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RETAIN: "10"
+          RETAIN: "20"
         run: |
           set -euo pipefail
           IFS=$'\n\t'
@@ -205,7 +205,7 @@ jobs:
             log "Release $TAG published with ${#FILES_TO_UPLOAD[@]} assets."
 
             # Prune anciennes releases
-            RETAIN="${RETAIN:-10}"
+            RETAIN="${RETAIN:-20}"
             log "Pruning releases beyond the most recent ${RETAIN}…"
             gh api -H "Accept: application/vnd.github+json" "/repos/${OWNER_REPO}/releases?per_page=100" \
               | jq -r '.[].tag_name' | awk 'NF' | nl -ba \
