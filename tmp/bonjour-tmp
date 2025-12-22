@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-echo "bonjour du répertoire temporaire"
+echo "bonjour du répertoire de travail temporaire"
