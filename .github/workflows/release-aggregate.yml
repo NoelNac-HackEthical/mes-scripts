@@ -10,6 +10,8 @@ on:
       - "!.github/**"
       - "!templates/**"
       - "!tools/**"
+      - "!tmp/**"
+
   workflow_dispatch:
     inputs:
       scope:
