@@ -1,2 +1,4 @@
 *.sha256
 *.bak
+!bak/
+!bak/*.bak
