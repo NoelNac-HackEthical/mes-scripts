@@ -1,0 +1,502 @@
+#!/usr/bin/env bash
+# NAME=mon-nouveau-recoweb
+# VERSION=1.0.0
+# DESCRIPTION=Recon web générique en 3 phases (dirb + ffuf dirs + ffuf files) avec exports JSON fiables et un résumé global agrégé (/répertoire/ vs /fichier), pensé pour test rapide en /tmp puis intégration mes-scripts.
+# PRESENTATION_START
+# **mon-nouveau-recoweb — Recon web générique (dirb + 2x ffuf)**
+#
+# Ce script enchaîne une énumération simple et efficace en 3 phases :
+# - dirb (wordlist courte) pour une première cartographie rapide
+# - ffuf avec `raft-large-directories.txt` pour détecter un maximum de répertoires
+# - ffuf avec `raft-large-files.txt` pour détecter un maximum de fichiers
+#
+# Sorties :
+# - JSON ffuf (source de vérité)
+# - TXT “style console” (si `jq` disponible) + hits-only
+# - dirb.log + dirb_hits.txt
+# - RESULTS_SUMMARY.txt : résumé global agrégé (format strict /répertoire/ et /fichier)
+#
+# Usage typique :
+# `mon-nouveau-recoweb -t dog.htb`
+# PRESENTATION_END
+# HOMEPAGE=https://github.com/NoelNac-HackEthical/mes-scripts
+#____________________________________________________________________________
+#
+# Bref résumé :
+#   Recon web générique en 3 phases (dirb + ffuf dirs + ffuf files) avec exports JSON fiables et un résumé global agrégé (/répertoire/ vs /fichier).
+#
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Helpers version (ne pas modifier)
+_self_path="${BASH_SOURCE[0]:-$0}"
+if command -v readlink >/dev/null 2>&1; then
+  _resolved="$(readlink -f -- "$_self_path" 2>/dev/null || true)"
+  [ -n "$_resolved" ] && _self_path="$_resolved"
+fi
+_self_base="$(basename "$_self_path")"
+
+_version_str(){
+  # lit la première occurrence '# VERSION=' dans le fichier source (robuste CRLF)
+  local v
+  v="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$_self_path" 2>/dev/null || true)"
+  v="${v:-0.0.0}"
+  printf '%s v%s\n' "$_self_base" "$v"
+}
+_print_version_and_exit(){ _version_str; exit 0; }
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# USAGE (heredoc) — extrait automatiquement par la pipeline
+usage(){
+  cat <<USAGE
+Usage: ${_self_base} [OPTIONS] -t <target>
+
+Short description:
+  Recon web générique en 3 phases (dirb + ffuf dirs + ffuf files), avec exports JSON fiables et résumé global agrégé.
+
+Required:
+  -t, --target <host>       Target host (ex: dog.htb) OR full URL if you prefer
+
+Options:
+  -s, --scheme <http|https> Scheme when target is a host (default: http)
+  --base <path>             Base path prefix (default: /) ex: /app => http://t/app/FUZZ
+  -T, --threads <n>         ffuf threads (default: 30)
+  --timeout <sec>           ffuf timeout seconds (default: 10)
+  --fc <codes>              ffuf filter status codes (default: 404)
+  --dirb-wordlist <path>    dirb wordlist (default: /usr/share/wordlists/dirb/common.txt)
+  --raft-dirs <path>        ffuf dirs wordlist (default: /usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt)
+  --raft-files <path>       ffuf files wordlist (default: /usr/share/seclists/Discovery/Web-Content/raft-large-files.txt)
+  -o, --outdir <dir>        Output directory (default: /tmp/mon-nouveau-recoweb-<target>-<timestamp>)
+  --no-dirb                 Skip dirb phase
+  --no-ffuf-dirs            Skip ffuf directories phase
+  --no-ffuf-files           Skip ffuf files phase
+  --debug                   Debug mode (set -x)
+  -h, --help                Show this help
+  -V, --version             Show version
+USAGE
+}
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# EXAMPLES / ASTUCES (optionnel ; extrait si présent)
+examples(){
+  cat <<EXAMPLES
+# Basic (HTTP)
+${_self_base} -t dog.htb
+
+# HTTPS + fewer threads
+${_self_base} -t example.htb -s https -T 20
+
+# Full URL target (scheme already embedded)
+${_self_base} -t http://10.10.10.10
+
+# Base path (scan under /app)
+${_self_base} -t target.htb --base /app
+
+# Custom outdir
+${_self_base} -t dog.htb -o /tmp/test-recoweb
+
+# Skip one phase
+${_self_base} -t dog.htb --no-dirb
+EXAMPLES
+}
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Parsing minimal CLI (classique)
+DEBUG=false
+
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
+  _print_version_and_exit
+fi
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  _version_str
+  usage
+  exit 0
+fi
+
+TARGET=""
+SCHEME="http"
+BASE="/"
+THREADS=30
+TIMEOUT=10
+FFUF_FC="404"
+
+DIRB_WORDLIST="/usr/share/wordlists/dirb/common.txt"
+RAFT_DIRS="/usr/share/seclists/Discovery/Web-Content/raft-large-directories.txt"
+RAFT_FILES="/usr/share/seclists/Discovery/Web-Content/raft-large-files.txt"
+
+OUTDIR=""
+DO_DIRB=true
+DO_FFUF_DIRS=true
+DO_FFUF_FILES=true
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --debug) DEBUG=true; shift ;;
+    -V|--version) _print_version_and_exit ;;
+    -h|--help) _version_str; usage; exit 0 ;;
+    -t|--target) TARGET="${2:-}"; shift 2 ;;
+    -s|--scheme) SCHEME="${2:-}"; shift 2 ;;
+    --base) BASE="${2:-}"; shift 2 ;;
+    -T|--threads) THREADS="${2:-}"; shift 2 ;;
+    --timeout) TIMEOUT="${2:-}"; shift 2 ;;
+    --fc) FFUF_FC="${2:-}"; shift 2 ;;
+    --dirb-wordlist) DIRB_WORDLIST="${2:-}"; shift 2 ;;
+    --raft-dirs) RAFT_DIRS="${2:-}"; shift 2 ;;
+    --raft-files) RAFT_FILES="${2:-}"; shift 2 ;;
+    -o|--outdir) OUTDIR="${2:-}"; shift 2 ;;
+    --no-dirb) DO_DIRB=false; shift ;;
+    --no-ffuf-dirs) DO_FFUF_DIRS=false; shift ;;
+    --no-ffuf-files) DO_FFUF_FILES=false; shift ;;
+    --) shift; break ;;
+    -*) echo "Unknown option: $1" >&2; usage; exit 2 ;;
+    *) break ;;
+  esac
+done
+# ---------------------------------------------------------------------------
+
+_need_cmd(){
+  local c="$1"
+  command -v "$c" >/dev/null 2>&1 || { echo "ERROR: missing command: $c" >&2; exit 127; }
+}
+_need_file(){
+  local f="$1"
+  [ -f "$f" ] || { echo "ERROR: missing file: $f" >&2; exit 1; }
+}
+
+_norm_base(){
+  # Ensure BASE begins with / and does not end with / (unless it is just /)
+  local b="$1"
+  [ -z "$b" ] && b="/"
+  [[ "$b" != /* ]] && b="/$b"
+  if [[ "$b" != "/" ]]; then
+    b="${b%/}"
+  fi
+  printf '%s' "$b"
+}
+
+_is_full_url(){
+  [[ "$1" =~ ^https?:// ]]
+}
+
+_mk_outdir_default(){
+  local t="$1"
+  local ts
+  ts="$(date +%Y%m%d-%H%M%S)"
+  local safe="${t//:\/\//_}"
+  safe="${safe//\//_}"
+  echo "/tmp/mon-nouveau-recoweb-${safe}-${ts}"
+}
+
+_build_base_url(){
+  local t="$1" s="$2" b="$3"
+  b="$(_norm_base "$b")"
+
+  if _is_full_url "$t"; then
+    if [[ "$b" == "/" ]]; then
+      echo "${t%/}"
+    else
+      echo "${t%/}${b}"
+    fi
+  else
+    if [[ "$b" == "/" ]]; then
+      echo "${s}://${t}"
+    else
+      echo "${s}://${t}${b}"
+    fi
+  fi
+}
+
+_ffuf_export_txt_from_json(){
+  # Args: json_file out_txt out_hits
+  local json="$1" out_txt="$2" out_hits="$3"
+  if command -v jq >/dev/null 2>&1; then
+    {
+      echo "ffuf results"
+      echo
+      echo "Generated: $(date)"
+      echo "Source   : $json"
+      echo "------------------------------------------------"
+      echo
+      jq -r '
+        .results[]
+        | "\(.input.FUZZ)\t[Status: \(.status), Size: \(.length), Words: \(.words), Lines: \(.lines), Duration: \(.duration)]"
+      ' "$json" | column -t -s $'\t'
+    } > "$out_txt"
+
+    jq -r '
+      .results[]
+      | "\(.input.FUZZ)\t[Status: \(.status), Size: \(.length), Words: \(.words), Lines: \(.lines), Duration: \(.duration)]"
+    ' "$json" | column -t -s $'\t' > "$out_hits"
+  else
+    : > "$out_txt"
+    : > "$out_hits"
+  fi
+}
+
+_main(){
+  if [ "$DEBUG" = true ]; then set -x; fi
+
+  echo "Script: $(_version_str)"
+
+  if [[ -z "$TARGET" ]]; then
+    echo "ERROR: missing required -t/--target" >&2
+    usage
+    exit 2
+  fi
+
+  _need_cmd ffuf
+  if $DO_DIRB; then
+    _need_cmd dirb
+    _need_file "$DIRB_WORDLIST"
+  fi
+  if $DO_FFUF_DIRS || $DO_FFUF_FILES; then
+    _need_file "$RAFT_DIRS"
+    _need_file "$RAFT_FILES"
+  fi
+
+  BASE="$(_norm_base "$BASE")"
+  local BASE_URL
+  BASE_URL="$(_build_base_url "$TARGET" "$SCHEME" "$BASE")"
+
+  if [[ -z "$OUTDIR" ]]; then
+    OUTDIR="$(_mk_outdir_default "$TARGET")"
+  fi
+  mkdir -p "$OUTDIR"
+
+  echo "[*] target : $TARGET"
+  echo "[*] base   : $BASE_URL"
+  echo "[*] outdir : $OUTDIR"
+  echo "[*] ffuf   : threads=$THREADS timeout=${TIMEOUT}s fc=$FFUF_FC"
+
+  # Files
+  local LOG_DIRB="$OUTDIR/dirb.log"
+  local LOG_FFUF_DIRS="$OUTDIR/ffuf_dirs.log"
+  local LOG_FFUF_FILES="$OUTDIR/ffuf_files.log"
+  local HITS_DIRB="$OUTDIR/dirb_hits.txt"
+
+  local JSON_DIRS="$OUTDIR/ffuf_dirs.json"
+  local JSON_FILES="$OUTDIR/ffuf_files.json"
+
+  local TXT_DIRS="$OUTDIR/ffuf_dirs.txt"
+  local HITS_DIRS="$OUTDIR/ffuf_dirs_hits.txt"
+  local TXT_FILES="$OUTDIR/ffuf_files.txt"
+  local HITS_FILES="$OUTDIR/ffuf_files_hits.txt"
+
+  local SUMMARY_FILE="$OUTDIR/RESULTS_SUMMARY.txt"
+
+  # -------------------------------------------------------------------------
+  # Phase 1: dirb (quick map)
+  if $DO_DIRB; then
+    echo
+    echo "[+] Phase 1/3: dirb (common.txt)"
+    # dirb peut retourner un exit code non-zero même si le scan est OK (set -e + pipefail sinon stop)
+    dirb "${BASE_URL%/}/" "$DIRB_WORDLIST" -r | tee "$LOG_DIRB" || true
+
+    # Extraction des hits dirb (URLs fichiers + dossiers) — robuste au format/indentation
+    # Exemple:
+    #   + http://t/path (CODE:200|SIZE:...)
+    #   ==> DIRECTORY: http://t/dir/
+    tr -d '\r' < "$LOG_DIRB" \
+    | sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' \
+    | awk '
+        match($0, /\+ (https?:\/\/[^ ]+)/, m) { print m[1]; next }
+        match($0, /==> DIRECTORY: (https?:\/\/[^ ]+)/, m) { print m[1]; next }
+      ' \
+    | sort -u > "$HITS_DIRB" || true
+  else
+    echo
+    echo "[!] Phase 1/3: dirb skipped (--no-dirb)"
+    : > "$LOG_DIRB"
+    : > "$HITS_DIRB"
+  fi
+
+  # -------------------------------------------------------------------------
+  # Phase 2: ffuf directories (raft-large-directories)
+  if $DO_FFUF_DIRS; then
+    echo
+    echo "[+] Phase 2/3: ffuf directories (raft-large-directories)"
+    ffuf -u "${BASE_URL%/}/FUZZ" \
+      -w "$RAFT_DIRS" \
+      -t "$THREADS" \
+      -timeout "$TIMEOUT" \
+      -fc "$FFUF_FC" \
+      -of json -o "$JSON_DIRS" \
+      2>&1 | tee "$LOG_FFUF_DIRS"
+
+    _ffuf_export_txt_from_json "$JSON_DIRS" "$TXT_DIRS" "$HITS_DIRS"
+  else
+    echo
+    echo "[!] Phase 2/3: ffuf dirs skipped (--no-ffuf-dirs)"
+    : > "$LOG_FFUF_DIRS"
+    : > "$JSON_DIRS"
+    : > "$TXT_DIRS"
+    : > "$HITS_DIRS"
+  fi
+
+  # -------------------------------------------------------------------------
+  # Phase 3: ffuf files (raft-large-files)
+  if $DO_FFUF_FILES; then
+    echo
+    echo "[+] Phase 3/3: ffuf files (raft-large-files)"
+    ffuf -u "${BASE_URL%/}/FUZZ" \
+      -w "$RAFT_FILES" \
+      -t "$THREADS" \
+      -timeout "$TIMEOUT" \
+      -fc "$FFUF_FC" \
+      -of json -o "$JSON_FILES" \
+      2>&1 | tee "$LOG_FFUF_FILES"
+
+    _ffuf_export_txt_from_json "$JSON_FILES" "$TXT_FILES" "$HITS_FILES"
+  else
+    echo
+    echo "[!] Phase 3/3: ffuf files skipped (--no-ffuf-files)"
+    : > "$LOG_FFUF_FILES"
+    : > "$JSON_FILES"
+    : > "$TXT_FILES"
+    : > "$HITS_FILES"
+  fi
+
+  # -------------------------------------------------------------------------
+  # Résumé global (agrégé) + sections par outil
+  {
+    echo "=== Résultat global (agrégé) ==="
+    echo
+
+    # Agrégation : dirb + ffuf dirs + ffuf files
+    {
+      # DIRB hits: URLs -> paths (/xxx ou /xxx/)
+      if [[ -s "$HITS_DIRB" ]]; then
+        sed -E 's#^https?://[^/]+##' "$HITS_DIRB" \
+        | awk '
+            NF==0 { next }
+            $0 !~ /^\// { $0="/"$0 }
+            { print $0 }
+          '
+      fi
+
+      # FFUF dirs hits: 1er champ = token FUZZ ; normaliser en /xxx/
+      if [[ -s "$HITS_DIRS" ]]; then
+        awk '
+          NF==0 { next }
+          {
+            p=$1
+            if (p !~ /^\//) p="/"p
+            if (p !~ /\/$/) p=p"/"
+            print p
+          }
+        ' "$HITS_DIRS"
+      fi
+
+      # FFUF files hits: 1er champ = token FUZZ ; normaliser en /xxx (sans slash final)
+      if [[ -s "$HITS_FILES" ]]; then
+        awk '
+          NF==0 { next }
+          {
+            p=$1
+            if (p !~ /^\//) p="/"p
+            sub(/\/$/, "", p)
+            print p
+          }
+        ' "$HITS_FILES"
+      fi
+    } | sed '/^$/d' | sort -u \
+      | awk '
+          { a[NR]=$0; s[$0]=1 }
+          END{
+            # Si /X existe ET qu’on a au moins un enfant /X/..., alors /X => /X/
+            for (i=1; i<=NR; i++){
+              p=a[i]
+              if (p ~ /\/$/) continue
+              if (p == "/") continue
+              child_prefix = p "/"
+              found_child = 0
+              for (k in s){
+                if (index(k, child_prefix) == 1){
+                  found_child = 1
+                  break
+                }
+              }
+              if (found_child) a[i]=p "/"
+            }
+            for (i=1; i<=NR; i++) out[a[i]]=1
+            n=0
+            for (k in out){ b[++n]=k }
+            for (i=1; i<=n; i++){
+              for (j=i+1; j<=n; j++){
+                if (b[j] < b[i]){ t=b[i]; b[i]=b[j]; b[j]=t }
+              }
+            }
+            for (i=1; i<=n; i++) print b[i]
+          }
+        '
+
+    echo
+    echo "=== Détails par outil ==="
+    echo
+
+    echo "[DIRB]"
+    if [[ -s "$HITS_DIRB" ]]; then
+      sed -E 's#^https?://[^/]+##' "$HITS_DIRB" \
+      | awk '
+          NF==0 { next }
+          $0 !~ /^\// { $0="/"$0 }
+          { print $0 }
+        ' \
+      | sort -u
+    else
+      echo "(aucun résultat)"
+    fi
+
+    echo
+    echo "[FFUF — DIRECTORIES]"
+    if [[ -s "$HITS_DIRS" ]]; then
+      awk '
+        NF==0 { next }
+        { p=$1; if (p !~ /^\//) p="/"p; if (p !~ /\/$/) p=p"/"; print p }
+      ' "$HITS_DIRS" | sort -u
+    else
+      echo "(aucun résultat)"
+    fi
+
+    echo
+    echo "[FFUF — FILES]"
+    if [[ -s "$HITS_FILES" ]]; then
+      awk '
+        NF==0 { next }
+        { p=$1; if (p !~ /^\//) p="/"p; sub(/\/$/, "", p); if (p=="/.git") p="/.git/"; print p }
+      ' "$HITS_FILES" | sort -u
+    else
+      echo "(aucun résultat)"
+    fi
+
+  } > "$SUMMARY_FILE"
+
+  # -------------------------------------------------------------------------
+  # Summary
+  echo
+  echo "[+] Outputs:"
+  echo "    - $LOG_DIRB"
+  echo "    - $HITS_DIRB"
+  echo "    - $JSON_DIRS"
+  echo "    - $TXT_DIRS"
+  echo "    - $HITS_DIRS"
+  echo "    - $JSON_FILES"
+  echo "    - $TXT_FILES"
+  echo "    - $HITS_FILES"
+  echo "    - $SUMMARY_FILE"
+
+  echo
+  echo "[+] Résultat global:"
+  echo
+  sed 's/^/  /' "$SUMMARY_FILE"
+
+  echo
+  echo "[OK] Done."
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  _main "$@"
+fi
