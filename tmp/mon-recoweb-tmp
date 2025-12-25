@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NAME=mon-nouveau-recoweb
+# NAME=mon-recoweb-tmp
 # VERSION=1.0.0
 # DESCRIPTION=Recon web générique en 3 phases (dirb + ffuf dirs + ffuf files) avec exports JSON fiables et un résumé global agrégé (/répertoire/ vs /fichier), pensé pour test rapide en /tmp puis intégration mes-scripts.
 # PRESENTATION_START
