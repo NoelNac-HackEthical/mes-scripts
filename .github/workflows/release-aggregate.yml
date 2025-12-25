@@ -79,13 +79,17 @@ jobs:
           # Catalogue complet (tous les scripts versionnés exécutables)
           mapfile -t ALL_SCRIPTS < <(
             git ls-files \
-              | grep -v -E '^(.github/|templates/|tools/|README|LICENSE)' \
+              | grep -v -E '^(.github/|templates/|tools/|tmp/|README|LICENSE)' \
               | grep -v -E '\.sha256$' \
               | grep -v -E '\.bak$' \
               | while read -r f; do
                   [ -f "$f" ] || continue
                   head -n1 "$f" | grep -q '^#!' || continue
                   grep -q -m1 -E '^#\s*VERSION=' "$f" || continue
+
+                  base="$(basename "$f")"
+                  [[ "$base" == *-tmp ]] && continue
+
                   echo "$f"
                 done
           )
