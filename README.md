@@ -1,109 +1,124 @@
 # mes-scripts
 
-Collection de scripts personnels destinés à faciliter mes reconnaissances et automatisations lors de CTF (HackTheBox, TryHackMe, etc.).
+Collection de scripts personnels orientés **CTF / Hack The Box / reconnaissance / automatisation**, utilisés et maintenus dans un cadre de **hacking éthique**.
 
-⚠️ Ces outils sont conçus **à des fins éducatives et de pentest en environnement contrôlé**.  
-N'utilisez jamais ces scripts sur des systèmes dont vous n'avez pas l'autorisation.
-
----
-
-## 📂 Scripts inclus
-
-### 🔹 mon-nmap
-- **But** : Automatiser mes scans Nmap (TCP, UDP, détection OS/services, résumé).
-- **Exemple** :
-  ```bash
-  mon-nmap 10.129.148.164
-  ```
-- **Résultat** :
-  - Dossiers structurés `nmap_<cible>/`
-  - Fichiers `summary.md` pour intégration dans mon site Hugo.
+Ce dépôt distingue volontairement :
+- les **scripts actifs** (publiés et distribués),
+- des **versions de travail** servant au développement et à la synchronisation entre machines.
 
 ---
 
-### 🔹 mon-recoweb
-- **But** : Lancer un WhatWeb + fuzzing FFUF (répertoires et extensions ciblées).
-- **Exemple** :
-  ```bash
-  mon-recoweb planning.htb
-  ```
-- **Résultat** :
-  - Rapport WhatWeb
-  - Résultats FFUF (dirs/files)
-  - `summary.txt` (texte) et `summary.md` (Markdown pour Hugo).
+## 📁 Organisation du dépôt
 
----
+### Scripts actifs (racine du dépôt)
 
-### 🔹 mon-subdomains
-- **But** : Enumération simple des sous-domaines (wordlist + DNS resolve).
-- **Exemple** :
-  ```bash
-  mon-subdomains example.com
-  ```
-- **Résultat** :
-  - Liste des sous-domaines valides
-  - Fichier `subdomains.txt`
+Les scripts situés **à la racine** du dépôt sont considérés comme **actifs** :
 
----
+- ils sont stables ou en voie de stabilisation,
+- ils sont pris en compte par les workflows GitHub Actions,
+- ils sont inclus dans les releases,
+- ils sont référencés côté site Hugo / Netlify.
 
-### 🔹 make-htb-wordlist.sh
-- **But** : Générer une wordlist optimisée pour HackTheBox, destinée surtout aux énumérations DNS virtuelles et web fuzzing.
-- **Sources utilisées** :
-  - `subdomains-top1million-5000.txt` (SecLists DNS Top 5000)
-  - `raft-small-words.txt` (SecLists Web Content)
-  - (optionnel) `raft-medium-words.txt` pour enrichir la liste
-  - Une mini seed interne « FAST » (admin, test, dev, api, login, etc.) toujours prioritaire
-- **Règles de filtrage** :
-  - minuscules uniquement `[a-z0-9-]`
-  - pas de `--`, ni de `-` en début/fin
-  - longueur 3 à 24 caractères
-  - suppression des doublons, ordre préservé
-- **Exemple** :
-  ```bash
-  # Générer la wordlist par défaut (5000 entrées max)
-  make-htb-wordlist.sh
-  
-  # Générer une liste personnalisée
-  make-htb-wordlist.sh --out /tmp/wordlist.txt --maxlen 16 --allow-digit-start
-  ```
-- **Résultat** :
-  - Par défaut : `/usr/share/wordlists/htb-dns-vh-5000.txt`
-  - Fichier limité aux 5000 premières entrées, déjà filtré et prêt à l’emploi avec `ffuf`, `gobuster`, etc.
-  - Affiche un résumé et les 10 premiers mots générés.
-
----
-
-## 📦 Installation
-
-Cloner le dépôt et ajouter les scripts au `$PATH` :
-```bash
-git clone https://github.com/NoelNac-HackEthical/mes-scripts.git
-cd mes-scripts
-chmod +x mon-* make-*
-ln -sf "$PWD"/mon-* "$PWD"/make-* ~/.local/bin/
+Exemples :
 ```
-
-Vérifier :
-```bash
-mon-nmap -h
+mon-recoweb
+mon-nmap
+mon-subdomains
 ```
 
 ---
 
-## 🔖 Versions & Releases
+### 🧪 Dossier `dev/` — workdir de développement
 
-- Des **tags** sont créés régulièrement (`mes-scripts-YYYY-MM-DD-HHMMSS`) pour figer l'état du dépôt.
-- Les versions stables sont disponibles dans la section [Releases](../../releases).
+Le dossier `dev/` est un **workdir de développement** destiné aux versions temporaires des scripts.
+
+Caractéristiques :
+
+- scripts en cours de modification ou de test,
+- fichiers suffixés par `-dev`,
+- versions **commitées volontairement** pour :
+  - sauvegarder des états intermédiaires,
+  - synchroniser le travail entre plusieurs machines (desktop / laptop).
+
+Exemples :
+```
+dev/mon-recoweb-dev
+dev/mon-nmap-dev
+```
+
+⚠️ Ces scripts **ne sont pas destinés à être utilisés directement** ni à être publiés.
 
 ---
 
-## 📌 Licence
+## 🔁 Workflow recommandé (dev → publication)
 
-Usage **strictement éducatif et légal**.  
-Aucune garantie de bon fonctionnement ni de sécurité.
+### 1️⃣ Développement
+Le travail se fait dans `dev/*-dev`.
+
+```bash
+dev/mon-recoweb-dev
+```
+
+---
+
+### 2️⃣ Sauvegarde / synchronisation (work in progress)
+
+Lorsque nécessaire, un instantané du travail peut être sauvegardé :
+
+```bash
+git commit -m "wip(dev) : instantané des scripts de travail"
+git push
+```
+
+Ces commits servent uniquement à la **continuité du travail** et non à la publication.
+
+---
+
+### 3️⃣ Publication d’un script
+
+Une fois le développement terminé :
+
+1. Reporter manuellement les modifications vers le script actif à la racine.
+2. Vérifier le script.
+3. Committer normalement (`feat`, `fix`, `chore`, etc.).
+
+👉 **Seuls les scripts actifs déclenchent une release.**
+
+---
+
+## 🛡️ CI / Releases — garde-fous
+
+Les workflows GitHub Actions sont configurés pour :
+
+- ignorer le dossier `dev/`,
+- ignorer les fichiers suffixés `-dev`,
+- empêcher toute publication accidentelle de versions de travail.
+
+Un commit ne concernant que `dev/` :
+- peut déclencher un workflow,
+- **mais n’entraîne aucune release**.
+
+Les scripts actifs restent les **seuls artefacts publiés**.
+
+---
+
+## 🧭 Conventions de nommage
+
+- `nom-script` → script actif, publiable
+- `nom-script-dev` → version de travail
+- `dev/` → espace de développement contrôlé
+
+---
+
+## 📜 Licence et usage
+
+Ces scripts sont fournis à des fins **éducatives et personnelles**, dans un cadre de **sécurité offensive légale**.
+
+L’utilisation sur des systèmes sans autorisation explicite est interdite.
 
 ---
 
 ## ✍️ Auteur
 
-- Noël ([@NoelNac-HackEthical](https://github.com/NoelNac-HackEthical))
+Noël — *HackEthical*  
+CTF / Hack The Box / automatisation & documentation technique
