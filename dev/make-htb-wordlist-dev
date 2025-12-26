@@ -1,1 +1,245 @@
-# init
+#!/bin/bash
+# NAME=make-htb-wordlist-dev
+# VERSION=1.0.0
+# DESCRIPTION=Construit et installe une wordlist orientée HTB (vhost/subdomains) à partir de SecLists (+ seed FAST), normalisée et limitée à 5000 entrées.
+# PRESENTATION_START
+# **make-htb-wordlist — Master DNS/VHOST orientée HTB (5000 entrées)**
+#
+# Ce script assemble une wordlist « maison » optimisée pour les CTF HTB afin d’alimenter
+# le vhost-fuzzing (ex. avec mon-subdomains). Il combine plusieurs sources SecLists et
+# une petite liste « FAST » prioritaire, applique des règles de normalisation strictes,
+# déduplique/ordonne, puis tronque proprement à 5000 lignes.
+#
+# Sources et pipeline :
+# - SecLists : DNS top1million-5000 + Web-Content raft-small (+ raft-medium si non désactivé) ;
+# - seed « FAST » (admin, dev, api, staging, …) placée en tête pour prioriser les hits ;
+# - normalisation : minuscules, charset [a-z0-9-], pas de « -- », ni tiret en début/fin,
+#   longueur 3..24 (paramétrable), optionnelle autorisation de début par chiffre ;
+# - déduplication ordonnée, puis coupe à 5000 entrées max.
+#
+# Sortie et installation :
+# - chemin par défaut : /usr/share/wordlists/htb-dns-vh-5000.txt (droits 644) ;
+# - tentative d’installation de SecLists via apt (désactivable avec --no-install) ;
+# - affichage d’un aperçu (Top 10) pour vérification rapide.
+#
+# Options utiles :
+# - --out FILE            : fichier de sortie personnalisé ;
+# - --no-install          : n’installe pas SecLists automatiquement ;
+# - --no-medium           : exclut raft-medium pour une liste plus compacte ;
+# - --minlen / --maxlen   : borne la longueur des tokens ;
+# - --allow-digit-start   : autorise un début par chiffre.
+#
+# Exemples :
+#   ./make-htb-wordlist
+#   ./make-htb-wordlist --no-medium --out /tmp/htb-5000.txt
+#   ./make-htb-wordlist --minlen 2 --maxlen 20 --allow-digit-start
+#
+# Usage recommandé :
+# - générer/mettre à jour la master une fois sur la machine de lab ;
+# - l’utiliser ensuite dans mon-subdomains (modes fast/medium/large via head) ;
+# - conserver le fichier versionné/packagé si besoin pour reproductibilité.
+# PRESENTATION_END
+
+set -euo pipefail
+LC_ALL=C
+
+# --- version helpers ---
+# Usage: mettre ce bloc en tête du script. Appel: --version déclenche _print_version_and_exit
+_self_path="${BASH_SOURCE[0]:-$0}"
+# si possible résoudre les symlinks pour afficher le nom réel du fichier
+if command -v readlink >/dev/null 2>&1; then
+  _resolved="$(readlink -f -- "$_self_path" 2>/dev/null || true)"
+  [ -n "$_resolved" ] && _self_path="$_resolved"
+fi
+_self_base="$(basename "$_self_path")"
+
+_version_str() {
+  # récupère la première ligne '# VERSION=...' (tolère espaces autour de '=' et CRLF)
+  # awk lit le fichier et renvoie la partie droite de '=' ; gsub retire CR si présent
+  local v
+  v="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$_self_path" 2>/dev/null || true)"
+  [ -n "$v" ] || v="0.0.0"
+  printf '%s %s\n' "$_self_base" "$v"
+}
+
+_print_version_and_exit() { _version_str; exit 0; }
+# -----------------------
+
+
+# make-htb-wordlist.sh — minimal (master only)
+# Produit : /usr/share/wordlists/htb-dns-vh-5000.txt (par défaut)
+# Sources : seclists DNS top5000 + raft-small + mini-liste "FAST" (priorisée)
+# Règles : lower, charset [a-z0-9-], sans '--', ni début/fin par '-', longueur 3..24, dédup ordonnée
+
+OUT="/usr/share/wordlists/htb-dns-vh-5000.txt"
+AUTO_INSTALL=1
+WITH_MEDIUM=1        # garde par défaut raft-medium pour enrichir avant filtrage
+MINLEN=3
+MAXLEN=24
+ALLOW_DIGIT_START=0
+
+usage() {
+  cat <<EOF
+Usage:
+  make-htb-wordlist [--out FILE] [--no-install] [--no-medium] [--minlen N] [--maxlen N] [--allow-digit-start] [-V|--version] [-h|--help]
+
+Par défaut : --out $OUT
+
+Options:
+  --out FILE           Chemin de sortie (défaut: $OUT)
+  --no-install         Ne pas tenter d'installer seclists automatiquement
+  --no-medium          Ne pas inclure raft-medium-words.txt
+  --minlen N           Longueur minimale (défaut: $MINLEN)
+  --maxlen N           Longueur maximale (défaut: $MAXLEN)
+  --allow-digit-start  Autoriser un début par chiffre
+  -V, --version        Afficher la version et quitter
+  -h, --help           Afficher cette aide et quitter
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --out) shift; OUT="${1:-}"; shift || true;;
+    --no-install) AUTO_INSTALL=0; shift;;
+    --no-medium) WITH_MEDIUM=0; shift;;
+    --minlen) shift; MINLEN="${1:-3}"; shift || true;;
+    --maxlen) shift; MAXLEN="${1:-24}"; shift || true;;
+    --allow-digit-start) ALLOW_DIGIT_START=1; shift;;
+    -V|--version) _print_version_and_exit ;;
+    -h|--help) usage; exit 0;;
+    *) echo "[!] Option inconnue: $1" >&2; usage; exit 1;;
+  esac
+done
+
+need(){ command -v "$1" >/dev/null 2>&1; }
+
+ensure_seclists(){
+  local dns_list="/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
+  local raft_small="/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt"
+  local raft_medium="/usr/share/seclists/Discovery/Web-Content/raft-medium-words.txt"
+  local miss=0
+  [[ -f "$dns_list" ]] || miss=1
+  [[ -f "$raft_small" ]] || miss=1
+  if [[ $WITH_MEDIUM -eq 1 && ! -f "$raft_medium" ]]; then miss=1; fi
+  [[ $miss -eq 0 ]] && return 0
+  [[ $AUTO_INSTALL -eq 0 ]] && { echo "[!] Seclists manquantes et --no-install"; exit 1; }
+  need apt || { echo "[!] apt indisponible, installe seclists manuellement"; exit 1; }
+  echo "[-] Installation seclists (sudo)…"
+  sudo apt update -y && sudo apt install -y seclists
+}
+
+ensure_seclists
+
+DNS_LIST="/usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt"
+RAFT_SMALL="/usr/share/seclists/Discovery/Web-Content/raft-small-words.txt"
+RAFT_MEDIUM="/usr/share/seclists/Discovery/Web-Content/raft-medium-words.txt"
+
+# Petite seed “FAST” prioritaire en tête
+TMP_FAST="$(mktemp)"
+cat > "$TMP_FAST" <<'EOF'
+admin
+test
+dev
+staging
+stage
+preprod
+prod
+beta
+alpha
+demo
+portal
+internal
+intranet
+secure
+private
+public
+local
+backup
+legacy
+old
+new
+tmp
+api
+app
+apps
+auth
+sso
+vpn
+mail
+ftp
+git
+gitlab
+repo
+db
+mysql
+postgres
+kibana
+grafana
+dashboard
+monitor
+status
+login
+signup
+profile
+console
+cp
+panel
+files
+cdn
+img
+images
+media
+docs
+help
+support
+jira
+wiki
+forum
+upload
+downloads
+owa
+qa
+uat
+EOF
+
+# Concat (priorité = ordre)
+SOURCES=("$TMP_FAST" "$DNS_LIST" "$RAFT_SMALL")
+[[ $WITH_MEDIUM -eq 1 && -f "$RAFT_MEDIUM" ]] && SOURCES+=("$RAFT_MEDIUM")
+
+TMP_CAT="$(mktemp)"; cat "${SOURCES[@]}" | tr '[:upper:]' '[:lower:]' > "$TMP_CAT"
+
+# Filtrage & normalisation
+FILTERED="$(mktemp)"
+awk -v min="$MINLEN" -v max="$MAXLEN" -v allow="$ALLOW_DIGIT_START" '
+{
+  x=$0
+  sub(/#.*/,"",x)
+  gsub(/^[[:space:]]+|[[:space:]]+$/,"",x)
+  if (x=="") next
+  if (x ~ /[^a-z0-9-]/) next
+  if (x ~ /^-/) next
+  if (x ~ /-$/) next
+  if (x ~ /--/) next
+  if (length(x)<min || length(x)>max) next
+  if (!allow && x !~ /^[a-z]/) next
+  print x
+}' "$TMP_CAT" > "$FILTERED"
+
+# Dédup ordonnée
+ORDERED="$(mktemp)"; awk '!seen[$0]++' "$FILTERED" > "$ORDERED"
+
+# On garde les 5000 premières lignes seulement
+DIR="$(dirname "$OUT")"; [[ -w "$DIR" ]] || sudo mkdir -p "$DIR"
+if [[ -w "$DIR" ]]; then
+  head -n 5000 "$ORDERED" > "$OUT"
+  chmod 644 "$OUT"
+else
+  head -n 5000 "$ORDERED" | sudo tee "$OUT" >/dev/null
+  sudo chmod 644 "$OUT"
+fi
+
+TOTAL="$(wc -l < "$OUT" | tr -d ' ')"
+echo "[+] Master écrit : $OUT (${TOTAL} lignes <= 5000 max)"
+echo "[-] Top 10 :"; head -n 10 "$OUT" | sed 's/^/    /'
+
+rm -f "$TMP_FAST" "$TMP_CAT" "$FILTERED" "$ORDERED"
