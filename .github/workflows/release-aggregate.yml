@@ -12,6 +12,8 @@ on:
       - "!tools/**"
       - "!dev/**"
       - "!**/*-dev"
+      - "!bak/**"
+
 
   workflow_dispatch:
     inputs:
@@ -80,7 +82,7 @@ jobs:
           # Catalogue complet (tous les scripts versionnés exécutables)
           mapfile -t ALL_SCRIPTS < <(
             git ls-files \
-              | grep -v -E '^(.github/|templates/|tools/|dev/|README|LICENSE)' \
+              | grep -v -E '^(.github/|templates/|tools/|dev/|bak/|README|LICENSE)' \
               | grep -v -E '\.sha256$' \
               | grep -v -E '\.bak$' \
               | while read -r f; do
