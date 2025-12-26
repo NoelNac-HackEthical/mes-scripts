@@ -10,7 +10,8 @@ on:
       - "!.github/**"
       - "!templates/**"
       - "!tools/**"
-      - "!tmp/**"
+      - "!dev/**"
+      - "!**/*-dev"
 
   workflow_dispatch:
     inputs:
@@ -79,7 +80,7 @@ jobs:
           # Catalogue complet (tous les scripts versionnés exécutables)
           mapfile -t ALL_SCRIPTS < <(
             git ls-files \
-              | grep -v -E '^(.github/|templates/|tools/|tmp/|README|LICENSE)' \
+              | grep -v -E '^(.github/|templates/|tools/|dev/|README|LICENSE)' \
               | grep -v -E '\.sha256$' \
               | grep -v -E '\.bak$' \
               | while read -r f; do
@@ -88,7 +89,7 @@ jobs:
                   grep -q -m1 -E '^#\s*VERSION=' "$f" || continue
 
                   base="$(basename "$f")"
-                  [[ "$base" == *-tmp ]] && continue
+                  [[ "$base" == *-dev ]] && continue
 
                   echo "$f"
                 done
