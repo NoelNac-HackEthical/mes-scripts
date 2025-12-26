@@ -1,7 +1,7 @@
 #!/bin/bash
 # NAME=mon-subdomains-dev
-# VERSION=2.1.1
-# DESCRIPTION=Découverte de sous-domaines par vhost-fuzzing (ffuf) avec baseline anti-wildcard, modes fast/medium/large et options d'ajout dans /etc/hosts.
+# VERSION=2.1.2
+# DESCRIPTION=Découverte de sous-domaines par vhost-fuzzing (ffuf) avec baseline anti-wildcard, détection wildcard (3 baselines), auto-calibration ffuf (-ac) si réponses instables, modes fast/medium/large et options d'ajout dans /etc/hosts.
 # PRESENTATION_START
 # **mon-subdomains — Découverte de vhosts pour CTF / pentest**
 #
@@ -116,12 +116,71 @@ detect_web_endpoints_from_nmap() {
     fi
   done < "$nmap_file"
 
-  if ((${#endpoints[@]} == 0)); then
-    return 1
-  fi
+  ((${#endpoints[@]} == 0)) && return 1
 
   printf '%s\n' "${endpoints[@]}" | sort -n | uniq
   return 0
+}
+
+# --- baseline helpers (v2.1.2) ---
+_fetch_baseline_metrics() {
+  # args: scheme target_ip port domain timeout
+  local scheme="$1" ip="$2" port="$3" domain="$4" timeout="$5"
+  local host code size words url
+  local -a curl_tls
+
+  host="$(tr -dc 'a-z0-9' </dev/urandom | head -c 10 || echo rnd)"
+  url="${scheme}://${ip}:${port}/"
+
+  curl_tls=()
+  [[ "$scheme" == "https" ]] && curl_tls+=(--insecure)
+
+  # code + size
+  read -r code size < <(
+    curl -s "${curl_tls[@]}" -H "Host: ${host}.${domain}" --max-time "$timeout" \
+      -o /dev/null -w "%{http_code} %{size_download}\n" "$url" 2>/dev/null \
+    || echo "000 0"
+  )
+
+  # words (separate call)
+  words="$(
+    curl -s "${curl_tls[@]}" -H "Host: ${host}.${domain}" --max-time "$timeout" \
+      "$url" 2>/dev/null | wc -w | tr -d ' ' || echo 0
+  )"
+
+  code="${code:-000}"; size="${size:-0}"; words="${words:-0}"
+  printf '%s %s %s %s\n' "$host" "$code" "$size" "$words"
+}
+
+_abs() { local x="$1"; ((x<0)) && x=$(( -x )); echo "$x"; }
+
+_is_wildcard_likely() {
+  # args: code1 size1 words1 code2 size2 words2 code3 size3 words3
+  local c1="$1" s1="$2" w1="$3" c2="$4" s2="$5" w2="$6" c3="$7" s3="$8" w3="$9"
+  [[ "$c1" == "000" || "$c2" == "000" || "$c3" == "000" ]] && return 1
+  [[ "$c1" != "$c2" || "$c1" != "$c3" ]] && return 1
+
+  local ds12 ds13 dw12 dw13
+  ds12="$(_abs $((s1 - s2)))"
+  ds13="$(_abs $((s1 - s3)))"
+  dw12="$(_abs $((w1 - w2)))"
+  dw13="$(_abs $((w1 - w3)))"
+
+  # tolérances: tailles +/- 10 octets, words +/- 2
+  (( ds12 <= 10 && ds13 <= 10 && dw12 <= 2 && dw13 <= 2 ))
+}
+
+_needs_autocalibration() {
+  # args: size1 words1 size2 words2 size3 words3
+  local s1="$1" w1="$2" s2="$3" w2="$4" s3="$5" w3="$6"
+  local ds12 ds13 dw12 dw13
+  ds12="$(_abs $((s1 - s2)))"
+  ds13="$(_abs $((s1 - s3)))"
+  dw12="$(_abs $((w1 - w2)))"
+  dw13="$(_abs $((w1 - w3)))"
+
+  # seuils: si > 50 octets ou > 10 words => réponses instables
+  (( ds12 > 50 || ds13 > 50 || dw12 > 10 || dw13 > 10 ))
 }
 
 # ---------- Version / aide ----------
@@ -266,7 +325,7 @@ else
     echo "IP           : (non détectée)"
     echo "Mode         : ${MODE}"
     if [[ $DEBUG -eq 1 ]]; then
-        echo "Wordlist eff.: $WORDLIST_EFFECTIVE"
+      echo "Wordlist eff.: $WL_EFFECTIVE"
     fi
     echo "Master       : ${MASTER}"
     echo "Codes        : ${MATCH_CODES}  (strict=${STRICT})"
@@ -281,14 +340,12 @@ else
     echo
   } > "$TMP_BLOCK"
 
-  # affichage
   echo
   echo -e "${BLUE}===== Résultats mon-subdomains (${DOMAIN}) =====${RESET}"
   cat "$TMP_BLOCK"
   echo -e "${BLUE}===============================================${RESET}"
   echo
 
-  # suppression éventuelle d'un bloc existant + écriture
   if [[ -f "$SCAN_FILE" ]]; then
     sed -e "/^=== mon-subdomains ${DOMAIN} START ===\$/,/^=== mon-subdomains ${DOMAIN} END ===\$/d" \
       "$SCAN_FILE" > "${SCAN_FILE}.tmp" || true
@@ -340,7 +397,6 @@ DETAILS_TXT="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_details.XXXXXX")"
 UNION_VHOSTS="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_union.XXXXXX")"
 : > "$DETAILS_TXT"
 : > "$UNION_VHOSTS"
-VHOST_COUNT_TOTAL=0
 
 if ((${#WEB_ENDPOINTS[@]} == 0)); then
   warn "Aucun service HTTP/HTTPS détecté par Nmap sur ${TARGET_IP}."
@@ -354,33 +410,22 @@ else
   for ep in "${WEB_ENDPOINTS[@]}"; do
     PORT="${ep%%:*}"
     SCHEME="${ep##*:}"
-    CURL_TLS=""; FFUF_TLS=""
 
-    if [[ "$SCHEME" == "https" ]]; then
-      CURL_TLS="--insecure"
-      FFUF_TLS="-k"
-    fi
+    info "Port ${PORT} (${SCHEME}) : baselines…"
 
-    info "Port ${PORT} (${SCHEME}) : baseline…"
-    BASE_HOST="$(tr -dc 'a-z0-9' </dev/urandom | head -c 10 || echo rnd)"
-    BASE_URL="${SCHEME}://${TARGET_IP}:${PORT}/"
-    BASE_RESP="$(curl -sk ${CURL_TLS:-} -H "Host: ${BASE_HOST}.${DOMAIN}" --max-time "$TIMEOUT" \
-                   -o /dev/null -w "%{http_code} %{size_download}" "$BASE_URL" 2>/dev/null || true)"
-    BASE_CODE="${BASE_RESP%% *}"; BASE_CODE="${BASE_CODE:-000}"
-    BASE_SIZE="${BASE_RESP##* }"; BASE_SIZE="${BASE_SIZE:-0}"
-    BASE_WORDS="$(curl -sk ${CURL_TLS:-} -H "Host: ${BASE_HOST}.${DOMAIN}" --max-time "$TIMEOUT" \
-                   "$BASE_URL" 2>/dev/null | wc -w | tr -d ' ' || echo 0)"
-    BASE_WORDS="${BASE_WORDS:-0}"
+    read -r BH1 BC1 BS1 BW1 < <(_fetch_baseline_metrics "$SCHEME" "$TARGET_IP" "$PORT" "$DOMAIN" "$TIMEOUT")
+    read -r BH2 BC2 BS2 BW2 < <(_fetch_baseline_metrics "$SCHEME" "$TARGET_IP" "$PORT" "$DOMAIN" "$TIMEOUT")
+    read -r BH3 BC3 BS3 BW3 < <(_fetch_baseline_metrics "$SCHEME" "$TARGET_IP" "$PORT" "$DOMAIN" "$TIMEOUT")
 
     {
       echo "Port ${PORT} (${SCHEME})"
-      echo "  Baseline: code=${BASE_CODE} size=${BASE_SIZE} words=${BASE_WORDS} (Host=${BASE_HOST}.${DOMAIN})"
+      echo "  Baseline#1: code=${BC1} size=${BS1} words=${BW1} (Host=${BH1}.${DOMAIN})"
+      echo "  Baseline#2: code=${BC2} size=${BS2} words=${BW2} (Host=${BH2}.${DOMAIN})"
+      echo "  Baseline#3: code=${BC3} size=${BS3} words=${BW3} (Host=${BH3}.${DOMAIN})"
     } >> "$DETAILS_TXT"
 
-    # Si baseline totalement KO → pas de fuzzing
-    if [[ "$BASE_CODE" == "000" ]]; then
-      warn "Baseline invalide sur ${PORT} (code=000) → le service ne répond pas en HTTP."
-      warn "Fuzzing VHOST sauté sur ce port."
+    if [[ "$BC1" == "000" && "$BC2" == "000" && "$BC3" == "000" ]]; then
+      warn "Baselines invalides sur ${PORT} (code=000) → le service ne répond pas en HTTP."
       {
         echo "  VHOST (0)"
         echo "    - (fuzzing sauté : baseline code=000)"
@@ -389,19 +434,35 @@ else
       continue
     fi
 
+    if _is_wildcard_likely "$BC1" "$BS1" "$BW1" "$BC2" "$BS2" "$BW2" "$BC3" "$BS3" "$BW3"; then
+      warn "Wildcard vhost probable sur ${PORT} (${SCHEME}) → fuzzing sauté pour éviter les faux positifs."
+      {
+        echo "  VHOST (0)"
+        echo "    - (fuzzing sauté : wildcard probable)"
+        echo
+      } >> "$DETAILS_TXT"
+      continue
+    fi
+
     FFUF_FILTER=()
-    [[ "$BASE_SIZE"  != "0" && -n "$BASE_SIZE" ]]  && FFUF_FILTER+=(-fs "$BASE_SIZE")
-    [[ "$BASE_WORDS" != "0" && -n "$BASE_WORDS" ]] && FFUF_FILTER+=(-fw "$BASE_WORDS")
+    [[ "$BS1" != "0" ]] && FFUF_FILTER+=(-fs "$BS1")
+    [[ "$BW1" != "0" ]] && FFUF_FILTER+=(-fw "$BW1")
+
+    FFUF_AC=()
+    if _needs_autocalibration "$BS1" "$BW1" "$BS2" "$BW2" "$BS3" "$BW3"; then
+      FFUF_AC=(-ac)
+      info "Réponse baseline instable → activation automatique de ffuf -ac"
+    fi
 
     FFUF_RAW="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_ffuf_${PORT}.XXXXXX")"
     VHOST_TXT_PORT="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_vhosts_${PORT}.XXXXXX")"
     : > "$VHOST_TXT_PORT"
 
     info "VHOST fuzzing via ffuf sur ${SCHEME}://${TARGET_IP}:${PORT}/ ..."
-    CMD=(ffuf -u "${SCHEME}://${TARGET_IP}:${PORT}/" $FFUF_TLS \
+    CMD=(ffuf -u "${SCHEME}://${TARGET_IP}:${PORT}/" $([[ "$SCHEME" == "https" ]] && echo -n "-k") \
               -H "Host: FUZZ.${DOMAIN}" \
               -w "$WL_EFFECTIVE" -t "$THREADS" \
-              -mc "${MATCH_CODES}" "${FFUF_FILTER[@]}")
+              -mc "${MATCH_CODES}" "${FFUF_FILTER[@]}" "${FFUF_AC[@]}")
 
     [[ $DEBUG -eq 1 ]] && echo "[*] CMD: ${CMD[*]}"
     "${CMD[@]}" > "$FFUF_RAW" 2>&1 || true
@@ -421,13 +482,19 @@ else
 
     if [[ "$VHOST_COUNT_PORT" -gt 0 ]]; then
       cat "$VHOST_TXT_PORT" >> "$UNION_VHOSTS"
-      VHOST_COUNT_TOTAL=$((VHOST_COUNT_TOTAL + VHOST_COUNT_PORT))
     fi
   done
 
   if [[ -s "$UNION_VHOSTS" ]]; then
     sort -u "$UNION_VHOSTS" -o "$UNION_VHOSTS"
   fi
+fi
+
+# total = unique (cohérent avec la liste affichée) — robuste (évite "0\n0")
+if [[ -s "$UNION_VHOSTS" ]]; then
+  VHOST_COUNT_TOTAL="$(wc -l < "$UNION_VHOSTS" | tr -d ' ')"
+else
+  VHOST_COUNT_TOTAL=0
 fi
 
 # ---------- /etc/hosts ----------
@@ -474,7 +541,7 @@ TMP_BLOCK="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_block.XXXXXX")"
   echo "IP           : ${TARGET_IP}"
   echo "Mode         : ${MODE}"
   if [[ $DEBUG -eq 1 ]]; then
-      echo "Wordlist eff.: $WORDLIST_EFFECTIVE"
+    echo "Wordlist eff.: $WL_EFFECTIVE"
   fi
   echo "Master       : ${MASTER}"
   echo "Codes        : ${MATCH_CODES}  (strict=${STRICT})"
@@ -490,9 +557,9 @@ TMP_BLOCK="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_block.XXXXXX")"
   cat "$DETAILS_TXT"
   echo
   if [[ $DEBUG -eq 1 ]]; then
-      echo "--- Nmap interne ---"
-      echo "  Fichier : $NMAP_TMP"
-      echo
+    echo "--- Nmap interne ---"
+    echo "  Fichier : $NMAP_FILE"
+    echo
   fi
   echo
   echo "$BLOCK_END"

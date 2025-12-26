@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # NAME=mon-recoweb-dev
-# VERSION=1.0.0
+# VERSION=1.0.1
 # DESCRIPTION=Recon web générique en 3 phases (dirb + ffuf dirs + ffuf files) avec exports JSON fiables et un résumé global agrégé (/répertoire/ vs /fichier), pensé pour test rapide en /tmp puis intégration mes-scripts.
 # PRESENTATION_START
-# **mon-nouveau-recoweb — Recon web générique (dirb + 2x ffuf)**
+# **mon-recoweb-dev — Recon web générique (dirb + 2x ffuf)**
 #
 # Ce script enchaîne une énumération simple et efficace en 3 phases :
 # - dirb (wordlist courte) pour une première cartographie rapide
@@ -17,7 +17,7 @@
 # - RESULTS_SUMMARY.txt : résumé global agrégé (format strict /répertoire/ et /fichier)
 #
 # Usage typique :
-# `mon-nouveau-recoweb -t dog.htb`
+# `mon-recoweb-dev dog.htb`
 # PRESENTATION_END
 # HOMEPAGE=https://github.com/NoelNac-HackEthical/mes-scripts
 #____________________________________________________________________________
@@ -51,13 +51,15 @@ _print_version_and_exit(){ _version_str; exit 0; }
 # USAGE (heredoc) — extrait automatiquement par la pipeline
 usage(){
   cat <<USAGE
-Usage: ${_self_base} [OPTIONS] -t <target>
+Usage: ${_self_base} [OPTIONS] <target>
+       ${_self_base} [OPTIONS] -t <target>
 
 Short description:
   Recon web générique en 3 phases (dirb + ffuf dirs + ffuf files), avec exports JSON fiables et résumé global agrégé.
 
-Required:
-  -t, --target <host>       Target host (ex: dog.htb) OR full URL if you prefer
+Target:
+  <target>                  Target host (ex: dog.htb) OR full URL (ex: http://10.10.10.10)
+  -t, --target <target>     (Optionnel) même chose, pour compatibilité
 
 Options:
   -s, --scheme <http|https> Scheme when target is a host (default: http)
@@ -83,23 +85,26 @@ USAGE
 # EXAMPLES / ASTUCES (optionnel ; extrait si présent)
 examples(){
   cat <<EXAMPLES
-# Basic (HTTP)
+# Basic (HTTP) — target positionnel
+${_self_base} dog.htb
+
+# Compat (ancienne habitude)
 ${_self_base} -t dog.htb
 
 # HTTPS + fewer threads
-${_self_base} -t example.htb -s https -T 20
+${_self_base} -s https -T 20 dog.htb
 
 # Full URL target (scheme already embedded)
-${_self_base} -t http://10.10.10.10
+${_self_base} http://10.10.10.10
 
 # Base path (scan under /app)
-${_self_base} -t target.htb --base /app
+${_self_base} --base /app target.htb
 
 # Custom outdir
-${_self_base} -t dog.htb -o /tmp/test-recoweb
+${_self_base} dog.htb -o /tmp/test-recoweb
 
 # Skip one phase
-${_self_base} -t dog.htb --no-dirb
+${_self_base} dog.htb --no-dirb
 EXAMPLES
 }
 # ---------------------------------------------------------------------------
@@ -156,6 +161,12 @@ while [[ $# -gt 0 ]]; do
     *) break ;;
   esac
 done
+
+# Fallback: target positionnel (ex: mon-recoweb-dev dog.htb)
+if [[ -z "$TARGET" && $# -gt 0 && "${1:-}" != -* ]]; then
+  TARGET="$1"
+  shift
+fi
 # ---------------------------------------------------------------------------
 
 _need_cmd(){
@@ -243,7 +254,7 @@ _main(){
   echo "Script: $(_version_str)"
 
   if [[ -z "$TARGET" ]]; then
-    echo "ERROR: missing required -t/--target" >&2
+    echo "ERROR: missing target (use -t <target> or provide it as positional argument)" >&2
     usage
     exit 2
   fi
