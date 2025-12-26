@@ -2,3 +2,10 @@
 *.bak
 !bak/
 !bak/*.bak
+
+# --- Workdir dev (scripts de travail) ---
+dev/*
+!dev/.gitkeep
+
+# Scripts de travail suffixés
+*-dev
