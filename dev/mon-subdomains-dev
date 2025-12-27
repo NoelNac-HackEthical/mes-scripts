@@ -12,7 +12,7 @@
 # - Résolution IP du domaine + ping cohérence /etc/hosts
 # - Scan Nmap interne (-Pn -sV -p-) pour détecter les ports HTTP/HTTPS
 # - ffuf Host: FUZZ.domaine.htb sur chaque port web
-# - Sortie agrégée dans mes_scans/scan_vhosts.txt (bloc remplacé à chaque run)
+# - Sortie agrégée dans scans_subdomains/scan_vhosts.txt (bloc remplacé à chaque run)
 #
 # PRESENTATION_END
 
