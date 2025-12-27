@@ -1,6 +1,6 @@
 #!/bin/bash
 # NAME=mon-recoweb
-# VERSION=2.1.6
+# VERSION=1.0.0
 # DESCRIPTION=Automatise la découverte de répertoires et fichiers web (whatweb + ffuf) et agrège les résultats dans mes_scans/scan_repertoires.txt (ou un fichier spécifique si un chemin est fourni).
 # PRESENTATION_START
 # **mon-recoweb — Découverte web ciblée pour CTF / pentest**

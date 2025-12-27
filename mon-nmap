@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # NAME=mon-nmap
-# VERSION=2.0.0
+# VERSION=1.0.0
 # DESCRIPTION=Automatise une série de scans Nmap (TCP complet, agressif, CMS, UDP) pour une cible CTF donnée.
 # PRESENTATION_START
 # mon-nouveau-nmap — Scan Nmap “tout-en-un” pour CTF

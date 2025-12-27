@@ -39,6 +39,7 @@
 # - l’utiliser ensuite dans mon-subdomains (modes fast/medium/large via head) ;
 # - conserver le fichier versionné/packagé si besoin pour reproductibilité.
 # PRESENTATION_END
+#
 
 set -euo pipefail
 LC_ALL=C
