@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # NAME=mon-recoweb-dev
-# VERSION=1.0.1
+# VERSION=2.0.0
 # DESCRIPTION=Recon web générique en 3 phases (dirb + ffuf dirs + ffuf files) avec exports JSON fiables et un résumé global agrégé (/répertoire/ vs /fichier), pensé pour test rapide en /tmp puis intégration mes-scripts.
 # PRESENTATION_START
 # **mon-recoweb-dev — Recon web générique (dirb + 2x ffuf)**

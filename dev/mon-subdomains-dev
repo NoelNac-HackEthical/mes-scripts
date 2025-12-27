@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # NAME=mon-subdomains-dev
-# VERSION=2.1.4
+# VERSION=2.0.0
 # DESCRIPTION=Découverte de sous-domaines par vhost-fuzzing (ffuf) avec baselines robustes, anti-wildcard contrôlé, gestion des redirects 3xx (curl -L + ffuf -r), parsing fiable via JSON (jq), modes fast/medium/large et options /etc/hosts.
 # PRESENTATION_START
 # **mon-subdomains — Découverte de vhosts pour CTF / pentest**
