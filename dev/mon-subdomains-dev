@@ -66,6 +66,19 @@ Options :
 USAGE
 }
 
+# ---------- Nmap helper (style mon-scan, sans emojis/symboles) ----------
+_run_nmap_scan() {
+  # args: target_ip nmap_outfile
+  local ip="$1" out="$2"
+
+  info "Nmap : détection des services web (HTTP/HTTPS)"
+
+  if ! nmap -Pn -sV -p- --min-rate 5000 -T4 --max-retries 3 --stats-every 2s \
+           -oN "$out" "$ip"; then
+    warn "Échec du scan Nmap interne sur ${ip}."
+  fi
+}
+
 # ---------- Baseline helpers ----------
 _fetch_baseline_metrics() {
   # args: scheme ip port domain timeout follow_redirects(0/1)
@@ -231,7 +244,7 @@ command -v jq   >/dev/null || { warn "jq manquant (nécessaire pour parser le JS
 ok "Domaine : ${DOMAIN}"
 
 # ---------- Dossier mes_scans ----------
-MES_SCANS_DIR="mes_scans"
+MES_SCANS_DIR="scans_subdomains"
 mkdir -p "$MES_SCANS_DIR"
 SCAN_FILE="${MES_SCANS_DIR}/scan_vhosts.txt"
 ok "Fichier de résultats : ${SCAN_FILE}"
@@ -284,12 +297,7 @@ fi
 
 # ---------- Scan Nmap interne ----------
 NMAP_FILE="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_nmap.XXXXXX")"
-info "Scan Nmap interne pour détecter les ports HTTP/HTTPS…"
-info "Commande : nmap -Pn -sV -p- --min-rate 5000 -T4 --max-retries 3 -oN \"$NMAP_FILE\" \"$TARGET_IP\""
-
-if ! nmap -Pn -sV -p- --min-rate 5000 -T4 --max-retries 3 -oN "$NMAP_FILE" "$TARGET_IP"; then
-  warn "Échec du scan Nmap interne sur ${TARGET_IP}."
-fi
+_run_nmap_scan "$TARGET_IP" "$NMAP_FILE"
 
 WEB_ENDPOINTS_RAW="$(detect_web_endpoints_from_nmap "$NMAP_FILE" || true)"
 WEB_ENDPOINTS=()
@@ -393,13 +401,10 @@ else
               -mc "${MATCH_CODES}" "${FFUF_FILTER[@]}" "${FFUF_AC[@]}"
               -of json -o "$FFUF_JSON")
 
-    # Affichage systématique de la commande (feedback visuel)
     if [[ $DEBUG -eq 1 ]]; then
-      # debug : on voit tout et on garde un raw
+      echo "[*] CMD: ${CMD[*]}"
       "${CMD[@]}" 2>&1 | tee "$FFUF_RAW" || true
     else
-      # normal : on laisse ffuf afficher sa progression sur le terminal
-      # (les résultats sont déjà dans $FFUF_JSON via -of json -o)
       "${CMD[@]}" || true
     fi
 
