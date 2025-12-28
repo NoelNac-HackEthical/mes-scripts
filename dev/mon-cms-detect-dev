@@ -1,38 +1,209 @@
 #!/usr/bin/env python3
 # NAME=mon-cms-detect-dev
-# VERSION=0.1.0
+# VERSION=0.3.3
 # STATUS=DEV
-# DESCRIPTION=Détection simple de CMS via empreintes dans la page HTML (requests).
+# DESCRIPTION=Détection techno/CMS "HTB ready" : empreintes (HTML/headers/cookies) + probes + scoring + sortie scriptable.
+# NOTES (v0.3.3):
+# - probes: allow_redirects=False
+# - anti catch-all: ignore probe if response resembles home (size close + same head)
+# - API strict JSON only where it makes sense (grafana /api/health, gitea /api/v1/*, wordpress /wp-json*)
+# - never score on 404
+# - ignore generic redirects to /login (avoid /admin -> /login false positives)
+# - add strong grafana header fingerprint: Set-Cookie contains grafana_session
+# - add grafana probe: /api/login/ping (often 200 "Ok")
+# - reduce noisy magento "mage/" fingerprint weight
+
+from __future__ import annotations
 
 import argparse
+import json
+import re
 import sys
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
 import requests
 
 
-BOLD = "\033[1m"
-GREEN = "\033[92m"
-RED = "\033[91m"
-RED_BOLD = "\033[1;31m"
-RESET = "\033[0m"
+# ----------------------------
+# Couleurs (ANSI) - auto/forced
+# ----------------------------
+def use_color(no_color: bool) -> bool:
+    if no_color:
+        return False
+    return sys.stdout.isatty()
 
 
+class C:
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+
+    def _c(self, s: str) -> str:
+        return s if self.enabled else ""
+
+    @property
+    def RESET(self): return self._c("\033[0m")
+
+    @property
+    def BOLD(self): return self._c("\033[1m")
+
+    @property
+    def DIM(self): return self._c("\033[2m")
+
+    @property
+    def GREEN(self): return self._c("\033[92m")
+
+    @property
+    def YELLOW(self): return self._c("\033[93m")
+
+    @property
+    def RED(self): return self._c("\033[91m")
+
+    @property
+    def CYAN(self): return self._c("\033[96m")
+
+
+# ----------------------------
+# Modèle d'évidence / scoring
+# ----------------------------
+@dataclass
+class Evidence:
+    cms: str
+    points: int
+    kind: str          # html|header|cookie|probe
+    where: str         # / or path
+    needle: str        # what matched
+    detail: str        # extra info
+
+
+@dataclass
+class Result:
+    ok: bool
+    input_url: str
+    final_url: Optional[str]
+    status: Optional[int]
+    best_cms: Optional[str]
+    best_score: int
+    confidence: str
+    scores: Dict[str, int]
+    evidences: List[Evidence]
+    error: Optional[str] = None
+
+
+# ----------------------------
+# Empreintes
+# ----------------------------
 FINGERPRINTS = [
-    # (needle, label, color_prefix)
-    ("wp-content", "WordPress", BOLD),
-    ("content/themes", "WordPress", BOLD),
-    ("Joomla", "Joomla", BOLD),
-    ("Drupal", "Drupal", BOLD),
-    ("sites/default", "Drupal", BOLD),
-    ("modules/system", "Drupal", RED_BOLD),
-    ("typo3conf", "TYPO3", BOLD),
-    ("app/code/core", "Magento", BOLD),
-    ("var/cache", "PrestaShop", BOLD),
-    ("themes/jupiter", "Jupiter", BOLD),
+    # WordPress
+    ("wordpress", "html", "/", 30, r"wp-content", "HTML contains wp-content"),
+    ("wordpress", "html", "/", 40, r"wp-includes", "HTML contains wp-includes"),
+    ("wordpress", "header", "/", 20, r"x-wp-total", "Header x-wp-total (REST)"),
+    ("wordpress", "header", "/", 20, r"x-wp-totalpages", "Header x-wp-totalpages (REST)"),
+    ("wordpress", "link", "/", 25, r"/wp-json", "Link mentions wp-json"),
+
+    # Drupal
+    ("drupal", "html", "/", 35, r"sites/default", "HTML contains sites/default"),
+    ("drupal", "html", "/", 25, r"/core/", "HTML contains /core/"),
+    ("drupal", "header", "/", 25, r"x-drupal", "Header x-drupal"),
+    ("drupal", "header", "/", 25, r"x-generator:.*drupal", "X-Generator mentions Drupal"),
+
+    # Joomla
+    ("joomla", "html", "/", 35, r"\bjoomla\b", "HTML mentions Joomla"),
+    ("joomla", "header", "/", 25, r"x-generator:.*joomla", "X-Generator mentions Joomla"),
+
+    # TYPO3
+    ("typo3", "html", "/", 35, r"typo3conf", "HTML contains typo3conf"),
+    ("typo3", "header", "/", 25, r"x-generator:.*typo3", "X-Generator mentions TYPO3"),
+
+    # Magento (noisy -> low weight for mage/)
+    ("magento", "html", "/", 5, r"mage/", "HTML contains mage/ (weak)"),
+    ("magento", "html", "/", 20, r"\bMagento\b", "HTML mentions Magento"),
+    ("magento", "cookie", "/", 15, r"mage-", "Cookie name contains mage-"),
+
+    # PrestaShop
+    ("prestashop", "html", "/", 15, r"\bprestashop\b", "HTML mentions PrestaShop"),
+
+    # CMS Made Simple (CMSMS)
+    ("cmsms", "html", "/", 35, r"CMS Made Simple", "HTML mentions CMS Made Simple"),
+    ("cmsms", "html", "/", 25, r"\bcmsms\b", "HTML contains 'cmsms' token"),
+
+    # Grafana
+    ("grafana", "html", "/", 35, r"\bGrafana\b", "HTML mentions Grafana"),
+    ("grafana", "html", "/", 110, r"grafanaBootData", "HTML contains grafanaBootData"),
+    ("grafana", "cookie", "/", 60, r"grafana_session", "Cookie grafana_session"),
+    ("grafana", "header", "/", 60, r"set-cookie:.*grafana_session", "Set-Cookie contains grafana_session"),
+    ("grafana", "header", "/", 25, r"x-grafana", "Header x-grafana (rare but strong)"),
+
+    # Gitea
+    ("gitea", "html", "/", 40, r"\bGitea\b", "HTML mentions Gitea"),
+    ("gitea", "cookie", "/", 80, r"i_like_gitea", "Cookie i_like_gitea (very strong)"),
+    ("gitea", "header", "/", 25, r"set-cookie:.*i_like_gitea", "Set-Cookie contains i_like_gitea"),
+
+    # WonderCMS
+    ("wondercms", "html", "/", 45, r"\bWonderCMS\b", "HTML mentions WonderCMS"),
+    ("wondercms", "header", "/", 35, r"x-generator:.*wondercms", "X-Generator mentions WonderCMS"),
 ]
 
 
-def normalize_url(url: str) -> str:
-    u = url.strip()
+# ----------------------------
+# Probes
+# ----------------------------
+PROBES = [
+    # WordPress
+    ("wordpress", "/wp-login.php", 60, [r"wp-submit", r"wordpress"]),
+    ("wordpress", "/wp-json/", 60, [r"routes", r"namespace", r"wp/v2"]),
+    ("wordpress", "/readme.html", 40, [r"WordPress", r"Version"]),
+
+    # Drupal
+    ("drupal", "/user/login", 60, [r"drupal", r"name=\"form_id\"", r"user-login-form"]),
+    ("drupal", "/core/CHANGELOG.txt", 80, [r"Drupal", r"Change Log", r"drupal\.org"]),
+    ("drupal", "/sites/default/settings.php", 40, [r"Drupal", r"settings"]),
+
+    # Joomla
+    ("joomla", "/administrator/", 70, [r"joomla", r"com_login"]),
+    ("joomla", "/language/en-GB/en-GB.xml", 70, [r"<extension", r"joomla"]),
+
+    # TYPO3
+    ("typo3", "/typo3/", 70, [r"typo3", r"install", r"backend"]),
+    ("typo3", "/typo3conf/", 40, [r"Forbidden", r"typo3"]),
+
+    # Magento
+    ("magento", "/admin/", 40, [r"Magento", r"admin"]),
+    ("magento", "/static/", 20, [r"static"]),
+
+    # PrestaShop
+    ("prestashop", "/admin/", 35, [r"prestashop", r"login"]),
+    ("prestashop", "/classes/controller/AdminController.php", 80, [r"PrestaShop"]),
+
+    # CMSMS - racine
+    ("cmsms", "/admin/login.php", 70, [r"CMS Made Simple", r"cmsms", r"login"]),
+    ("cmsms", "/moduleinterface.php", 80, [r"CMS Made Simple", r"moduleinterface", r"cmsms"]),
+    ("cmsms", "/admin/", 40, [r"CMS Made Simple", r"cmsms", r"login"]),
+    # CMSMS - variantes sous /cmsms/
+    ("cmsms", "/cmsms/admin/login.php", 70, [r"CMS Made Simple", r"cmsms", r"login"]),
+    ("cmsms", "/cmsms/moduleinterface.php", 80, [r"CMS Made Simple", r"moduleinterface", r"cmsms"]),
+    ("cmsms", "/cmsms/", 40, [r"CMS Made Simple", r"cmsms"]),
+
+    # Grafana
+    ("grafana", "/login", 60, [r"Grafana", r"login", r"/login"]),
+    ("grafana", "/api/health", 90, [r"commit", r"version", r"database"]),
+    ("grafana", "/api/login/ping", 80, [r"\bok\b"]),  # often: 200 Ok
+    ("grafana", "/public/build/", 40, [r"Grafana", r"public/build"]),
+
+    # Gitea
+    ("gitea", "/api/v1/version", 95, [r"version"]),
+    ("gitea", "/user/login", 70, [r"gitea", r"sign in", r"login", r"/user/login"]),
+    ("gitea", "/explore", 35, [r"gitea", r"repositories"]),
+
+    # WonderCMS
+    ("wondercms", "/?install=1", 60, [r"WonderCMS", r"install"]),
+    ("wondercms", "/data/files/database.js", 90, [r"WonderCMS", r"database"]),
+    ("wondercms", "/themes/", 30, [r"WonderCMS", r"theme"]),
+]
+
+
+def normalize_url(u: str) -> str:
+    u = (u or "").strip()
     if not u:
         return u
     if not (u.startswith("http://") or u.startswith("https://")):
@@ -40,47 +211,393 @@ def normalize_url(url: str) -> str:
     return u
 
 
-def detect_cms(url: str, timeout: float = 10.0, verify_tls: bool = True, user_agent: str = None) -> int:
-    headers = {}
-    if user_agent:
-        headers["User-Agent"] = user_agent
+def lower_headers(headers: Dict[str, str]) -> Dict[str, str]:
+    return {k.lower(): v for k, v in headers.items()}
 
-    try:
-        r = requests.get(url, timeout=timeout, allow_redirects=True, headers=headers, verify=verify_tls)
-        text = r.text or ""
 
-        for needle, label, prefix in FINGERPRINTS:
-            if needle in text:
-                print(f"{prefix}The website {url} is running on {GREEN}{label}{RESET}")
-                return 0
+def collect_fingerprints(r: requests.Response) -> List[Evidence]:
+    evidences: List[Evidence] = []
+    text = r.text or ""
+    headers = lower_headers(dict(r.headers))
+    cookies = r.cookies or {}
 
-        print(f"{RED}No CMS detected on the website {url}{RESET}")
-        return 1
+    header_blob = "\n".join([f"{k}: {v}" for k, v in headers.items()])
+    link_header = headers.get("link", "")
+    x_generator = headers.get("x-generator", "")
+    extended_blob = header_blob + "\n" + f"link: {link_header}\n" + f"x-generator: {x_generator}\n"
 
-    except requests.exceptions.RequestException as e:
-        print(f"{RED_BOLD}Error: {e}{RESET}")
-        return 2
+    for cms, kind, where, pts, needle, detail in FINGERPRINTS:
+        if kind == "html":
+            if re.search(needle, text, flags=re.IGNORECASE):
+                evidences.append(Evidence(cms, pts, "html", where, needle, detail))
+        elif kind == "header":
+            if re.search(needle, extended_blob, flags=re.IGNORECASE):
+                evidences.append(Evidence(cms, pts, "header", where, needle, detail))
+        elif kind == "cookie":
+            for ck in cookies.keys():
+                if re.search(needle, ck, flags=re.IGNORECASE):
+                    evidences.append(Evidence(cms, pts, "cookie", where, needle, f"Cookie name matched: {ck}"))
+                    break
+        elif kind == "link":
+            if re.search(needle, link_header, flags=re.IGNORECASE):
+                evidences.append(Evidence(cms, pts, "header", where, needle, detail))
+
+    return evidences
+
+
+def add_scores(scores: Dict[str, int], evidences: List[Evidence]) -> None:
+    for ev in evidences:
+        scores[ev.cms] = scores.get(ev.cms, 0) + ev.points
+
+
+def confidence_from_score(score: int) -> str:
+    if score >= 140:
+        return "HIGH"
+    if score >= 80:
+        return "MED"
+    if score >= 35:
+        return "LOW"
+    return "NONE"
+
+
+def request_one(
+    session: requests.Session,
+    url: str,
+    timeout: float,
+    verify_tls: bool,
+    headers: Dict[str, str],
+    allow_redirects: bool = True,
+) -> requests.Response:
+    return session.get(url, timeout=timeout, allow_redirects=allow_redirects, verify=verify_tls, headers=headers)
+
+
+def looks_like_home(home_sig: Tuple[int, str], body: str) -> bool:
+    home_len, home_head = home_sig
+    if home_len <= 0:
+        return False
+
+    probe_len = len(body)
+    probe_head = body[:1200]
+
+    same_len = abs(probe_len - home_len) <= max(80, int(home_len * 0.03))
+    same_head = (probe_head == home_head)
+
+    return same_len and same_head
+
+
+def is_generic_login_redirect(loc: str) -> bool:
+    loc = (loc or "").strip().lower()
+    return loc in {
+        "/login",
+        "/user/login",
+        "/signin",
+        "/sign-in",
+        "/auth/login",
+    }
+
+
+def api_requires_json(path: str) -> bool:
+    # JSON strict only where expected:
+    # - Grafana /api/health (json)
+    # - Gitea /api/v1/* (json)
+    # - WordPress /wp-json* (json)
+    p = (path or "").lower()
+    return p.startswith("/api/health") or p.startswith("/api/v1/") or p.startswith("/wp-json")
+
+
+def run_probes(
+    session: requests.Session,
+    base_url: str,
+    timeout: float,
+    verify_tls: bool,
+    headers: Dict[str, str],
+    max_probes: int,
+    home_sig: Tuple[int, str],
+) -> List[Evidence]:
+    evs: List[Evidence] = []
+    count = 0
+
+    ACCEPT_CONTENT_STATUS = {200, 201, 202, 203, 204, 301, 302, 303, 307, 308}
+    ACCEPT_AUTH_STATUS = {401, 403}
+    REDIR_STATUS = {301, 302, 303, 307, 308}
+
+    for cms, path, pts, patterns in PROBES:
+        if count >= max_probes:
+            break
+
+        probe_url = base_url.rstrip("/") + path
+        try:
+            # IMPORTANT: no redirects on probes
+            r = request_one(session, probe_url, timeout, verify_tls, headers, allow_redirects=False)
+            sc = r.status_code
+
+            # 404 => never score
+            if sc == 404:
+                count += 1
+                continue
+
+            ctype = (r.headers.get("Content-Type") or "").lower()
+
+            # JSON strict only on selected endpoints
+            if api_requires_json(path):
+                if ("application/json" not in ctype) and ("application/hal+json" not in ctype):
+                    count += 1
+                    continue
+
+            # Redirect scoring (but ignore generic /login redirects)
+            loc = (r.headers.get("Location") or "").strip()
+            if sc in REDIR_STATUS and loc:
+                if is_generic_login_redirect(loc):
+                    count += 1
+                    continue
+
+                if any(re.search(pat, loc, flags=re.IGNORECASE) for pat in patterns):
+                    evs.append(Evidence(cms, pts, "probe", path, "|".join(patterns), f"redirect={sc} -> {loc}"))
+                    count += 1
+                    continue
+
+            body = r.text or ""
+            blob = body[:200000]
+
+            # Anti catch-all
+            if looks_like_home(home_sig, body):
+                count += 1
+                continue
+
+            matched = any(re.search(pat, blob, flags=re.IGNORECASE) for pat in patterns)
+
+            # 200/3xx => requires content match
+            if sc in ACCEPT_CONTENT_STATUS and matched:
+                evs.append(Evidence(cms, pts, "probe", path, "|".join(patterns), f"status={sc}"))
+            # 401/403 => indicative for protected admin endpoints
+            elif sc in ACCEPT_AUTH_STATUS and pts >= 40:
+                evs.append(Evidence(cms, pts, "probe", path, "|".join(patterns), f"status={sc}"))
+
+            count += 1
+
+        except requests.exceptions.RequestException:
+            count += 1
+            continue
+
+    return evs
+
+
+def choose_best(scores: Dict[str, int]) -> Tuple[Optional[str], int, str]:
+    if not scores:
+        return None, 0, "NONE"
+    best_cms = max(scores, key=lambda k: scores[k])
+    best_score = scores[best_cms]
+    conf = confidence_from_score(best_score)
+    return best_cms, best_score, conf
+
+
+def detect(
+    url_in: str,
+    timeout: float,
+    verify_tls: bool,
+    user_agent: Optional[str],
+    try_both: bool,
+    do_probe: bool,
+    max_probes: int,
+) -> Result:
+    url_in = (url_in or "").strip()
+    url_norm = normalize_url(url_in)
+
+    if not url_norm:
+        return Result(
+            ok=False,
+            input_url=url_in,
+            final_url=None,
+            status=None,
+            best_cms=None,
+            best_score=0,
+            confidence="NONE",
+            scores={},
+            evidences=[],
+            error="empty url",
+        )
+
+    headers = {"User-Agent": user_agent or "mon-cms-detect-dev/0.3.3 (+HTB)"}
+
+    schemes_to_try = [url_norm]
+    if try_both:
+        if url_norm.startswith("http://"):
+            schemes_to_try = [url_norm, "https://" + url_norm[len("http://"):]]
+        elif url_norm.startswith("https://"):
+            schemes_to_try = [url_norm, "http://" + url_norm[len("https://"):]]
+
+    last_err = None
+
+    for u in schemes_to_try:
+        session = requests.Session()
+        try:
+            # Home: follow redirects
+            r = request_one(session, u, timeout, verify_tls, headers, allow_redirects=True)
+            base_final = r.url
+
+            home_body = (r.text or "")
+            home_sig = (len(home_body), home_body[:1200])
+
+            evidences: List[Evidence] = []
+            scores: Dict[str, int] = {}
+
+            fp = collect_fingerprints(r)
+            evidences.extend(fp)
+            add_scores(scores, fp)
+
+            if do_probe:
+                pv = run_probes(session, base_final, timeout, verify_tls, headers, max_probes, home_sig)
+                evidences.extend(pv)
+                add_scores(scores, pv)
+
+            best_cms, best_score, conf = choose_best(scores)
+
+            return Result(
+                ok=True,
+                input_url=url_in,
+                final_url=base_final,
+                status=r.status_code,
+                best_cms=best_cms,
+                best_score=best_score,
+                confidence=conf,
+                scores=dict(sorted(scores.items(), key=lambda x: x[1], reverse=True)),
+                evidences=evidences,
+                error=None,
+            )
+
+        except requests.exceptions.RequestException as e:
+            last_err = str(e)
+            continue
+
+    return Result(
+        ok=False,
+        input_url=url_in,
+        final_url=None,
+        status=None,
+        best_cms=None,
+        best_score=0,
+        confidence="NONE",
+        scores={},
+        evidences=[],
+        error=last_err or "request failed",
+    )
+
+
+def format_human(res: Result, color: C, show_evidence: bool, top: int) -> str:
+    if not res.ok:
+        return f"{color.RED}Error:{color.RESET} {res.error}"
+
+    url = res.final_url or res.input_url
+    status = res.status if res.status is not None else "?"
+    best = res.best_cms or "unknown"
+    conf = res.confidence
+
+    if conf == "HIGH":
+        conf_color = color.GREEN
+    elif conf == "MED":
+        conf_color = color.YELLOW
+    elif conf == "LOW":
+        conf_color = color.CYAN
+    else:
+        conf_color = color.RED
+
+    lines = []
+    lines.append(f"{color.BOLD}target{color.RESET} : {url}")
+    lines.append(f"{color.BOLD}status{color.RESET} : {status}")
+    lines.append(f"{color.BOLD}cms{color.RESET}    : {color.GREEN}{best}{color.RESET} [{conf_color}{conf}{color.RESET}]")
+
+    if res.scores:
+        top_items = list(res.scores.items())[:max(1, top)]
+        lines.append(f"{color.DIM}top{color.RESET}    : " + ", ".join([f"{k}={v}" for k, v in top_items]))
+
+    if show_evidence and res.evidences:
+        lines.append(f"{color.BOLD}evidence{color.RESET}:")
+        for ev in sorted(res.evidences, key=lambda e: e.points, reverse=True)[:120]:
+            lines.append(f"  - {ev.cms} +{ev.points} [{ev.kind}] {ev.where} :: {ev.detail}")
+
+    return "\n".join(lines)
+
+
+def format_kv(res: Result) -> str:
+    if not res.ok:
+        return f"OK=0 ERROR={json.dumps(res.error or 'error')}"
+    best = res.best_cms or "unknown"
+    final = res.final_url or res.input_url
+    status = res.status if res.status is not None else -1
+    top3 = ",".join([f"{k}:{v}" for k, v in list(res.scores.items())[:3]])
+    return f"OK=1 CMS={best} CONF={res.confidence} SCORE={res.best_score} STATUS={status} URL={final} TOP={json.dumps(top3)}"
+
+
+def format_json(res: Result) -> str:
+    payload = {
+        "ok": res.ok,
+        "input_url": res.input_url,
+        "final_url": res.final_url,
+        "status": res.status,
+        "best_cms": res.best_cms,
+        "best_score": res.best_score,
+        "confidence": res.confidence,
+        "scores": res.scores,
+        "evidences": [
+            {"cms": e.cms, "points": e.points, "kind": e.kind, "where": e.where, "needle": e.needle, "detail": e.detail}
+            for e in sorted(res.evidences, key=lambda e: e.points, reverse=True)
+        ],
+        "error": res.error,
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="Simple CMS detector (HTML fingerprints).")
-    p.add_argument("url", nargs="?", help="URL or host (ex: heal.htb or http://heal.htb)")
-    p.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds (default: 10)")
-    p.add_argument("-k", "--insecure", action="store_true", help="Disable TLS verification (https)")
+    p = argparse.ArgumentParser(description="HTB-ready detector: fingerprints + probes + scoring + scriptable output.")
+    p.add_argument("url", nargs="?", help="URL or host (ex: sea.htb or http://sea.htb)")
+    p.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout seconds (default: 10)")
+    p.add_argument("-k", "--insecure", action="store_true", help="Disable TLS verification")
     p.add_argument("--user-agent", default=None, help="Custom User-Agent header")
+    p.add_argument("--try-both", action="store_true", help="Try both http:// and https:// if first fails")
+
+    p.add_argument("--probe", action="store_true", help="Enable light probes (few common endpoints)")
+    p.add_argument("--max-probes", type=int, default=14, help="Max probes to try (default: 14)")
+
+    p.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
+    p.add_argument("--evidence", action="store_true", help="Show evidence lines (human output)")
+    p.add_argument("--top", type=int, default=5, help="Show top N scores in human output (default: 5)")
+
+    out = p.add_mutually_exclusive_group()
+    out.add_argument("--kv", action="store_true", help="Scriptable output: KEY=VALUE ...")
+    out.add_argument("--json", action="store_true", help="JSON output")
+    out.add_argument("-q", "--quiet", action="store_true", help="Quiet: only print detected tech (or 'unknown')")
+
     args = p.parse_args()
 
     url = args.url
     if not url:
-        # comportement proche de ton script original
-        url = input("Enter the URL of the website to detect the CMS for: ").strip()
+        url = input("Enter target (host or URL): ").strip()
 
-    url = normalize_url(url)
-    if not url:
-        print(f"{RED_BOLD}Error: empty URL{RESET}")
+    res = detect(
+        url_in=url,
+        timeout=args.timeout,
+        verify_tls=(not args.insecure),
+        user_agent=args.user_agent,
+        try_both=args.try_both,
+        do_probe=args.probe,
+        max_probes=max(0, args.max_probes),
+    )
+
+    if args.json:
+        print(format_json(res))
+    elif args.kv:
+        print(format_kv(res))
+    elif args.quiet:
+        print(res.best_cms if (res.ok and res.best_cms) else "unknown")
+    else:
+        color = C(use_color(args.no_color))
+        print(format_human(res, color, show_evidence=args.evidence, top=args.top))
+
+    if not res.ok:
         return 2
-
-    return detect_cms(url, timeout=args.timeout, verify_tls=(not args.insecure), user_agent=args.user_agent)
+    if res.best_cms and res.confidence in ("HIGH", "MED", "LOW"):
+        return 0
+    return 1
 
 
 if __name__ == "__main__":
