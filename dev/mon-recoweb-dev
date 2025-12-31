@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # NAME=mon-recoweb-dev
-# VERSION=3.0.0
+# VERSION=2.0.0
 # DESCRIPTION=Recon web KISS en 3 phases (dirb + ffuf dirs + ffuf files) avec exports JSON fiables et un résumé global agrégé (/répertoire/ vs /fichier). Pas d’auto-relance/benchmark : on alerte clairement en cas de 0 résultat ou d’incohérence dirb vs ffuf.
 # PRESENTATION_START
 # **mon-recoweb-dev — Recon web KISS (dirb + 2x ffuf)**
