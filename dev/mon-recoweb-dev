@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # NAME=mon-recoweb-dev
-# VERSION=2.0.0
+# VERSION=2.0.1
 # DESCRIPTION=Recon web KISS en 3 phases (dirb + ffuf dirs + ffuf files) avec exports JSON fiables et un résumé global agrégé (/répertoire/ vs /fichier). Pas d’auto-relance/benchmark : on alerte clairement en cas de 0 résultat ou d’incohérence dirb vs ffuf.
 # PRESENTATION_START
 # **mon-recoweb-dev — Recon web KISS (dirb + 2x ffuf)**
@@ -167,11 +167,21 @@ _build_base_url(){
 }
 
 _check_target_accessible(){
+  # Args: target base_url
   local t="$1"
+  local base_url="${2:-}"
+
   if _is_full_url "$t"; then
     curl -ksI --max-time 5 "$t" >/dev/null 2>&1
     return $?
   fi
+
+  # Tentative HTTP(s) d'abord (plus fiable que ICMP)
+  if [[ -n "$base_url" ]]; then
+    curl -ksI --max-time 5 "${base_url%/}/" >/dev/null 2>&1 && return 0
+  fi
+
+  # Fallback ping
   ping -c 1 -W 2 "$t" >/dev/null 2>&1
 }
 
@@ -289,26 +299,30 @@ _main(){
   _need_cmd ffuf
   _need_cmd curl
 
-  echo "[*] Test d'accessibilité de la cible"
-  if ! _check_target_accessible "$TARGET"; then
-    echo "[!] Cible inaccessible : $TARGET"
-    echo "[*] Arrêt du script"
-    exit 1
-  fi
-  echo "[+] Cible accessible"
-
   if $DO_DIRB; then
     _need_cmd dirb
     _need_file "$DIRB_WORDLIST"
   fi
-  if $DO_FFUF_DIRS || $DO_FFUF_FILES; then
+
+  # (FIX #1) Vérifier uniquement les wordlists nécessaires selon les phases activées
+  if $DO_FFUF_DIRS; then
     _need_file "$RAFT_DIRS"
+  fi
+  if $DO_FFUF_FILES; then
     _need_file "$RAFT_FILES"
   fi
 
   BASE="$(_norm_base "$BASE")"
   local BASE_URL
   BASE_URL="$(_build_base_url "$TARGET" "$SCHEME" "$BASE")"
+
+  echo "[*] Test d'accessibilité de la cible"
+  if ! _check_target_accessible "$TARGET" "$BASE_URL"; then
+    echo "[!] Cible inaccessible : $TARGET"
+    echo "[*] Arrêt du script"
+    exit 1
+  fi
+  echo "[+] Cible accessible"
 
   local SOFT404_SIZE=""
   SOFT404_SIZE="$(_detect_soft404_size "$BASE_URL")"
