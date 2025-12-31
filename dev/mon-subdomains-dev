@@ -367,9 +367,11 @@ else
     # Wildcard probable (hors 3xx stable)
     if _is_wildcard_likely "$BC1" "$BS1" "$BW1" "$BC2" "$BS2" "$BW2" "$BC3" "$BS3" "$BW3"; then
       warn "Wildcard vhost probable sur ${PORT} (${SCHEME}) → fuzzing sauté pour éviter les faux positifs."
+      info "Explication : la réponse semble identique quel que soit l’en-tête Host → vhost-fuzzing non discriminant sur ce port."
       {
         echo "  VHOST (0)"
         echo "    - (fuzzing sauté : wildcard probable)"
+        echo "    - (explication : réponse identique quel que soit Host → vhost-fuzzing non discriminant)"
         echo
       } >> "$DETAILS_TXT"
       continue
