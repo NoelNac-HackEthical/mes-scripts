@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # NAME=mon-recoweb-dev
-# VERSION=2.0.1
+# VERSION=2.0.2
 # DESCRIPTION=Recon web KISS en 3 phases (dirb + ffuf dirs + ffuf files) avec exports JSON fiables et un résumé global agrégé (/répertoire/ vs /fichier). Pas d’auto-relance/benchmark : on alerte clairement en cas de 0 résultat ou d’incohérence dirb vs ffuf.
 # PRESENTATION_START
 # **mon-recoweb-dev — Recon web KISS (dirb + 2x ffuf)**
+#
+# - Pré-check canonique HTB validant l’IP cible par interaction TCP (sans ICMP).
 #
 # Ce script enchaîne une énumération simple et efficace en 3 phases :
 # - dirb (wordlist courte) pour une première cartographie rapide
@@ -181,8 +183,10 @@ _check_target_accessible(){
     curl -ksI --max-time 5 "${base_url%/}/" >/dev/null 2>&1 && return 0
   fi
 
-  # Fallback ping
-  ping -c 1 -W 2 "$t" >/dev/null 2>&1
+  # Fallback TCP (pré-check canonique HTB) : évite les faux négatifs ICMP
+  nc -z -w2 "$t" 80  >/dev/null 2>&1 && return 0
+  nc -z -w2 "$t" 443 >/dev/null 2>&1 && return 0
+  return 1
 }
 
 _detect_soft404_size(){
