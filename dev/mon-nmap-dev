@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # NAME=mon-nmap-dev
-# VERSION=2.0.1
+# VERSION=2.0.2
 # DESCRIPTION=Automatise une série de scans Nmap (TCP complet, agressif, CMS, UDP) pour une cible CTF donnée.
 # PRESENTATION_START
 # mon-nmap — Scan Nmap “tout-en-un” pour CTF
 #
 # Ce script lance automatiquement plusieurs passes Nmap sur une cible (IP ou domaine) :
 #
+# - Pré-check canonique HTB validant l’IP cible par interaction TCP (sans ICMP).
 # - Scan TCP complet sur tous les ports (1-65535)
 # - Scan agressif ciblé sur les ports ouverts (détection de services + scripts vulnérabilités “legacy”)
 # - Scan orienté CMS (WordPress, Drupal, Joomla, etc.) sur les mêmes ports
@@ -137,7 +138,7 @@ run_scans() {
   else
     echo "Ports ouverts: $ports"
   fi
-  
+
   # ===== ÉTAPE 3: SCAN AGRESSIF CIBLÉ (CTF-perfect LEGACY) =====
   if [ -n "${ports:-}" ]; then
     echo "[2/4] Scan agressif sur les ports $ports..."
