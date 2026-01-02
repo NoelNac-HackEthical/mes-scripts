@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # NAME=mon-subdomains-dev
-# VERSION=2.0.1
+# VERSION=2.0.2
 # DESCRIPTION=Découverte de sous-domaines par vhost-fuzzing (ffuf) avec baselines robustes, anti-wildcard contrôlé, gestion des redirects 3xx (curl -L + ffuf -r), parsing fiable via JSON (jq), modes fast/medium/large et options /etc/hosts.
 # PRESENTATION_START
 # **mon-subdomains — Découverte de vhosts pour CTF / pentest**
@@ -9,7 +9,7 @@
 # il teste des noms Host.FQDN en interrogeant l'IP cible via ffuf et extrait les hôtes
 # valides (ex. api.mon-site.htb, admin.mon-site.htb).
 #
-# - Résolution IP du domaine + ping cohérence /etc/hosts
+# - Pré-check canonique HTB validant l’IP cible par interaction TCP (sans ICMP).
 # - Scan Nmap interne (-Pn -sV -p-) pour détecter les ports HTTP/HTTPS
 # - ffuf Host: FUZZ.domaine.htb sur chaque port web
 # - Sortie agrégée dans scans_subdomains/scan_vhosts.txt (bloc remplacé à chaque run)
@@ -281,19 +281,22 @@ else
   exit 1
 fi
 
-# ---------- Vérification ping ----------
-if ping -c1 -W1 "$TARGET_IP" >/dev/null 2>&1; then
-  ok "Ping OK : ${DOMAIN} (${TARGET_IP}) est joignable."
+# ---------- Pré-check canonique HTB : validation IP sans ICMP ----------
+if nc -z -w2 "$TARGET_IP" 80 2>/dev/null \
+   || nc -z -w2 "$TARGET_IP" 443 2>/dev/null; then
+  ok "Pré-check OK : ${DOMAIN} (${TARGET_IP}) répond via TCP (80/443)."
 else
-  warn "Ping échoué vers ${DOMAIN} (${TARGET_IP})."
-  warn "Il est possible que l'entrée /etc/hosts soit obsolète (reset de machine HTB, nouvelle IP...)."
+  warn "Aucune réponse TCP immédiate vers ${DOMAIN} (${TARGET_IP}) sur 80/443."
+  warn "Il est possible que l'IP soit incorrecte (reset HTB, nouvelle IP...)" 
+  warn "Vérifie /etc/hosts si tu utilises un nom de domaine."
   echo
   read -r -p "Continuer quand même le scan ? [o/N] " rep
   case "$rep" in
-    [oOyY]) info "Poursuite du scan malgré l'échec du ping." ;;
+    [oOyY]) info "Poursuite du scan malgré l'absence de réponse TCP (80/443)." ;;
     *) warn "Scan interrompu."; exit 1 ;;
   esac
 fi
+
 
 # ---------- Scan Nmap interne ----------
 NMAP_FILE="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_nmap.XXXXXX")"
