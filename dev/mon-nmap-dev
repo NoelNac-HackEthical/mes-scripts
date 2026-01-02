@@ -3,7 +3,7 @@
 # VERSION=2.0.1
 # DESCRIPTION=Automatise une série de scans Nmap (TCP complet, agressif, CMS, UDP) pour une cible CTF donnée.
 # PRESENTATION_START
-# mon-nouveau-nmap — Scan Nmap “tout-en-un” pour CTF
+# mon-nmap — Scan Nmap “tout-en-un” pour CTF
 #
 # Ce script lance automatiquement plusieurs passes Nmap sur une cible (IP ou domaine) :
 #
@@ -95,10 +95,27 @@ EXAMPLES
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Fonctions spécifiques à mon-nouveau-nmap
 run_scans() {
   local target="$1"
   local output_dir="scans_nmap"
+
+  # ---------- Pré-check canonique HTB : validation IP sans ICMP ----------
+  if nc -z -w2 "$target" 80 2>/dev/null \
+     || nc -z -w2 "$target" 443 2>/dev/null \
+     || nc -z -w2 "$target" 22 2>/dev/null; then
+    echo "[*] Pré-check IP OK : $target répond via TCP."
+  else
+    echo "[!] Aucune réponse TCP immédiate depuis $target."
+    echo "[!] L'IP de $target estpeut être incorrecte (reset HTB ?)."
+    echo "[!] Vérifie l'IP dans l'interface HTB"
+    echo "[!] et /etc/hosts si tu utilises un nom de domaine."
+    echo
+    read -r -p "Continuer quand même le scan ? [o/N] " rep
+    case "$rep" in
+      [oOyY]) echo "[*] Poursuite du scan malgré l'incertitude sur l'IP." ;;
+      *) echo "[!] Scan interrompu."; return 1 ;;
+    esac
+  fi
 
   # Création du répertoire de sortie
   mkdir -p "$output_dir"
@@ -115,8 +132,12 @@ run_scans() {
     | tr '\n' ',' \
     | sed 's/,$//')
 
-  echo "Ports ouverts: $ports"
-
+  if [[ -z "$ports" ]]; then
+    echo "[!] Aucun port TCP 'open' trouvé dans $output_dir/full_tcp_scan.txt"
+  else
+    echo "Ports ouverts: $ports"
+  fi
+  
   # ===== ÉTAPE 3: SCAN AGRESSIF CIBLÉ (CTF-perfect LEGACY) =====
   if [ -n "${ports:-}" ]; then
     echo "[2/4] Scan agressif sur les ports $ports..."
