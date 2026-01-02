@@ -322,8 +322,12 @@ _main(){
 
   echo "[*] Test d'accessibilité de la cible"
   if ! _check_target_accessible "$TARGET" "$BASE_URL"; then
-    echo "[!] Cible inaccessible : $TARGET"
-    echo "[*] Arrêt du script"
+    echo "[!] Aucune réponse TCP immédiate depuis $TARGET."
+    echo "[!] L'IP de $TARGET est peut être incorrecte (reset HTB ?)."
+    echo "[!] Vérifie l'IP dans l'interface HTB"
+    echo "[!] et /etc/hosts si tu utilises un nom de domaine."
+    echo
+    echo "[!] Arrêt du script."
     exit 1
   fi
   echo "[+] Cible accessible"

@@ -107,7 +107,7 @@ run_scans() {
     echo "[*] Pré-check IP OK : $target répond via TCP."
   else
     echo "[!] Aucune réponse TCP immédiate depuis $target."
-    echo "[!] L'IP de $target estpeut être incorrecte (reset HTB ?)."
+    echo "[!] L'IP de $target est peut être incorrecte (reset HTB ?)."
     echo "[!] Vérifie l'IP dans l'interface HTB"
     echo "[!] et /etc/hosts si tu utilises un nom de domaine."
     echo
