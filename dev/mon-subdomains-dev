@@ -286,8 +286,8 @@ if nc -z -w2 "$TARGET_IP" 80 2>/dev/null \
    || nc -z -w2 "$TARGET_IP" 443 2>/dev/null; then
   ok "Pré-check OK : ${DOMAIN} (${TARGET_IP}) répond via TCP (80/443)."
 else
-  warn "Aucune réponse TCP immédiate vers ${DOMAIN} (${TARGET_IP}) sur 80/443."
-  warn "Il est possible que l'IP soit incorrecte (reset HTB, nouvelle IP...)" 
+  warn "Aucune réponse TCP immédiate depuis ${DOMAIN}."
+  warn "L'IP de ${DOMAIN} est peut être incorrecte (reset HTB ?)."
   warn "Vérifie /etc/hosts si tu utilises un nom de domaine."
   echo
   read -r -p "Continuer quand même le scan ? [o/N] " rep
