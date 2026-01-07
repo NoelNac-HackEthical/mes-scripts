@@ -1,27 +1,39 @@
 #!/usr/bin/env bash
 # NAME=mon-recoweb-dev
-# VERSION=2.0.2
-# DESCRIPTION=Recon web KISS en 3 phases (dirb + ffuf dirs + ffuf files) avec exports JSON fiables et un résumé global agrégé (/répertoire/ vs /fichier). Pas d’auto-relance/benchmark : on alerte clairement en cas de 0 résultat ou d’incohérence dirb vs ffuf.
+# VERSION=2.0.0
+# DESCRIPTION=Reconnaissance web automatisée en 3 phases (dirb + ffuf directories + ffuf files) avec exports JSON ffuf fiables, détection soft-404 et résumé global agrégé (/répertoire/ vs /fichier).
 # PRESENTATION_START
-# **mon-recoweb-dev — Recon web KISS (dirb + 2x ffuf)**
+# **mon-recoweb-dev — Recon web en 3 phases (dirb + ffuf dirs + ffuf files)**
 #
-# - Pré-check canonique HTB validant l’IP cible par interaction TCP (sans ICMP).
+# Objectif :
+# - Obtenir une cartographie exploitable des répertoires et fichiers HTTP d’une cible CTF.
 #
-# Ce script enchaîne une énumération simple et efficace en 3 phases :
-# - dirb (wordlist courte) pour une première cartographie rapide
-# - ffuf avec `raft-medium-directories.txt` pour détecter un maximum de répertoires
-# - ffuf avec `raft-medium-files.txt` pour détecter un maximum de fichiers
+# Validation de l’accessibilité de la cible (sans ICMP) :
+# - Si la cible est une URL complète : test HTTP(S) HEAD via curl
+# - Si la cible est un host : test HTTP(S) sur la base URL via curl
+# - Fallback TCP via nc sur les ports 80 et 443
 #
-# KISS v3.0.0 :
-# - Suppression benchmark/rate auto/relance auto : exécution “pure” et prévisible
-# - Alertes claires si 0 résultat ffuf dirs/files
-# - Alerte si dirb a trouvé des fichiers mais ffuf files = 0 (responsabilité utilisateur en exploitation)
+# Phases d’énumération :
+# 1) dirb (wordlist courte) → cartographie initiale + extraction des hits
+# 2) ffuf directories (`raft-medium-directories.txt`)
+# 3) ffuf files (`raft-medium-files.txt`)
 #
-# Sorties :
-# - JSON ffuf (source de vérité)
-# - TXT “style console” (si `jq` disponible) + hits-only
+# Gestion des soft-404 :
+# - Détection automatique d’un HTTP 200 sur ressource inexistante
+# - Calcul de la taille de réponse et application de -fs <size> à ffuf
+#
+# Sorties (dans --outdir, défaut : scans_recoweb) :
 # - dirb.log + dirb_hits.txt
+# - ffuf_dirs.json + ffuf_dirs.log
+# - ffuf_files.json + ffuf_files.log
+# - ffuf_dirs.txt / ffuf_dirs_hits.txt (si `jq` est disponible)
+# - ffuf_files.txt / ffuf_files_hits.txt (si `jq` est disponible)
 # - RESULTS_SUMMARY.txt : résumé global agrégé (format strict /répertoire/ et /fichier)
+#
+# Alertes (si `jq` est disponible) :
+# - ffuf directories = 0 résultat
+# - ffuf files = 0 résultat
+# - dirb a trouvé des fichiers mais ffuf files = 0 (wildcard, soft-404 variable, filtres trop stricts)
 #
 # Usage typique :
 # `mon-recoweb-dev dog.htb`
@@ -30,7 +42,7 @@
 #____________________________________________________________________________
 #
 # Bref résumé :
-#   Recon web KISS en 3 phases (dirb + ffuf dirs + ffuf files) avec exports JSON fiables et un résumé global agrégé (/répertoire/ vs /fichier).
+#   Reconnaissance web automatisée en 3 phases avec dirb et ffuf, détection soft-404 et résumé global agrégé.
 #
 set -euo pipefail
 
