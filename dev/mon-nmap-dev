@@ -1,33 +1,51 @@
 #!/usr/bin/env bash
 # NAME=mon-nmap-dev
-# VERSION=2.0.2
+# VERSION=2.0.0
 # DESCRIPTION=Automatise une série de scans Nmap (TCP complet, agressif, CMS, UDP) pour une cible CTF donnée.
+#
 # PRESENTATION_START
-# mon-nmap — Scan Nmap “tout-en-un” pour CTF
+# mon-nmap-dev — Scan Nmap “tout-en-un” pour CTF / HTB
 #
-# Ce script lance automatiquement plusieurs passes Nmap sur une cible (IP ou domaine) :
+# Objectif
+#   Obtenir rapidement une base d’énumération solide (ports/services + pistes “legacy” + indices CMS),
+#   en générant des fichiers de résultats prêts à relire, dans un dossier unique.
 #
-# - Pré-check canonique HTB validant l’IP cible par interaction TCP (sans ICMP).
-# - Scan TCP complet sur tous les ports (1-65535)
-# - Scan agressif ciblé sur les ports ouverts (détection de services + scripts vulnérabilités “legacy”)
-# - Scan orienté CMS (WordPress, Drupal, Joomla, etc.) sur les mêmes ports
-# - Scan UDP rapide (top 20 ports)
+# Ce que fait le script (ordre réel d’exécution)
+#   0) Pré-check canonique HTB (validation IP sans ICMP, via TCP 80/443/22)
+#   1) Scan TCP complet (1–65535) avec extraction des ports “open”
+#   2) Scan agressif sur les ports ouverts (détection services + scripts vulnérabilités “legacy”)
+#   3) Scan orienté CMS sur les mêmes ports (WordPress/Drupal/Joomla + scripts HTTP utiles)
+#   4) Scan UDP (top 20 ports)
 #
-# Tous les résultats sont stockés dans le répertoire `scans_nmap/` :
-# - full_tcp_scan.txt
-# - aggressive_vuln_scan.txt
-# - cms_vuln_scan.txt
-# - udp_vuln_scan.txt
+# Sortie
+#   Les résultats sont stockés dans le répertoire : scans_nmap/
+#     - full_tcp_scan.txt
+#     - aggressive_vuln_scan.txt
+#     - cms_vuln_scan.txt
+#     - udp_vuln_scan.txt
 #
-# L’objectif est d’obtenir rapidement une base solide pour l’énumération et
-# l’analyse des pistes d’exploitation sur une machine CTF.
+# Options
+#   -h, --help       Affiche l’aide
+#   -V, --version    Affiche la version
+#   --debug          Active le mode debug (set -x)
+#
+# Dépendances
+#   - nmap
+#   - nc (netcat-openbsd ou équivalent)
+#
+# Remarques
+#   - Le pré-check peut demander confirmation si aucune réponse TCP immédiate n’est détectée
+#     (cas typique : IP HTB changée / /etc/hosts obsolète / ports filtrés).
+#   - Le scan agressif est écrit avec un en-tête rappelant la commande Nmap utilisée.
 # PRESENTATION_END
+#
 # HOMEPAGE=https://github.com/NoelNac-HackEthical/mes-scripts
 #____________________________________________________________________________
 #
 # Bref résumé :
 #   Automatise une série de scans Nmap (TCP complet, agressif, CMS, UDP) pour une cible CTF donnée.
 #
+
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
