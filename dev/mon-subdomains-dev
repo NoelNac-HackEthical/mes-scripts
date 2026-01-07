@@ -1,19 +1,34 @@
 #!/usr/bin/env bash
 # NAME=mon-subdomains-dev
 # VERSION=2.0.2
-# DESCRIPTION=Découverte de sous-domaines par vhost-fuzzing (ffuf) avec baselines robustes, anti-wildcard contrôlé, gestion des redirects 3xx (curl -L + ffuf -r), parsing fiable via JSON (jq), modes fast/medium/large et options /etc/hosts.
+# DESCRIPTION=Découverte de vhosts/sous-domaines par vhost-fuzzing (ffuf) avec baselines robustes, détection anti-wildcard contrôlée, gestion des redirects 3xx (curl -L + ffuf -r), parsing fiable via JSON (jq), modes fast/medium/large et options /etc/hosts.
 # PRESENTATION_START
 # **mon-subdomains — Découverte de vhosts pour CTF / pentest**
 #
-# Ce script automatise la recherche de sous-domaines en se basant sur du vhost-fuzzing :
-# il teste des noms Host.FQDN en interrogeant l'IP cible via ffuf et extrait les hôtes
-# valides (ex. api.mon-site.htb, admin.mon-site.htb).
+# Ce script automatise la recherche de vhosts (Host: FUZZ.domaine) en interrogeant
+# l'IP cible et en extrayant les hôtes valides (ex. api.domaine.htb, admin.domaine.htb).
 #
-# - Pré-check canonique HTB validant l’IP cible par interaction TCP (sans ICMP).
-# - Scan Nmap interne (-Pn -sV -p-) pour détecter les ports HTTP/HTTPS
-# - ffuf Host: FUZZ.domaine.htb sur chaque port web
-# - Sortie agrégée dans scans_subdomains/scan_vhosts.txt (bloc remplacé à chaque run)
+# Fonctionnement (résumé fidèle au code) :
+# - Résout l'IP de la cible (getent, puis fallback dig).
+# - Pré-check canonique HTB : validation TCP rapide sur 80/443 (sans ICMP).
+# - Scan Nmap interne (-Pn -sV -p-) pour détecter les ports HTTP/HTTPS exposés.
+# - Pour chaque port web :
+#   - Calcule 3 baselines (code/size/words) avec un Host aléatoire.
+#   - Si baseline 3xx stable : baselines après redirection (curl -L) + fuzzing avec ffuf -r.
+#   - Si wildcard probable : fuzzing sauté pour éviter les faux positifs.
+#   - Sinon : ffuf avec filtres -fs/-fw (et -ac si baseline instable), sortie JSON puis parsing jq.
+# - Agrège les vhosts uniques et écrit un bloc remplacé à chaque run dans :
+#   scans_subdomains/scan_vhosts.txt
 #
+# Wordlists :
+# - Master par défaut : /usr/share/wordlists/htb-dns-vh-5000.txt
+# - Modes : fast (1000), medium (2000), large (5000)
+# - --custom FILE : utilise une wordlist personnalisée.
+# - Si la master est absente : installe/régénère via ton script make_htb-wordlist.
+#
+# Options utiles :
+# - --save-hosts / --dry-run-hosts : ajout contrôlé des vhosts trouvés dans /etc/hosts.
+# - --debug : affiche la commande ffuf et conserve les fichiers temporaires /tmp.
 # PRESENTATION_END
 
 set -euo pipefail
@@ -40,6 +55,11 @@ GREEN="\e[32m"; BLUE="\e[34m"; YELLOW="\e[33m"; RESET="\e[0m"
 ok(){ echo -e "${GREEN}[✓]${RESET} $*"; }
 info(){ echo -e "${BLUE}[*]${RESET} $*"; }
 warn(){ echo -e "${YELLOW}[!]${RESET} $*"; }
+
+# --- Wordlist install hint ---
+_hint_wordlist_install() {
+  warn "Astuce : installe ou régénère les wordlists HTB via le script make_htb-wordlist."
+}
 
 usage(){
   cat <<'USAGE'
@@ -252,11 +272,19 @@ ok "Fichier de résultats : ${SCAN_FILE}"
 # ---------- Wordlist effective ----------
 WL_EFFECTIVE=""
 if [[ "$MODE" == "custom" ]]; then
-  [[ -f "$WL" ]] || { warn "Wordlist custom introuvable : $WL"; exit 1; }
+  [[ -f "$WL" ]] || {
+    warn "Wordlist custom introuvable : $WL"
+    _hint_wordlist_install
+    exit 1
+  }
   WL_EFFECTIVE="$WL"
   ok "Mode : CUSTOM (wordlist: $WL_EFFECTIVE)"
 else
-  [[ -f "$MASTER" ]] || { warn "Wordlist master introuvable : $MASTER"; exit 1; }
+  [[ -f "$MASTER" ]] || {
+    warn "Wordlist master introuvable : $MASTER"
+    _hint_wordlist_install
+    exit 1
+  }
   case "$MODE" in
     fast)   N=1000;;
     medium) N=2000;;
