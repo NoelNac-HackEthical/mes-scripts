@@ -3,7 +3,7 @@
 # VERSION=2.0.0
 # DESCRIPTION=Reconnaissance web automatisée en 3 phases (dirb + ffuf directories + ffuf files) avec exports JSON ffuf fiables, détection soft-404 et résumé global agrégé (/répertoire/ vs /fichier).
 # PRESENTATION_START
-# **mon-recoweb-dev — Recon web en 3 phases (dirb + ffuf dirs + ffuf files)**
+# **mon-recoweb — Recon web en 3 phases (dirb + ffuf dirs + ffuf files)**
 #
 # Objectif :
 # - Obtenir une cartographie exploitable des répertoires et fichiers HTTP d’une cible CTF.
