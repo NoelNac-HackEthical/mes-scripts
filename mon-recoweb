@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# NAME=mon-recoweb
-# VERSION=2.0.0
-# DESCRIPTION=Reconnaissance web automatisée en 3 phases (dirb + ffuf directories + ffuf files) avec exports JSON ffuf fiables, détection soft-404 et résumé global agrégé (/répertoire/ vs /fichier).
+# NAME=mon-recoweb-dev
+# VERSION=2.0.1
+# DESCRIPTION=Reconnaissance web automatisée en 3 phases (dirb + ffuf directories + ffuf files) avec exports JSON ffuf fiables, détection soft-404 et résumé global agrégé (/répertoire/ vs /fichier). Supporte aussi <host>/<path>/ (scan ciblé d’un répertoire) et --ext pour tester des extensions en phase files.
 # PRESENTATION_START
-# **mon-recoweb — Recon web en 3 phases (dirb + ffuf dirs + ffuf files)**
+# **mon-recoweb-dev — Recon web en 3 phases (dirb + ffuf dirs + ffuf files)**
 #
 # Objectif :
 # - Obtenir une cartographie exploitable des répertoires et fichiers HTTP d’une cible CTF.
@@ -15,8 +15,18 @@
 #
 # Phases d’énumération :
 # 1) dirb (wordlist courte) → cartographie initiale + extraction des hits
-# 2) ffuf directories (`raft-medium-directories.txt`)
-# 3) ffuf files (`raft-medium-files.txt`)
+# 2) ffuf directories (raft-medium-directories)
+# 3) ffuf files (raft-medium-files) + option --ext
+#
+# Scan ciblé d’un répertoire :
+# - La cible peut inclure un chemin : <host>/<path>/ (ex: cible.htb/cgi-bin/)
+# - Le script ne scanne alors QUE ce répertoire (BASE=/path)
+# - Les sorties sont écrites dans scans_recoweb/<dernier-segment>/ (ex: scans_recoweb/cgi-bin/)
+#
+# Wordlist "files" par défaut en scan de répertoire :
+# - Si BASE != "/" ET que l’utilisateur n’a pas fourni --raft-files,
+#   alors la phase ffuf files utilise par défaut : /usr/share/wordlists/dirb/common.txt
+#   (utile pour les répertoires contenant des scripts / endpoints legacy).
 #
 # Gestion des soft-404 :
 # - Détection automatique d’un HTTP 200 sur ressource inexistante
@@ -36,7 +46,8 @@
 # - dirb a trouvé des fichiers mais ffuf files = 0 (wildcard, soft-404 variable, filtres trop stricts)
 #
 # Usage typique :
-# `mon-recoweb-dev dog.htb`
+# - Scan de base : ${_self_base} cible.htb
+# - Scan ciblé répertoire + extensions : ${_self_base} cible.htb/chemin/ --ext ".sh,.cgi,.pl"
 # PRESENTATION_END
 # HOMEPAGE=https://github.com/NoelNac-HackEthical/mes-scripts
 #____________________________________________________________________________
@@ -74,11 +85,13 @@ Description:
 
 Target:
   <target>                  Host (ex: dog.htb) OU URL complète (ex: http://10.10.10.10)
+                            Supporte aussi host/path (ex: cible.htb/cgi-bin/)
   -t, --target <target>     (Optionnel) même chose, pour compatibilité
 
 Options:
   -s, --scheme <http|https> Scheme si target est un host (défaut: http)
   --base <path>             Base path prefix (défaut: /) ex: /app => http://t/app/FUZZ
+  --ext <list>              Extensions pour ffuf files (ex: ".sh,.cgi,.pl" ou "sh,cgi,pl")
   -T, --threads <n>         Threads ffuf (défaut: 30)
   --rate <n>                Limite le débit ffuf (req/s). Ex: 40, 100, 200 (défaut: none)
   --timeout <sec>           Timeout ffuf en secondes (défaut: 10)
@@ -86,6 +99,8 @@ Options:
   --dirb-wordlist <path>    Wordlist dirb (défaut: /usr/share/wordlists/dirb/common.txt)
   --raft-dirs <path>        Wordlist ffuf dirs (défaut: /usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt)
   --raft-files <path>       Wordlist ffuf files (défaut: /usr/share/seclists/Discovery/Web-Content/raft-medium-files.txt)
+                            Note: en scan ciblé de répertoire (BASE != /) et si --raft-files n'est pas fourni,
+                                  la wordlist par défaut bascule automatiquement vers /usr/share/wordlists/dirb/common.txt
   -o, --outdir <dir>        Dossier de sortie (défaut: scans_recoweb)
   --no-dirb                 Skip dirb
   --no-ffuf-dirs            Skip ffuf directories
@@ -111,9 +126,13 @@ RATE=""          # limite débit ffuf (req/s). Vide = none
 TIMEOUT=10
 FFUF_FC="404"
 
+EXT_RAW=""
+FFUF_EXTS=""     # format ffuf: ".sh,.cgi,.pl"
+
 DIRB_WORDLIST="/usr/share/wordlists/dirb/common.txt"
 RAFT_DIRS="/usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt"
 RAFT_FILES="/usr/share/seclists/Discovery/Web-Content/raft-medium-files.txt"
+RAFT_FILES_EXPLICIT=false
 
 OUTDIR="scans_recoweb"
 DO_DIRB=true
@@ -129,13 +148,18 @@ while [[ $# -gt 0 ]]; do
     -t|--target) TARGET="${2:-}"; shift 2 ;;
     -s|--scheme) SCHEME="${2:-}"; shift 2 ;;
     --base) BASE="${2:-}"; shift 2 ;;
+    --ext) EXT_RAW="${2:-}"; shift 2 ;;
     -T|--threads) THREADS="${2:-}"; shift 2 ;;
     --rate) RATE="${2:-}"; shift 2 ;;
     --timeout) TIMEOUT="${2:-}"; shift 2 ;;
     --fc) FFUF_FC="${2:-}"; shift 2 ;;
     --dirb-wordlist) DIRB_WORDLIST="${2:-}"; shift 2 ;;
     --raft-dirs) RAFT_DIRS="${2:-}"; shift 2 ;;
-    --raft-files) RAFT_FILES="${2:-}"; shift 2 ;;
+    --raft-files)
+      RAFT_FILES="${2:-}"
+      RAFT_FILES_EXPLICIT=true
+      shift 2
+      ;;
     -o|--outdir) OUTDIR="${2:-}"; shift 2 ;;
     --no-dirb) DO_DIRB=false; shift ;;
     --no-ffuf-dirs) DO_FFUF_DIRS=false; shift ;;
@@ -157,6 +181,25 @@ while [[ $# -gt 0 ]]; do
 done
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Normalisation --ext => format ffuf -e ".sh,.cgi,.pl"
+if [[ -n "${EXT_RAW:-}" ]]; then
+  EXT_RAW="${EXT_RAW// /}"
+  IFS=',' read -r -a _ext_arr <<< "$EXT_RAW"
+  _out=()
+  for e in "${_ext_arr[@]}"; do
+    [[ -n "$e" ]] || continue
+    [[ "$e" == .* ]] || e=".$e"
+    _out+=("$e")
+  done
+  FFUF_EXTS="$(IFS=,; echo "${_out[*]}")"
+  if [[ -z "$FFUF_EXTS" ]]; then
+    echo "ERROR: --ext fourni mais aucune extension valide après normalisation." >&2
+    exit 2
+  fi
+fi
+# ---------------------------------------------------------------------------
+
 _need_cmd(){ command -v "$1" >/dev/null 2>&1 || { echo "ERROR: missing command: $1" >&2; exit 127; }; }
 _need_file(){ [ -f "$1" ] || { echo "ERROR: missing file: $1" >&2; exit 1; }; }
 
@@ -169,6 +212,27 @@ _norm_base(){
 }
 
 _is_full_url(){ [[ "$1" =~ ^https?:// ]]; }
+
+# Support <host>/<path>/ (sans scheme) : split en host + base
+_split_host_and_path(){
+  # imprime: "<host_or_url>\t<base_or_empty>"
+  local t="$1"
+
+  if _is_full_url "$t"; then
+    printf "%s\t%s\n" "$t" ""
+    return 0
+  fi
+
+  if [[ "$t" == */* ]]; then
+    local host="${t%%/*}"
+    local path="/${t#*/}"
+    path="${path%/}"
+    printf "%s\t%s\n" "$host" "$path"
+    return 0
+  fi
+
+  printf "%s\t%s\n" "$t" ""
+}
 
 _build_base_url(){
   local t="$1" s="$2" b="$3"
@@ -288,6 +352,15 @@ _warn_dirb_files_but_ffuf_files_zero(){
   fi
 }
 
+_outdir_suffix_from_base(){
+  local b="$1"
+  b="$(_norm_base "$b")"
+  [[ "$b" == "/" ]] && { echo ""; return 0; }
+  local s="${b##*/}"
+  s="${s//[^A-Za-z0-9._-]/_}"
+  echo "$s"
+}
+
 # --- Couleurs (si stdout est un terminal) ---
 if [[ -t 1 ]]; then
   C_ALERT=$'\e[1;31m'   # rouge vif
@@ -320,7 +393,26 @@ _main(){
     _need_file "$DIRB_WORDLIST"
   fi
 
-  # (FIX #1) Vérifier uniquement les wordlists nécessaires selon les phases activées
+  # Support "host/path" (ex: cible.htb/dir/)
+  local split host base_from_target
+  split="$(_split_host_and_path "$TARGET")"
+  host="$(printf '%s' "$split" | cut -f1)"
+  base_from_target="$(printf '%s' "$split" | cut -f2)"
+
+  local TARGET_HOST="$host"
+
+  # Si le target contient un path (host/path), il override BASE
+  if [[ -n "$base_from_target" ]]; then
+    BASE="$base_from_target"
+  fi
+  BASE="$(_norm_base "$BASE")"
+
+  # Si scan ciblé d’un répertoire et --raft-files non fourni, bascule par défaut vers dirb/common.txt
+  if [[ "$BASE" != "/" && "$RAFT_FILES_EXPLICIT" = false ]]; then
+    RAFT_FILES="/usr/share/wordlists/dirb/common.txt"
+  fi
+
+  # Vérification des wordlists nécessaires selon les phases activées (après éventuel override RAFT_FILES)
   if $DO_FFUF_DIRS; then
     _need_file "$RAFT_DIRS"
   fi
@@ -328,14 +420,19 @@ _main(){
     _need_file "$RAFT_FILES"
   fi
 
-  BASE="$(_norm_base "$BASE")"
   local BASE_URL
-  BASE_URL="$(_build_base_url "$TARGET" "$SCHEME" "$BASE")"
+  if _is_full_url "$TARGET"; then
+    BASE_URL="$(_build_base_url "$TARGET" "$SCHEME" "$BASE")"
+  else
+    BASE_URL="$(_build_base_url "$TARGET_HOST" "$SCHEME" "$BASE")"
+  fi
 
   echo "[*] Test d'accessibilité de la cible"
-  if ! _check_target_accessible "$TARGET" "$BASE_URL"; then
-    echo "[!] Aucune réponse TCP immédiate depuis $TARGET."
-    echo "[!] L'IP de $TARGET est peut être incorrecte (reset HTB ?)."
+  local ACCESS_T="$TARGET"
+  _is_full_url "$TARGET" || ACCESS_T="$TARGET_HOST"
+  if ! _check_target_accessible "$ACCESS_T" "$BASE_URL"; then
+    echo "[!] Aucune réponse TCP immédiate depuis $ACCESS_T."
+    echo "[!] L'IP de $ACCESS_T est peut être incorrecte (reset HTB ?)."
     echo "[!] Vérifie l'IP dans l'interface HTB"
     echo "[!] et /etc/hosts si tu utilises un nom de domaine."
     echo
@@ -352,13 +449,24 @@ _main(){
     echo "[!] Conseil : en phase exploitation, reteste les fichiers importants (robots.txt, sitemap.xml, etc.) au curl."
   fi
 
+  # OUTDIR suffix selon BASE (ex: /cgi-bin => scans_recoweb/cgi-bin)
+  local OUT_SUFFIX
+  OUT_SUFFIX="$(_outdir_suffix_from_base "$BASE")"
+  if [[ -n "$OUT_SUFFIX" ]]; then
+    OUTDIR="${OUTDIR%/}/$OUT_SUFFIX"
+  fi
   mkdir -p "$OUTDIR"
 
   local RATE_EFFECTIVE="$RATE"
 
   echo "[*] target : $TARGET"
+  echo "[*] host   : $TARGET_HOST"
   echo "[*] base   : $BASE_URL"
   echo "[*] outdir : $OUTDIR"
+  echo "[*] files wordlist : $RAFT_FILES"
+  if [[ -n "$FFUF_EXTS" ]]; then
+    echo "[*] ext    : $FFUF_EXTS"
+  fi
   if [[ -n "$RATE_EFFECTIVE" ]]; then
     echo "[*] ffuf   : threads=$THREADS rate=$RATE_EFFECTIVE timeout=${TIMEOUT}s fc=$FFUF_FC"
   else
@@ -438,6 +546,7 @@ _main(){
       -timeout "$TIMEOUT" \
       -fc "$FFUF_FC" \
       ${SOFT404_SIZE:+-fs "$SOFT404_SIZE"} \
+      ${FFUF_EXTS:+-e "$FFUF_EXTS"} \
       -of json -o "$JSON_FILES" \
       2>&1 | tee "$LOG_FFUF_FILES"
 
@@ -455,10 +564,21 @@ _main(){
     : > "$HITS_FILES"
   fi
 
+  # Ligne d'en-tête du résumé (contexte du scan)
+  local SUMMARY_TARGET
+  if [[ "$BASE" == "/" ]]; then
+    SUMMARY_TARGET="${TARGET_HOST}/"
+  else
+    SUMMARY_TARGET="${TARGET_HOST}${BASE}/"
+  fi
+
+
   # Résumé global
-  {
-    echo "=== Résultat global (agrégé) ==="
-    echo
+    {
+      echo "===== Résultats mon-recoweb (${SUMMARY_TARGET}) ====="
+      echo
+      echo "=== Résultat global (agrégé) ==="
+      echo
 
     {
       if [[ -s "$HITS_DIRB" ]]; then
