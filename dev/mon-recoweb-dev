@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # NAME=mon-recoweb-dev
-# VERSION=2.0.1
-# DESCRIPTION=Reconnaissance web automatisée en 3 phases (dirb + ffuf directories + ffuf files) avec exports JSON ffuf fiables, détection soft-404 et résumé global agrégé (/répertoire/ vs /fichier). Supporte aussi <host>/<path>/ (scan ciblé d’un répertoire) et --ext pour tester des extensions en phase files.
+# VERSION=2.0.2
+# DESCRIPTION=Reconnaissance web automatisée en 3 phases (dirb + ffuf directories + ffuf files) avec exports JSON ffuf fiables, détection soft-404 et résumé global agrégé. Supporte aussi <host>/<path>/ (scan ciblé d’un répertoire) et --ext pour tester des extensions en phase files. Le résumé affiche des URLs complètes avec (CODE:xxx|SIZE:yyy) quand disponible.
 # PRESENTATION_START
 # **mon-recoweb-dev — Recon web en 3 phases (dirb + ffuf dirs + ffuf files)**
 #
@@ -38,7 +38,7 @@
 # - ffuf_files.json + ffuf_files.log
 # - ffuf_dirs.txt / ffuf_dirs_hits.txt (si `jq` est disponible)
 # - ffuf_files.txt / ffuf_files_hits.txt (si `jq` est disponible)
-# - RESULTS_SUMMARY.txt : résumé global agrégé (format strict /répertoire/ et /fichier)
+# - RESULTS_SUMMARY.txt : résumé global (URLs complètes + CODE/SIZE quand possible)
 #
 # Alertes (si `jq` est disponible) :
 # - ffuf directories = 0 résultat
@@ -53,7 +53,7 @@
 #____________________________________________________________________________
 #
 # Bref résumé :
-#   Reconnaissance web automatisée en 3 phases avec dirb et ffuf, détection soft-404 et résumé global agrégé.
+#   Reconnaissance web automatisée en 3 phases avec dirb et ffuf, détection soft-404 et résumé global.
 #
 set -euo pipefail
 
@@ -81,7 +81,7 @@ Usage: ${_self_base} [OPTIONS] <target>
        ${_self_base} [OPTIONS] -t <target>
 
 Description:
-  Recon web KISS en 3 phases (dirb + ffuf dirs + ffuf files), avec exports JSON fiables et résumé global agrégé.
+  Recon web KISS en 3 phases (dirb + ffuf dirs + ffuf files), avec exports JSON fiables et résumé global.
 
 Target:
   <target>                  Host (ex: dog.htb) OU URL complète (ex: http://10.10.10.10)
@@ -361,6 +361,28 @@ _outdir_suffix_from_base(){
   echo "$s"
 }
 
+# Variables attendues par write_results_header() (définies dans _main juste avant l'écriture du résumé)
+# NAME VERSION CMDLINE NOW TARGET_DISPLAY FFUF_DIRS_WORDLIST FFUF_FILES_WORDLIST
+
+write_results_header() {
+  local summary_file="$1"
+
+  {
+    echo "===== Résultats ${NAME} (${TARGET_DISPLAY}) ====="
+    echo "Script        : ${NAME} v${VERSION}"
+    echo "Commande      : ${CMDLINE}"
+    echo "Date          : ${NOW}"
+    echo
+    echo "Wordlists :"
+    echo "- dirb        : ${DIRB_WORDLIST}"
+    echo "- ffuf (dirs) : ${FFUF_DIRS_WORDLIST}"
+    echo "- ffuf (files): ${FFUF_FILES_WORDLIST}"
+    echo
+    echo "-------------------------------------------------------"
+    echo
+  } > "${summary_file}"
+}
+
 # --- Couleurs (si stdout est un terminal) ---
 if [[ -t 1 ]]; then
   C_ALERT=$'\e[1;31m'   # rouge vif
@@ -572,27 +594,70 @@ _main(){
     SUMMARY_TARGET="${TARGET_HOST}${BASE}/"
   fi
 
+  # -------------------------------------------------------------------------
+  # Entête RESULTS_SUMMARY (version + commande + wordlists) — écrit UNE seule fois
+  # IMPORTANT: pas de "local" ici, car write_results_header() lit des variables globales
 
-  # Résumé global
+  NOW="$(date '+%Y-%m-%d %H:%M:%S')"
+
+  # Commande exacte (quoting fiable)
+  CMDLINE="$(printf '%q ' "$0" "$@")"
+  CMDLINE="${CMDLINE% }"
+
+  # NAME / VERSION depuis l'entête du fichier (fallbacks)
+  NAME="$(awk -F= '/^# *NAME *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$_self_path" 2>/dev/null || true)"
+  NAME="${NAME:-${_self_base}}"
+  VERSION="$(awk -F= '/^# *VERSION *=/ { gsub(/\r$/,"",$2); print $2; exit }' "$_self_path" 2>/dev/null || true)"
+  VERSION="${VERSION:-0.0.0}"
+
+  TARGET_DISPLAY="${SUMMARY_TARGET}"
+
+  FFUF_DIRS_WORDLIST="${RAFT_DIRS}"
+  FFUF_FILES_WORDLIST="${RAFT_FILES}"
+
+  write_results_header "$SUMMARY_FILE"
+  # -------------------------------------------------------------------------
+
+  # Résumé global (APPEND : ne pas écraser l'entête)
+  {
+    echo "=== Résultat global (agrégé) ==="
+    echo
+
     {
-      echo "===== Résultats mon-recoweb (${SUMMARY_TARGET}) ====="
-      echo
-      echo "=== Résultat global (agrégé) ==="
-      echo
-
-    {
-      if [[ -s "$HITS_DIRB" ]]; then
-        sed -E 's#^https?://[^/]+##' "$HITS_DIRB" \
-        | awk 'NF==0{next} $0!~/^\//{$0="/"$0}{print $0}'
+      # --- DIRB : relire le log pour récupérer CODE/SIZE quand présent ---
+      if [[ -s "$LOG_DIRB" ]]; then
+        tr -d '\r' < "$LOG_DIRB" \
+        | sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' \
+        | awk '
+            match($0, /\+ (https?:\/\/[^ ]+) \(CODE:([0-9]+)\|SIZE:([0-9]+)\)/, m) {
+              print m[1] " (CODE:" m[2] "|SIZE:" m[3] ")"
+              next
+            }
+            match($0, /==> DIRECTORY: (https?:\/\/[^ ]+)/, m) {
+              # Dirb ne donne pas CODE/SIZE ici → on garde l’URL brute
+              print m[1]
+              next
+            }
+          ' \
+        | sort -u
       fi
 
-      if [[ -s "$HITS_DIRS" ]]; then
-        awk 'NF==0{next}{p=$1;if(p!~/^\//)p="/"p;if(p!~/\/$/)p=p"/";print p}' "$HITS_DIRS"
+      # --- FFUF DIRECTORIES : JSON → URL + CODE/SIZE ---
+      if [[ -s "$JSON_DIRS" ]] && command -v jq >/dev/null 2>&1; then
+        jq -r --arg base "${BASE_URL%/}/" '
+          .results[]
+          | "\($base)\(.input.FUZZ)/ (CODE:\(.status)|SIZE:\(.length))"
+        ' "$JSON_DIRS" 2>/dev/null || true
       fi
 
-      if [[ -s "$HITS_FILES" ]]; then
-        awk 'NF==0{next}{p=$1;if(p!~/^\//)p="/"p;sub(/\/$/,"",p);print p}' "$HITS_FILES"
+      # --- FFUF FILES : JSON → URL + CODE/SIZE ---
+      if [[ -s "$JSON_FILES" ]] && command -v jq >/dev/null 2>&1; then
+        jq -r --arg base "${BASE_URL%/}/" '
+          .results[]
+          | "\($base)\(.input.FUZZ) (CODE:\(.status)|SIZE:\(.length))"
+        ' "$JSON_FILES" 2>/dev/null || true
       fi
+
     } | sed '/^$/d' | sort -u
 
     echo
@@ -600,9 +665,16 @@ _main(){
     echo
 
     echo "[DIRB]"
-    if [[ -s "$HITS_DIRB" ]]; then
-      sed -E 's#^https?://[^/]+##' "$HITS_DIRB" \
-      | awk 'NF==0{next} $0!~/^\//{$0="/"$0}{print $0}' \
+    if [[ -s "$LOG_DIRB" ]]; then
+      tr -d '\r' < "$LOG_DIRB" \
+      | sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' \
+      | awk '
+          match($0, /\+ (https?:\/\/[^ ]+) \(CODE:([0-9]+)\|SIZE:([0-9]+)\)/, m) {
+            print m[1] " (CODE:" m[2] "|SIZE:" m[3] ")"
+            next
+          }
+          match($0, /==> DIRECTORY: (https?:\/\/[^ ]+)/, m) { print m[1]; next }
+        ' \
       | sort -u
     else
       echo "(aucun résultat)"
@@ -610,21 +682,27 @@ _main(){
 
     echo
     echo "[FFUF — DIRECTORIES]"
-    if [[ -s "$HITS_DIRS" ]]; then
-      awk 'NF==0{next}{p=$1;if(p!~/^\//)p="/"p;if(p!~/\/$/)p=p"/";print p}' "$HITS_DIRS" | sort -u
+    if [[ -s "$JSON_DIRS" ]] && command -v jq >/dev/null 2>&1; then
+      jq -r --arg base "${BASE_URL%/}/" '
+        .results[]
+        | "\($base)\(.input.FUZZ)/ (CODE:\(.status)|SIZE:\(.length))"
+      ' "$JSON_DIRS" 2>/dev/null | sort -u || true
     else
       echo "(aucun résultat)"
     fi
 
     echo
     echo "[FFUF — FILES]"
-    if [[ -s "$HITS_FILES" ]]; then
-      awk 'NF==0{next}{p=$1;if(p!~/^\//)p="/"p;sub(/\/$/,"",p);print p}' "$HITS_FILES" | sort -u
+    if [[ -s "$JSON_FILES" ]] && command -v jq >/dev/null 2>&1; then
+      jq -r --arg base "${BASE_URL%/}/" '
+        .results[]
+        | "\($base)\(.input.FUZZ) (CODE:\(.status)|SIZE:\(.length))"
+      ' "$JSON_FILES" 2>/dev/null | sort -u || true
     else
       echo "(aucun résultat)"
     fi
 
-  } > "$SUMMARY_FILE"
+  } >> "$SUMMARY_FILE"
 
   echo
   echo "[+] Outputs:"
