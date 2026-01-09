@@ -163,7 +163,7 @@ run_scans() {
 
     # Variante LEGACY : scripts utiles en CTF + vieux SSL/TLS
     local vuln_scripts
-    vuln_scripts="http-vuln-* and not http-vuln-cve2017-1001000,http-shellshock,http-sql-injection,ssl-cert,ssl-heartbleed,sslv2,ssl-dh-params"
+    vuln_scripts="(http-vuln-* or http-shellshock or ssl-heartbleed) and not (http-vuln-cve2017-1001000 or http-sql-injection or ssl-cert or sslv2 or ssl-dh-params)"
 
     # Commande nmap (pour rappel dans l'en-tête)
     local scan_cmd
