@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # NAME=mon-recoweb-dev
-# VERSION=2.0.2
+# VERSION=2.1.0
 # DESCRIPTION=Reconnaissance web automatisée en 3 phases (dirb + ffuf directories + ffuf files) avec exports JSON ffuf fiables, détection soft-404 et résumé global agrégé. Supporte aussi <host>/<path>/ (scan ciblé d’un répertoire) et --ext pour tester des extensions en phase files. Le résumé affiche des URLs complètes avec (CODE:xxx|SIZE:yyy) quand disponible.
 # PRESENTATION_START
 # **mon-recoweb-dev — Recon web en 3 phases (dirb + ffuf dirs + ffuf files)**
@@ -362,23 +362,45 @@ _outdir_suffix_from_base(){
 }
 
 # Variables attendues par write_results_header() (définies dans _main juste avant l'écriture du résumé)
-# NAME VERSION CMDLINE NOW TARGET_DISPLAY FFUF_DIRS_WORDLIST FFUF_FILES_WORDLIST
+# NAME VERSION CMDLINE NOW TARGET_HOST_HDR TARGET_SCOPE_HDR DIRB_CMD FFUF_DIRS_CMD FFUF_FILES_CMD
 
 write_results_header() {
   local summary_file="$1"
 
   {
-    echo "===== Résultats ${NAME} (${TARGET_DISPLAY}) ====="
-    echo "Script        : ${NAME} v${VERSION}"
-    echo "Commande      : ${CMDLINE}"
-    echo "Date          : ${NOW}"
+    echo "===== ${NAME} — RÉSUMÉ DES RÉSULTATS ====="
+    echo "Commande principale : ${CMDLINE}"
+    echo "Script              : ${NAME} v${VERSION}"
     echo
-    echo "Wordlists :"
-    echo "- dirb        : ${DIRB_WORDLIST}"
-    echo "- ffuf (dirs) : ${FFUF_DIRS_WORDLIST}"
-    echo "- ffuf (files): ${FFUF_FILES_WORDLIST}"
+    echo "Cible        : ${TARGET_HOST_HDR}"
+    echo "Périmètre    : ${TARGET_SCOPE_HDR}"
+    echo "Date début   : ${NOW}"
     echo
-    echo "-------------------------------------------------------"
+    echo "Commandes exécutées (exactes) :"
+    echo
+    echo "[dirb — découverte initiale]"
+    echo "${DIRB_CMD:-n/a}"
+    echo
+    echo "[ffuf — énumération des répertoires]"
+    echo "${FFUF_DIRS_CMD:-n/a}"
+    echo
+    echo "[ffuf — énumération des fichiers]"
+    echo "${FFUF_FILES_CMD:-n/a}"
+    echo
+    echo "Processus de génération des résultats :"
+    echo "- Les sorties JSON produites par ffuf constituent la source de vérité."
+    echo "- Les entrées pertinentes sont extraites via jq (URL, code HTTP, taille de réponse)."
+    echo "- Les réponses assimilables à des soft-404 sont filtrées par comparaison des tailles et des codes HTTP."
+    echo "- Les URLs finales sont reconstruites à partir du périmètre scanné (racine du site ou sous-répertoire ciblé)."
+    echo "- Les résultats sont normalisés sous la forme :"
+    echo "    http://cible/chemin (CODE:xxx|SIZE:yyy)"
+    echo "- Les chemins sont ensuite classés par type :"
+    echo "    • répertoires (/chemin/)"
+    echo "    • fichiers (/chemin.ext)"
+    echo "- Le fichier RESULTS_SUMMARY.txt est généré par agrégation finale, sans retraitement manuel,"
+    echo "  garantissant la reproductibilité complète du scan."
+    echo
+    echo "----------------------------------------------------"
     echo
   } > "${summary_file}"
 }
@@ -595,7 +617,7 @@ _main(){
   fi
 
   # -------------------------------------------------------------------------
-  # Entête RESULTS_SUMMARY (version + commande + wordlists) — écrit UNE seule fois
+  # Entête RESULTS_SUMMARY (audit-ready) — écrit UNE seule fois
   # IMPORTANT: pas de "local" ici, car write_results_header() lit des variables globales
 
   NOW="$(date '+%Y-%m-%d %H:%M:%S')"
@@ -612,8 +634,47 @@ _main(){
 
   TARGET_DISPLAY="${SUMMARY_TARGET}"
 
-  FFUF_DIRS_WORDLIST="${RAFT_DIRS}"
-  FFUF_FILES_WORDLIST="${RAFT_FILES}"
+  # Cible / périmètre (valable pour scan racine OU scan de répertoire)
+  TARGET_HOST_HDR="$TARGET_HOST"
+  if [[ "$BASE" == "/" ]]; then
+    TARGET_SCOPE_HDR="/"
+  else
+    TARGET_SCOPE_HDR="${BASE}/"
+  fi
+
+  # Commandes exactes (incluant options conditionnelles + tee)
+  if $DO_DIRB; then
+    _dirb_core="$(printf '%q ' dirb "${BASE_URL%/}/" "$DIRB_WORDLIST" -r)"
+    _dirb_core="${_dirb_core% }"
+    DIRB_CMD="${_dirb_core} | tee $(printf '%q' "$LOG_DIRB")"
+  else
+    DIRB_CMD="(dirb skipped --no-dirb)"
+  fi
+
+  if $DO_FFUF_DIRS; then
+    _ffuf_dirs_core="$(printf '%q ' ffuf -u "${BASE_URL%/}/FUZZ" -w "$RAFT_DIRS" -t "$THREADS" \
+      ${RATE_EFFECTIVE:+-rate "$RATE_EFFECTIVE"} \
+      -timeout "$TIMEOUT" -fc "$FFUF_FC" \
+      ${SOFT404_SIZE:+-fs "$SOFT404_SIZE"} \
+      -of json -o "$JSON_DIRS")"
+    _ffuf_dirs_core="${_ffuf_dirs_core% }"
+    FFUF_DIRS_CMD="${_ffuf_dirs_core} 2>&1 | tee $(printf '%q' "$LOG_FFUF_DIRS")"
+  else
+    FFUF_DIRS_CMD="(ffuf dirs skipped --no-ffuf-dirs)"
+  fi
+
+  if $DO_FFUF_FILES; then
+    _ffuf_files_core="$(printf '%q ' ffuf -u "${BASE_URL%/}/FUZZ" -w "$RAFT_FILES" -t "$THREADS" \
+      ${RATE_EFFECTIVE:+-rate "$RATE_EFFECTIVE"} \
+      -timeout "$TIMEOUT" -fc "$FFUF_FC" \
+      ${SOFT404_SIZE:+-fs "$SOFT404_SIZE"} \
+      ${FFUF_EXTS:+-e "$FFUF_EXTS"} \
+      -of json -o "$JSON_FILES")"
+    _ffuf_files_core="${_ffuf_files_core% }"
+    FFUF_FILES_CMD="${_ffuf_files_core} 2>&1 | tee $(printf '%q' "$LOG_FFUF_FILES")"
+  else
+    FFUF_FILES_CMD="(ffuf files skipped --no-ffuf-files)"
+  fi
 
   write_results_header "$SUMMARY_FILE"
   # -------------------------------------------------------------------------
