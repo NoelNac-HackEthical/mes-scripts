@@ -201,7 +201,7 @@ jobs:
 
             if gh release view "$TAG" >/dev/null 2>&1; then
               log "Tag $TAG already exists – deleting release and tag"
-              gh release delete "$TAG" -y || true
+              gh release delete "$TAG" -y --cleanup-tag || true
               git push origin ":refs/tags/$TAG" || true
             fi
 
@@ -213,7 +213,7 @@ jobs:
 
             log "Release $TAG published with ${#FILES_TO_UPLOAD[@]} assets."
 
-            # Prune anciennes releases (uniquement r-YYYY-MM-DD-HHMM)
+            # Prune anciennes releases (uniquement release-YYYY-MM-DD-HHMM)
             RETAIN="${RETAIN:-20}"
             log "Pruning release-* releases beyond the most recent ${RETAIN}…"
 
