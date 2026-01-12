@@ -213,19 +213,22 @@ jobs:
 
             log "Release $TAG published with ${#FILES_TO_UPLOAD[@]} assets."
 
-            # Prune anciennes releases
+            # Prune anciennes releases (uniquement r-YYYY-MM-DD-HHMM)
             RETAIN="${RETAIN:-20}"
-            log "Pruning releases beyond the most recent ${RETAIN}…"
+            log "Pruning r-* releases beyond the most recent ${RETAIN}…"
+
             gh api -H "Accept: application/vnd.github+json" "/repos/${OWNER_REPO}/releases?per_page=100" \
-              | jq -r '.[].tag_name' | awk 'NF' | nl -ba \
+              | jq -r '.[].tag_name' | awk 'NF' \
+              | grep -E '^r-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{4}$' \
+              | nl -ba \
               | while read -r idx tag; do
                   if [ "$idx" -gt "$RETAIN" ]; then
                     log "  - deleting $tag"
-                    gh release delete "$tag" -y || true
+                    gh release delete "$tag" -y --cleanup-tag || true
+                    # filet de securite : au cas ou le tag existerait encore
                     git push origin ":refs/tags/$tag" || true
                   fi
                 done
-
             log "Done."
           fi
 
