@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # NAME=mon-recoweb
-# VERSION=2.1.0
+# VERSION=2.2.0
 # DESCRIPTION=Reconnaissance web automatisée en 3 phases (dirb + ffuf directories + ffuf files) avec exports JSON ffuf fiables, détection soft-404 et résumé global agrégé. Supporte aussi <host>/<path>/ (scan ciblé d’un répertoire) et --ext pour tester des extensions en phase files. Le résumé affiche des URLs complètes avec (CODE:xxx|SIZE:yyy) quand disponible.
 # PRESENTATION_START
 # **mon-recoweb — Recon web en 3 phases (dirb + ffuf dirs + ffuf files)**
@@ -96,6 +96,8 @@ Options:
   --rate <n>                Limite le débit ffuf (req/s). Ex: 40, 100, 200 (défaut: none)
   --timeout <sec>           Timeout ffuf en secondes (défaut: 10)
   --fc <codes>              Filtre codes status ffuf (défaut: 404)
+  --ffuf-extra <opts>       Options supplémentaires passées telles quelles à ffuf (dirs ET files)
+                            Ex: --ffuf-extra "-fs 612"  ou  --ffuf-extra "-fs 612 -fw 10"
   --dirb-wordlist <path>    Wordlist dirb (défaut: /usr/share/wordlists/dirb/common.txt)
   --raft-dirs <path>        Wordlist ffuf dirs (défaut: /usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt)
   --raft-files <path>       Wordlist ffuf files (défaut: /usr/share/seclists/Discovery/Web-Content/raft-medium-files.txt)
@@ -125,6 +127,7 @@ THREADS=30
 RATE=""          # limite débit ffuf (req/s). Vide = none
 TIMEOUT=10
 FFUF_FC="404"
+FFUF_EXTRA_OPTS=""
 
 EXT_RAW=""
 FFUF_EXTS=""     # format ffuf: ".sh,.cgi,.pl"
@@ -153,6 +156,7 @@ while [[ $# -gt 0 ]]; do
     --rate) RATE="${2:-}"; shift 2 ;;
     --timeout) TIMEOUT="${2:-}"; shift 2 ;;
     --fc) FFUF_FC="${2:-}"; shift 2 ;;
+    --ffuf-extra) FFUF_EXTRA_OPTS="${2:-}"; shift 2 ;;
     --dirb-wordlist) DIRB_WORDLIST="${2:-}"; shift 2 ;;
     --raft-dirs) RAFT_DIRS="${2:-}"; shift 2 ;;
     --raft-files)
@@ -517,6 +521,10 @@ _main(){
     echo "[*] ffuf   : threads=$THREADS timeout=${TIMEOUT}s fc=$FFUF_FC"
   fi
 
+  if [[ -n "${FFUF_EXTRA_OPTS:-}" ]]; then
+    echo "[*] ffuf extra : $FFUF_EXTRA_OPTS"
+  fi
+
   local LOG_DIRB="$OUTDIR/dirb.log"
   local LOG_FFUF_DIRS="$OUTDIR/ffuf_dirs.log"
   local LOG_FFUF_FILES="$OUTDIR/ffuf_files.log"
@@ -563,6 +571,7 @@ _main(){
       -timeout "$TIMEOUT" \
       -fc "$FFUF_FC" \
       ${SOFT404_SIZE:+-fs "$SOFT404_SIZE"} \
+      ${FFUF_EXTRA_OPTS:+$FFUF_EXTRA_OPTS} \
       -of json -o "$JSON_DIRS" \
       2>&1 | tee "$LOG_FFUF_DIRS"
 
@@ -592,6 +601,7 @@ _main(){
       ${SOFT404_SIZE:+-fs "$SOFT404_SIZE"} \
       ${FFUF_EXTS:+-e "$FFUF_EXTS"} \
       -of json -o "$JSON_FILES" \
+      ${FFUF_EXTRA_OPTS:+$FFUF_EXTRA_OPTS} \
       2>&1 | tee "$LOG_FFUF_FILES"
 
     _ffuf_export_txt_from_json "$JSON_FILES" "$TXT_FILES" "$HITS_FILES"
@@ -656,6 +666,7 @@ _main(){
       ${RATE_EFFECTIVE:+-rate "$RATE_EFFECTIVE"} \
       -timeout "$TIMEOUT" -fc "$FFUF_FC" \
       ${SOFT404_SIZE:+-fs "$SOFT404_SIZE"} \
+      ${FFUF_EXTRA_OPTS:+$FFUF_EXTRA_OPTS} \
       -of json -o "$JSON_DIRS")"
     _ffuf_dirs_core="${_ffuf_dirs_core% }"
     FFUF_DIRS_CMD="${_ffuf_dirs_core} 2>&1 | tee $(printf '%q' "$LOG_FFUF_DIRS")"
@@ -669,6 +680,7 @@ _main(){
       -timeout "$TIMEOUT" -fc "$FFUF_FC" \
       ${SOFT404_SIZE:+-fs "$SOFT404_SIZE"} \
       ${FFUF_EXTS:+-e "$FFUF_EXTS"} \
+      ${FFUF_EXTRA_OPTS:+$FFUF_EXTRA_OPTS} \
       -of json -o "$JSON_FILES")"
     _ffuf_files_core="${_ffuf_files_core% }"
     FFUF_FILES_CMD="${_ffuf_files_core} 2>&1 | tee $(printf '%q' "$LOG_FFUF_FILES")"
