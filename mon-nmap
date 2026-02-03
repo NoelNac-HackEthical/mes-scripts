@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # NAME=mon-nmap
-# VERSION=2.0.1
-# DESCRIPTION=Automatise une série de scans Nmap (TCP complet, agressif, CMS, UDP) pour une cible CTF donnée.
+# VERSION=2.1.0
+# DESCRIPTION=Automatise une série de scans Nmap (TCP complet, agressif, CMS, UDP, FTP/SMB) pour une cible CTF donnée.
 #
 # PRESENTATION_START
 # mon-nmap — Scan Nmap “tout-en-un” pour CTF / HTB
@@ -13,13 +13,18 @@
 # Ce que fait le script (ordre réel d’exécution)
 #   0) Pré-check canonique HTB (validation IP sans ICMP, via TCP 80/443/22)
 #   1) Scan TCP complet (1–65535) avec extraction des ports “open”
-#   2) Scan agressif sur les ports ouverts (détection services + scripts vulnérabilités “legacy”)
-#   3) Scan orienté CMS sur les mêmes ports (WordPress/Drupal/Joomla + scripts HTTP utiles)
-#   4) Scan UDP (top 20 ports)
+#   2) Enumération ciblée FTP / SMB (si services détectés)
+#      - FTP : ftp-anon, ftp-syst
+#      - SMB : smb-os-discovery, smb-enum-shares, smb-enum-users
+#      - Le fichier de sortie est toujours créé, même si l’énumération est ignorée
+#   3) Scan agressif sur les ports ouverts (détection services + scripts vulnérabilités “legacy”)
+#   4) Scan orienté CMS sur les mêmes ports (WordPress/Drupal/Joomla + scripts HTTP utiles)
+#   5) Scan UDP (top 20 ports)
 #
 # Sortie
 #   Les résultats sont stockés dans le répertoire : scans_nmap/
 #     - full_tcp_scan.txt
+#     - enum_ftp_smb_scan.txt
 #     - aggressive_vuln_scan.txt
 #     - cms_vuln_scan.txt
 #     - udp_vuln_scan.txt
@@ -36,6 +41,7 @@
 # Remarques
 #   - Le pré-check peut demander confirmation si aucune réponse TCP immédiate n’est détectée
 #     (cas typique : IP HTB changée / /etc/hosts obsolète / ports filtrés).
+#   - L’énumération FTP / SMB est volontairement ciblée et non exhaustive.
 #   - Le scan agressif est écrit avec un en-tête rappelant la commande Nmap utilisée.
 # PRESENTATION_END
 #
@@ -43,7 +49,7 @@
 #____________________________________________________________________________
 #
 # Bref résumé :
-#   Automatise une série de scans Nmap (TCP complet, agressif, CMS, UDP) pour une cible CTF donnée.
+#   Automatise une série de scans Nmap (TCP complet, FTP/SMB, agressif, CMS, UDP) pour une cible CTF donnée.
 #
 
 set -euo pipefail
@@ -155,6 +161,52 @@ run_scans() {
     echo "[!] Aucun port TCP 'open' trouvé dans $output_dir/full_tcp_scan.txt"
   else
     echo "Ports ouverts: $ports"
+  fi
+
+  # ===== ÉTAPE 2bis: ENUM FTP / SMB (si présents) =====
+  echo "[2bis/4] Enumération FTP / SMB (si services détectés)..."
+
+  # Fichier de sortie (toujours créé)
+  local enum_out="$output_dir/enum_ftp_smb_scan.txt"
+  mkdir -p "$output_dir"
+
+  {
+    echo "# mon-nmap — ENUM FTP / SMB"
+    echo "# Target : $target"
+    echo "# Date   : $(date -Iseconds)"
+    echo
+  } > "$enum_out"
+
+  local enum_scripts=""
+  local enum_ports=""
+
+  # FTP
+  if echo "$ports" | grep -qE '(^|,)21(,|$)'; then
+    enum_ports="${enum_ports}21,"
+    enum_scripts="${enum_scripts}ftp-anon,ftp-syst,"
+  fi
+
+  # SMB
+  if echo "$ports" | grep -qE '(^|,)139(,|$)|(^|,)445(,|$)'; then
+    enum_ports="${enum_ports}139,445,"
+    enum_scripts="${enum_scripts}smb-os-discovery,smb-enum-shares,smb-enum-users,"
+  fi
+
+  # Nettoyage virgules finales
+  enum_ports="${enum_ports%,}"
+  enum_scripts="${enum_scripts%,}"
+
+  if [[ -n "$enum_ports" && -n "$enum_scripts" ]]; then
+    nmap -Pn -sV -p"$enum_ports" \
+      --script="$enum_scripts" \
+      --script-timeout=30s \
+      -T4 \
+      -oN "$enum_out" \
+      "$target"
+  else
+    echo "Aucun service FTP (21) ni SMB (139/445) détecté." >> "$enum_out"
+    echo "Ports ouverts détectés : $ports" >> "$enum_out"
+    echo "Aucun service FTP ou SMB détecté, enum ignorée."
   fi
 
   # ===== ÉTAPE 3: SCAN AGRESSIF CIBLÉ (CTF-perfect LEGACY) =====
