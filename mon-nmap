@@ -51,7 +51,6 @@
 # Bref résumé :
 #   Automatise une série de scans Nmap (TCP complet, FTP/SMB, agressif, CMS, UDP) pour une cible CTF donnée.
 #
-#
 
 set -euo pipefail
 
@@ -84,10 +83,10 @@ Lance une série de scans Nmap sur une cible (IP ou domaine) et enregistre
 les résultats dans le répertoire scans_nmap/ :
 
   1) Scan complet des ports TCP
-  2bis) Enumération ciblée FTP / SMB (si services détectés)
-  2) Scan agressif orienté vulnérabilités (CTF-perfect LEGACY)
-  3) Scan orienté CMS (WordPress, Drupal, Joomla...)
-  4) Scan UDP (top 20 ports)
+  2) Enumération ciblée FTP / SMB (si services détectés)
+  3) Scan agressif orienté vulnérabilités (CTF-perfect LEGACY)
+  4) Scan orienté CMS (WordPress, Drupal, Joomla...)
+  5) Scan UDP (top 20 ports)
 
 Fichiers produits :
   scans_nmap/full_tcp_scan.txt
@@ -95,6 +94,7 @@ Fichiers produits :
   scans_nmap/aggressive_vuln_scan.txt
   scans_nmap/cms_vuln_scan.txt
   scans_nmap/udp_vuln_scan.txt
+
 Options:
   -h, --help       Affiche cette aide
   -V, --version    Affiche la version
@@ -148,7 +148,7 @@ run_scans() {
   mkdir -p "$output_dir"
 
   # ===== ÉTAPE 1: SCAN COMPLET DES PORTS TCP =====
-  echo "[1/4] Scan complet des ports TCP sur $target..."
+  echo "[1/5] Scan complet des ports TCP sur $target..."
   nmap -Pn -p- --min-rate 5000 -T4 -oN "$output_dir/full_tcp_scan.txt" "$target"
 
   # ===== ÉTAPE 2: EXTRACTION DES PORTS OUVERTS =====
@@ -165,8 +165,8 @@ run_scans() {
     echo "Ports ouverts: $ports"
   fi
 
-  # ===== ÉTAPE 2bis: ENUM FTP / SMB (si présents) =====
-  echo "[2bis/4] Enumération FTP / SMB (si services détectés)..."
+  # ===== ÉTAPE 2: ENUM FTP / SMB (si présents) =====
+  echo "[2/5] Enumération FTP / SMB (si services détectés)..."
 
   # Fichier de sortie (toujours créé)
   local enum_out="$output_dir/enum_ftp_smb_scan.txt"
@@ -213,7 +213,7 @@ run_scans() {
 
   # ===== ÉTAPE 3: SCAN AGRESSIF CIBLÉ (CTF-perfect LEGACY) =====
   if [ -n "${ports:-}" ]; then
-    echo "[2/4] Scan agressif sur les ports $ports..."
+    echo "[3/5] Scan agressif sur les ports $ports..."
 
     # Variante LEGACY : scripts utiles en CTF + vieux SSL/TLS
     local vuln_scripts
@@ -251,7 +251,7 @@ run_scans() {
 
   # ===== ÉTAPE 4: SCAN CIBLÉ CMS =====
   if [ -n "${ports:-}" ]; then
-    echo "[3/4] Scan orienté CMS sur les ports $ports..."
+    echo "[4/5] Scan orienté CMS sur les ports $ports..."
     local cms_scripts
     cms_scripts="http-wordpress-enum,http-wordpress-brute,http-wordpress-users,http-drupal-enum,http-drupal-enum-users,http-joomla-brute,http-generator,http-robots.txt,http-title,http-headers,http-methods,http-enum,http-devframework,http-cakephp-version,http-php-version,http-config-backup,http-backup-finder,http-sitemap-generator"
 
@@ -264,7 +264,7 @@ run_scans() {
   fi
 
   # ===== ÉTAPE 5: SCAN UDP CIBLÉ =====
-  echo "[4/4] Scan UDP (top 20 ports)..."
+  echo "[5/5] Scan UDP (top 20 ports)..."
   nmap -n -Pn -sU --top-ports 20 -T4 -oN "$output_dir/udp_vuln_scan.txt" "$target"
 
   echo "✅ Scans terminés. Résultats du scan agressif dans $output_dir/aggressive_vuln_scan.txt"
