@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # NAME=mon-recoweb
-# VERSION=2.2.0
-# DESCRIPTION=Reconnaissance web automatisée en 3 phases (dirb + ffuf directories + ffuf files) avec exports JSON ffuf fiables, détection soft-404 et résumé global agrégé. Supporte aussi <host>/<path>/ (scan ciblé d’un répertoire) et --ext pour tester des extensions en phase files. Le résumé affiche des URLs complètes avec (CODE:xxx|SIZE:yyy) quand disponible.
+# VERSION=2.2.1
+# DESCRIPTION=Reconnaissance web automatisée en 3 phases (dirb + ffuf directories + ffuf files) avec exports JSON ffuf fiables, détection soft-404 et résumé global agrégé. Supporte aussi <host>/<path>/ (scan ciblé d’un répertoire) et --ext pour tester des extensions en phase files. Les résultats sont organisés par vhost dans scans_recoweb/<vhost>/, puis par sous-répertoire si applicable.
 # PRESENTATION_START
 # **mon-recoweb — Recon web en 3 phases (dirb + ffuf dirs + ffuf files)**
 #
@@ -21,7 +21,11 @@
 # Scan ciblé d’un répertoire :
 # - La cible peut inclure un chemin : <host>/<path>/ (ex: cible.htb/cgi-bin/)
 # - Le script ne scanne alors QUE ce répertoire (BASE=/path)
-# - Les sorties sont écrites dans scans_recoweb/<dernier-segment>/ (ex: scans_recoweb/cgi-bin/)
+# - Les sorties sont écrites dans scans_recoweb/<vhost>/<dernier-segment>/ (ex: scans_recoweb/cible.htb/cgi-bin/)
+#
+# Organisation des sorties par vhost :
+# - Si la cible est un host (non-IP), les sorties sont placées dans : scans_recoweb/<vhost>/
+#   (utile quand tu scannes plusieurs subdomains/vhosts sur la même machine)
 #
 # Wordlist "files" par défaut en scan de répertoire :
 # - Si BASE != "/" ET que l’utilisateur n’a pas fourni --raft-files,
@@ -170,7 +174,11 @@ while [[ $# -gt 0 ]]; do
     --no-ffuf-files) DO_FFUF_FILES=false; shift ;;
     --) shift; break ;;
 
-    -*) echo "Unknown option: $1" >&2; usage; exit 2 ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage
+      exit 2
+      ;;
 
     *)
       if [[ -z "$TARGET" ]]; then
@@ -365,6 +373,45 @@ _outdir_suffix_from_base(){
   echo "$s"
 }
 
+_is_ipv4(){
+  local h="$1"
+  [[ "$h" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS='.' read -r a b c d <<< "$h"
+  for n in "$a" "$b" "$c" "$d"; do
+    [[ "$n" =~ ^[0-9]+$ ]] || return 1
+    (( n >= 0 && n <= 255 )) || return 1
+  done
+  return 0
+}
+
+_extract_host_from_url(){
+  # Extrait le host (sans port) d'une URL http(s)://host[:port]/...
+  local url="$1"
+  local h
+  h="$(printf '%s' "$url" | sed -E 's#^https?://([^/]+).*#\1#')"
+  h="${h%%:*}"
+  printf '%s' "$h"
+}
+
+_outdir_suffix_from_host(){
+  # Retourne un suffixe "host" uniquement si non-IP (vhost/subdomain)
+  local t="$1" host=""
+  if _is_full_url "$t"; then
+    host="$(_extract_host_from_url "$t")"
+  else
+    host="$t"
+  fi
+
+  if _is_ipv4 "$host"; then
+    echo ""
+    return 0
+  fi
+
+  # Sanitize
+  host="${host//[^A-Za-z0-9._-]/_}"
+  echo "$host"
+}
+
 # Variables attendues par write_results_header() (définies dans _main juste avant l'écriture du résumé)
 # NAME VERSION CMDLINE NOW TARGET_HOST_HDR TARGET_SCOPE_HDR DIRB_CMD FFUF_DIRS_CMD FFUF_FILES_CMD
 
@@ -497,13 +544,20 @@ _main(){
     echo "[!] Conseil : en phase exploitation, reteste les fichiers importants (robots.txt, sitemap.xml, etc.) au curl."
   fi
 
-  # OUTDIR suffix selon BASE (ex: /cgi-bin => scans_recoweb/cgi-bin)
-  local OUT_SUFFIX
-  OUT_SUFFIX="$(_outdir_suffix_from_base "$BASE")"
-  if [[ -n "$OUT_SUFFIX" ]]; then
-    OUTDIR="${OUTDIR%/}/$OUT_SUFFIX"
+  # -------------------------------------------------------------------------
+  # OUTDIR : d'abord suffix "host" (vhost/subdomain) puis suffix "base" (dernier segment)
+  local OUT_HOST_SUFFIX OUT_BASE_SUFFIX
+  OUT_HOST_SUFFIX="$(_outdir_suffix_from_host "$ACCESS_T")"
+  OUT_BASE_SUFFIX="$(_outdir_suffix_from_base "$BASE")"
+
+  if [[ -n "$OUT_HOST_SUFFIX" ]]; then
+    OUTDIR="${OUTDIR%/}/$OUT_HOST_SUFFIX"
+  fi
+  if [[ -n "$OUT_BASE_SUFFIX" ]]; then
+    OUTDIR="${OUTDIR%/}/$OUT_BASE_SUFFIX"
   fi
   mkdir -p "$OUTDIR"
+  # -------------------------------------------------------------------------
 
   local RATE_EFFECTIVE="$RATE"
 
