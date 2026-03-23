@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # NAME=mon-recoweb
-# VERSION=2.2.1
+# VERSION=2.2.2
 # DESCRIPTION=Reconnaissance web automatisée en 3 phases (dirb + ffuf directories + ffuf files) avec exports JSON ffuf fiables, détection soft-404 et résumé global agrégé. Supporte aussi <host>/<path>/ (scan ciblé d’un répertoire) et --ext pour tester des extensions en phase files. Les résultats sont organisés par vhost dans scans_recoweb/<vhost>/, puis par sous-répertoire si applicable.
 # PRESENTATION_START
 # **mon-recoweb — Recon web en 3 phases (dirb + ffuf dirs + ffuf files)**
@@ -100,6 +100,7 @@ Options:
   --rate <n>                Limite le débit ffuf (req/s). Ex: 40, 100, 200 (défaut: none)
   --timeout <sec>           Timeout ffuf en secondes (défaut: 10)
   --fc <codes>              Filtre codes status ffuf (défaut: 404)
+  --fs <size>               Filtre size ffuf explicite (ex: 1234). Prioritaire sur l'auto-détection soft-404
   --ffuf-extra <opts>       Options supplémentaires passées telles quelles à ffuf (dirs ET files)
                             Ex: --ffuf-extra "-fs 612"  ou  --ffuf-extra "-fs 612 -fw 10"
   --dirb-wordlist <path>    Wordlist dirb (défaut: /usr/share/wordlists/dirb/common.txt)
@@ -131,6 +132,7 @@ THREADS=30
 RATE=""          # limite débit ffuf (req/s). Vide = none
 TIMEOUT=10
 FFUF_FC="404"
+FFUF_FS=""
 FFUF_EXTRA_OPTS=""
 
 EXT_RAW=""
@@ -160,6 +162,7 @@ while [[ $# -gt 0 ]]; do
     --rate) RATE="${2:-}"; shift 2 ;;
     --timeout) TIMEOUT="${2:-}"; shift 2 ;;
     --fc) FFUF_FC="${2:-}"; shift 2 ;;
+    --fs) FFUF_FS="${2:-}"; shift 2 ;;
     --ffuf-extra) FFUF_EXTRA_OPTS="${2:-}"; shift 2 ;;
     --dirb-wordlist) DIRB_WORDLIST="${2:-}"; shift 2 ;;
     --raft-dirs) RAFT_DIRS="${2:-}"; shift 2 ;;
@@ -544,6 +547,14 @@ _main(){
     echo "[!] Conseil : en phase exploitation, reteste les fichiers importants (robots.txt, sitemap.xml, etc.) au curl."
   fi
 
+  local EFFECTIVE_FS=""
+  if [[ -n "$FFUF_FS" ]]; then
+    EFFECTIVE_FS="$FFUF_FS"
+    echo "[*] --fs fourni par l'utilisateur → priorité à -fs $EFFECTIVE_FS"
+  else
+    EFFECTIVE_FS="$SOFT404_SIZE"
+  fi
+
   # -------------------------------------------------------------------------
   # OUTDIR : d'abord suffix "host" (vhost/subdomain) puis suffix "base" (dernier segment)
   local OUT_HOST_SUFFIX OUT_BASE_SUFFIX
@@ -577,6 +588,10 @@ _main(){
 
   if [[ -n "${FFUF_EXTRA_OPTS:-}" ]]; then
     echo "[*] ffuf extra : $FFUF_EXTRA_OPTS"
+  fi
+
+  if [[ -n "${FFUF_FS:-}" ]]; then
+    echo "[*] ffuf fs explicite : $FFUF_FS"
   fi
 
   local LOG_DIRB="$OUTDIR/dirb.log"
@@ -624,7 +639,7 @@ _main(){
       ${RATE_EFFECTIVE:+-rate "$RATE_EFFECTIVE"} \
       -timeout "$TIMEOUT" \
       -fc "$FFUF_FC" \
-      ${SOFT404_SIZE:+-fs "$SOFT404_SIZE"} \
+      ${EFFECTIVE_FS:+-fs "$EFFECTIVE_FS"} \
       ${FFUF_EXTRA_OPTS:+$FFUF_EXTRA_OPTS} \
       -of json -o "$JSON_DIRS" \
       2>&1 | tee "$LOG_FFUF_DIRS"
@@ -652,7 +667,7 @@ _main(){
       ${RATE_EFFECTIVE:+-rate "$RATE_EFFECTIVE"} \
       -timeout "$TIMEOUT" \
       -fc "$FFUF_FC" \
-      ${SOFT404_SIZE:+-fs "$SOFT404_SIZE"} \
+      ${EFFECTIVE_FS:+-fs "$EFFECTIVE_FS"} \
       ${FFUF_EXTS:+-e "$FFUF_EXTS"} \
       -of json -o "$JSON_FILES" \
       ${FFUF_EXTRA_OPTS:+$FFUF_EXTRA_OPTS} \
@@ -719,7 +734,7 @@ _main(){
     _ffuf_dirs_core="$(printf '%q ' ffuf -u "${BASE_URL%/}/FUZZ" -w "$RAFT_DIRS" -t "$THREADS" \
       ${RATE_EFFECTIVE:+-rate "$RATE_EFFECTIVE"} \
       -timeout "$TIMEOUT" -fc "$FFUF_FC" \
-      ${SOFT404_SIZE:+-fs "$SOFT404_SIZE"} \
+      ${EFFECTIVE_FS:+-fs "$EFFECTIVE_FS"} \
       ${FFUF_EXTRA_OPTS:+$FFUF_EXTRA_OPTS} \
       -of json -o "$JSON_DIRS")"
     _ffuf_dirs_core="${_ffuf_dirs_core% }"
@@ -732,7 +747,7 @@ _main(){
     _ffuf_files_core="$(printf '%q ' ffuf -u "${BASE_URL%/}/FUZZ" -w "$RAFT_FILES" -t "$THREADS" \
       ${RATE_EFFECTIVE:+-rate "$RATE_EFFECTIVE"} \
       -timeout "$TIMEOUT" -fc "$FFUF_FC" \
-      ${SOFT404_SIZE:+-fs "$SOFT404_SIZE"} \
+      ${EFFECTIVE_FS:+-fs "$EFFECTIVE_FS"} \
       ${FFUF_EXTS:+-e "$FFUF_EXTS"} \
       ${FFUF_EXTRA_OPTS:+$FFUF_EXTRA_OPTS} \
       -of json -o "$JSON_FILES")"
