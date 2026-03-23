@@ -1,6 +1,19 @@
 # mes-scripts
 
-Collection de scripts personnels orientés **CTF / Hack The Box**, dédiés à l’énumération, la reconnaissance et l’automatisation, dans un cadre strict de **hacking éthique**.
+Collection de scripts personnels orientés **CTF / Hack The Box (HTB)**, utilisés en conditions réelles pour l’énumération, la reconnaissance et l’automatisation, dans un cadre strict de **hacking éthique**.
+
+## 🔗 Writeups & documentation
+
+Ces scripts sont utilisés et documentés dans mes writeups et recettes sur [HackEthical](https://writeups.hackethical.be/).
+
+👉 Writeup récent — Data (HTB Easy)  
+https://writeups.hackethical.be/writeups/data/
+
+👉 Recette — analyser rapidement un fichier texte, une sortie --help ou un fichier de configuration par mots-clés  
+https://writeups.hackethical.be/recettes/analyse-mots-cles/
+
+👉 Accès au site complet HackEthical  
+https://writeups.hackethical.be/
 
 Ce dépôt est volontairement structuré pour distinguer clairement :
 
@@ -11,11 +24,11 @@ Ce dépôt est volontairement structuré pour distinguer clairement :
 
 ## 🎯 Objectif du dépôt
 
-- Centraliser des scripts Bash utilisés en conditions réelles de CTF HTB.
+- Centraliser des scripts Bash utilisés en conditions réelles de CTF Hack The Box (HTB), notamment pour l’énumération et la prise pied.
 - Garantir une approche **reproductible**, lisible et contrôlée.
 - Éviter toute publication accidentelle de versions intermédiaires.
 
-Les scripts sont conçus pour être **lus autant qu’exécutés**.
+Les scripts sont conçus pour être **lus autant qu’exécutés**, et s’intègrent dans une démarche de documentation via writeups et recettes.
 
 ------
 
@@ -30,16 +43,20 @@ Les scripts situés **à la racine** du dépôt sont considérés comme **actifs
 - inclus dans les releases,
 - référencés côté documentation (site Hugo / Netlify).
 
+Exemple d’utilisation — phase **Enumération** dans un writeup HTB :  
+https://writeups.hackethical.be/writeups/data/
+
+Les versions des scripts sont gérées via les releases GitHub associées à ce dépôt.
+
 Scripts actuellement actifs :
 
-- **mon-nmap** — v2.0.0
-   Scan Nmap multi-phases pour CTF (pré-check HTB, TCP complet, agressif, CMS, UDP).
-- **mon-recoweb** — v2.0.0
-   Reconnaissance web automatisée en 3 phases (dirb + ffuf directories + ffuf files), détection soft-404 et résumé agrégé.
-- **mon-subdomains** — v2.0.0
-   Découverte de vhosts / sous-domaines par vhost-fuzzing (ffuf) avec baselines robustes, anti-wildcard et parsing JSON.
-- **make-htb-wordlist** — v1.0.0
-   Génération et installation d’une wordlist DNS/VHOST orientée HTB (5000 entrées) à partir de SecLists.
+- **mon-nmap** — scan Nmap multi-phases pour CTF (pré-check HTB, TCP complet, agressif, CMS, UDP)
+
+- **mon-recoweb** — reconnaissance web automatisée en 3 phases (dirb + ffuf directories + ffuf files), détection soft-404 et résumé agrégé
+
+- **mon-subdomains** — découverte de vhosts / sous-domaines par vhost-fuzzing (ffuf) avec baselines robustes, anti-wildcard et parsing JSON
+
+- **make-htb-wordlist** — génération et installation d’une wordlist DNS/VHOST orientée HTB (5000 entrées) à partir de SecLists
 
 ------
 
