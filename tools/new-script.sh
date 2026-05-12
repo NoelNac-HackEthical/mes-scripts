@@ -13,7 +13,7 @@ VERSION="$2"
 DESCRIPTION="$3"
 
 TPL="templates/script.sh.tpl"
-OUT="./$NAME"
+OUT="./dev/${NAME}-dev"
 
 [[ -f "$TPL" ]] || { echo "Template introuvable: $TPL" >&2; exit 1; }
 [[ -e "$OUT" ]] && { echo "Fichier déjà présent: $OUT" >&2; exit 2; }
