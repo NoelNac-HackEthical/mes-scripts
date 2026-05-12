@@ -20,8 +20,12 @@ if [[ "$NAME" != *-dev ]]; then
   NAME="${NAME}-dev"
 fi
 
-TPL="templates/script.sh.tpl"
-OUT="./dev/${NAME}"
+# Répertoire racine du dépôt mes-scripts
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+TPL="$REPO_ROOT/templates/script.sh.tpl"
+OUT="$REPO_ROOT/dev/${NAME}"
 
 [[ -f "$TPL" ]] || { echo "Template introuvable: $TPL" >&2; exit 1; }
 [[ -e "$OUT" ]] && { echo "Fichier déjà présent: $OUT" >&2; exit 2; }
