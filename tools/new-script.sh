@@ -32,14 +32,6 @@ sed -e "s|{{NAME}}|$NAME_ESC|g" \
 
 chmod +x "$OUT"
 
-# Générer le .sha256 (empreinte seule)
-if command -v sha256sum >/dev/null 2>&1; then
-  sha256sum "$OUT" | awk '{print $1}' > "${OUT}.sha256"
-elif command -v shasum >/dev/null 2>&1; then
-  shasum -a 256 "$OUT" | awk '{print $1}' > "${OUT}.sha256"
-else
-  echo "Avertissement: ni sha256sum ni shasum trouvés. ${OUT}.sha256 non créé." >&2
-fi
-
-echo "Created: $OUT and ${OUT}.sha256"
+echo "Created: $OUT"
 echo "→ Pense à éditer le bloc PRESENTATION_START/END dans $OUT"
+echo "→ Le fichier .sha256 officiel sera généré par GitHub Actions lors de la release."
