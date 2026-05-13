@@ -1,8 +1,12 @@
 # mes-scripts
 
+![Platform](https://img.shields.io/badge/platform-linux-black)
+![Shell](https://img.shields.io/badge/shell-bash-blue)
+![License](https://img.shields.io/badge/license-educational-lightgrey)
+
 Scripts Bash pour Hack The Box, CTF, Linux, énumération réseau et reconnaissance web.
 
-Ce dépôt regroupe des scripts personnels utilisés en conditions réelles pour automatiser certaines phases d’énumération et de reconnaissance dans les workflows de résolution de challenges Capture The Flag (CTF) sur la plateforme Hack The Box (HTB).
+Ce dépôt regroupe des scripts personnels utilisés en conditions réelles pour automatiser certaines phases d’énumération et de reconnaissance dans des workflows CTF sur la plateforme Hack The Box (HTB).
 
 La partie `Énumération` des writeups et walkthroughs publiés sur le site https://writeups.hackethical.be/ repose sur l’utilisation de ces scripts dans une méthodologie volontairement reproductible.
 
@@ -10,7 +14,7 @@ La partie `Énumération` des writeups et walkthroughs publiés sur le site http
 
 ## Objectif du dépôt
 
-Le projet `mes-scripts` a pour objectif de centraliser une boîte à outils Bash orientée :
+Le projet `mes-scripts` centralise une boîte à outils Bash orientée :
 
 - énumération réseau ;
 - reconnaissance web ;
@@ -41,7 +45,7 @@ Les scripts sont conçus pour être :
 
 ## Utilisation dans les writeups et walkthroughs Hack The Box
 
-Ces scripts sont utilisés dans la phase `Énumération` de tous les writeups et walkthroughs publiés sur le site https://writeups.hackethical.be/.
+Ces scripts sont utilisés dans la phase `Énumération` des writeups et walkthroughs publiés sur le site https://writeups.hackethical.be/.
 
 Exemples de writeups :
 
