@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # NAME=mon-recoweb
-# VERSION=2.2.2
+# VERSION=2.2.3
 # DESCRIPTION=Reconnaissance web automatisée en 3 phases (dirb + ffuf directories + ffuf files) avec exports JSON ffuf fiables, détection soft-404 et résumé global agrégé. Supporte aussi <host>/<path>/ (scan ciblé d’un répertoire) et --ext pour tester des extensions en phase files. Les résultats sont organisés par vhost dans scans_recoweb/<vhost>/, puis par sous-répertoire si applicable.
 # PRESENTATION_START
 # **mon-recoweb — Recon web en 3 phases (dirb + ffuf dirs + ffuf files)**
