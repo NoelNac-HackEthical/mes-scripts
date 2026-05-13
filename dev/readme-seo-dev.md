@@ -4,7 +4,7 @@ Scripts Bash pour Hack The Box, CTF, Linux, énumération réseau et reconnaissa
 
 Ce dépôt regroupe des scripts personnels utilisés en conditions réelles pour automatiser certaines phases d’énumération et de reconnaissance dans les workflows de résolution de challenges Capture The Flag (CTF) sur la plateforme Hack The Box (HTB).
 
-La partie « Énumération » des writeups publiés sur le site https://writeups.hackethical.be/ repose sur l’utilisation de ces scripts dans une méthodologie volontairement reproductible.
+La partie `Énumération` des writeups et walkthroughs publiés sur le site https://writeups.hackethical.be/ repose sur l’utilisation de ces scripts dans une méthodologie volontairement reproductible.
 
 ---
 
@@ -15,47 +15,53 @@ Le projet `mes-scripts` a pour objectif de centraliser une boîte à outils Bash
 - énumération réseau ;
 - reconnaissance web ;
 - découverte de sous-domaines et vhosts ;
-- automatisation de workflows CTF ;
-- support technique aux writeups Hack The Box ;
+- automatisation de workflows CTF et Hack The Box ;
+- support technique aux writeups et walkthroughs ;
 - documentation reproductible orientée Linux et sécurité offensive.
 
 Les scripts sont conçus pour être :
 
-- utilisés dans des environnements réels de laboratoire ;
+- utilisés dans des environnements réels de laboratoire et de CTF ;
 - lisibles et compréhensibles ;
 - reproductibles ;
-- documentés dans des writeups techniques détaillés.
+- intégrés dans des writeups techniques détaillés.
 
----
+------
 
 ## Scripts disponibles
 
-| Script              | Fonction                                             | Domaine            |
-| ------------------- | ---------------------------------------------------- | ------------------ |
-| `mon-nmap`          | Scan Nmap multi-phases orienté HTB/CTF               | Énumération réseau |
-| `mon-recoweb`       | Reconnaissance web automatisée avec `dirb` et `ffuf` | Web Recon          |
-| `mon-subdomains`    | Découverte de vhosts et sous-domaines                | VHOST / DNS        |
-| `make-htb-wordlist` | Génération d’une wordlist HTB orientée DNS/VHOST     | Wordlists          |
+| Script              | Fonction                                                     | Domaine            |
+| ------------------- | ------------------------------------------------------------ | ------------------ |
+| `mon-nmap`          | Scan Nmap multi-phases orienté HTB/CTF                       | Énumération réseau |
+| `mon-recoweb`       | Reconnaissance web automatisée avec `dirb`, `ffuf` et détection soft-404 | Web Recon          |
+| `mon-subdomains`    | Découverte de vhosts et sous-domaines par fuzzing            | VHOST / DNS        |
+| `make-htb-wordlist` | Génération d’une wordlist HTB orientée DNS/VHOST             | Wordlists          |
 
 ---
 
-## Utilisation dans les writeups Hack The Box
+## Utilisation dans les writeups et walkthroughs Hack The Box
 
-Ces scripts sont utilisés dans différents writeups et recettes publiés sur HackEthical.
+Ces scripts sont utilisés dans la phase `Énumération` de tous les writeups et walkthroughs publiés sur le site https://writeups.hackethical.be/.
 
-Exemples :
+Exemples de writeups :
 
-- Data HTB
-- Code HTB
-- Artificial HTB
-- Cap HTB
-- Lame HTB
+- Data HTB  
+  https://writeups.hackethical.be/writeups/data/
 
-Writeups :
+- Valentine HTB  
+  https://writeups.hackethical.be/writeups/valentine/
+
+- Writeup HTB  
+  https://writeups.hackethical.be/writeups/writeup/
+
+- Cap HTB  
+  https://writeups.hackethical.be/writeups/cap/
+
+- Lame HTB  
+  https://writeups.hackethical.be/writeups/lame/
+
+L’ensemble des writeups du site est disponible sur :
 https://writeups.hackethical.be/writeups/
-
-Recettes :
-https://writeups.hackethical.be/recettes/
 
 ---
 
@@ -64,17 +70,19 @@ https://writeups.hackethical.be/recettes/
 Le dépôt suit une approche simple et volontairement classique :
 
 - privilégier Bash et les outils Linux standards ;
-- conserver des scripts lisibles ;
+- conserver des scripts lisibles et compréhensibles ;
 - éviter les automatisations opaques ;
 - maintenir des workflows reproductibles ;
 - séparer clairement développement et publication ;
-- documenter les méthodes réellement utilisées en CTF.
+- documenter les méthodes réellement utilisées en CTF et Hack The Box.
 
-L’objectif n’est pas uniquement d’exécuter des outils, mais aussi de comprendre les résultats et de pouvoir les intégrer dans une démarche méthodique de writeup et d’analyse technique.
+L’objectif n’est pas uniquement d’exécuter des outils, mais aussi de comprendre les résultats obtenus et de pouvoir les intégrer dans une démarche méthodique de writeup, walkthrough et analyse technique.
 
 ---
 
 ## Organisation du dépôt
+
+Le dépôt est structuré pour séparer clairement les scripts actifs, les versions de développement et les outils internes liés aux workflows GitHub et à la génération de nouveaux scripts.
 
 ```text
 mes-scripts/
@@ -89,31 +97,32 @@ mes-scripts/
 └── .github/workflows/
 ```
 
-### Scripts actifs
+- ### Scripts actifs
 
-Les scripts présents à la racine du dépôt sont considérés comme actifs :
+  Les scripts présents à la racine du dépôt sont considérés comme actifs :
 
-- utilisés en conditions réelles ;
-- inclus dans les releases ;
-- pris en compte par les workflows GitHub Actions ;
-- référencés dans la documentation du site.
+  - utilisés en conditions réelles de CTF et Hack The Box ;
+  - inclus dans les releases GitHub ;
+  - pris en compte par les workflows GitHub Actions ;
+  - référencés dans les writeups et walkthroughs du site.
 
 ### Dossier `dev/`
 
 Le dossier `dev/` sert d’espace de développement contrôlé.
 
-Il contient les versions de travail suffixées par `-dev`.
+Il contient les versions de travail des scripts, généralement suffixées par `-dev`.
 
-Ces fichiers peuvent être synchronisés via Git mais ne sont pas destinés à être publiés.
+Ces fichiers peuvent être synchronisés via Git afin de sauvegarder ou transférer un état de travail entre plusieurs machines, mais ne sont pas destinés à être publiés dans les releases.
 
 ### Dossier `bak/`
 
-Le dossier `bak/` contient :
+Le dossier `bak/` contient des archives manuelles conservées à titre de référence :
 
-- snapshots manuels ;
-- anciennes versions ;
-- archives avant refonte ;
-- scripts conservés à titre de référence.
+- snapshots avant refonte ;
+- anciennes versions de scripts ;
+- fichiers historiques ;
+- scripts abandonnés ou remplacés ;
+- documents conservés pour comparaison ou restauration.
 
 ------
 
@@ -122,42 +131,41 @@ Le dossier `bak/` contient :
 Le workflow recommandé suit les étapes suivantes :
 
 1. développement dans `dev/` ;
-2. tests locaux ;
-3. validation manuelle ;
-4. copie vers la version active ;
+2. tests locaux sur Kali Linux ;
+3. validation manuelle du comportement réel ;
+4. copie vers la version active à la racine du dépôt ;
 5. commit Git ;
-6. génération automatique des releases GitHub.
+6. génération automatique des releases GitHub via GitHub Actions.
 
-Cette approche permet d’éviter la publication accidentelle de versions intermédiaires.
+Cette approche permet de séparer clairement développement et publication, tout en évitant la diffusion accidentelle de versions intermédiaires.s.
 
 ------
 
 ## GitHub Actions et releases
 
-Le dépôt utilise plusieurs workflows GitHub Actions pour :
+Le dépôt utilise le workflow GitHub Actions `release-aggregate.yml` pour :
 
-- générer automatiquement les releases ;
-- publier les scripts actifs ;
+- générer automatiquement les releases GitHub ;
+- publier les scripts actifs dans les releases ;
 - produire les checksums SHA256 ;
-- synchroniser les ressources liées au site Hugo ;
-- maintenir une séparation stricte entre scripts actifs et versions de développement.
+- préparer les ressources nécessaires à la publication automatique des scripts sur le site https://writeups.hackethical.be/ ;
+- ignorer les versions de développement ;
+- maintenir une séparation stricte entre scripts actifs et scripts en cours de développement.
 
-Les workflows ignorent volontairement :
+Le workflow ignore volontairement :
 
 - `dev/`
 - les fichiers `*-dev`
 - certaines archives et ressources internes
 
-afin d’éviter toute publication involontaire.
-
-------
+afin d’éviter toute publication involontaire de versions intermédiaires.
 
 ## Exemples d’utilisation
 
 ### Énumération réseau
 
 ```
-./mon-nmap target.htb
+mon-nmap target.htb
 ```
 
 Résultats typiques :
@@ -171,51 +179,46 @@ scans_nmap/cms_vuln_scan.txt
 ### Reconnaissance web
 
 ```
-./mon-recoweb http://target.htb
+mon-recoweb http://target.htb
 ```
 
 ### Découverte de sous-domaines
 
 ```
-./mon-subdomains target.htb
+mon-subdomains target.htb
 ```
 
 ------
 
 ## Site associé : HackEthical
 
-Le site HackEthical regroupe :
+Le site https://writeups.hackethical.be/ regroupe :
 
-- writeups Hack The Box ;
-- recettes Linux ;
+- writeups et walkthroughs Hack The Box ;
 - méthodes d’énumération ;
-- exploitation web ;
-- escalade de privilèges ;
-- documentation orientée CTF.
+- reconnaissance et exploitation web ;
+- escalade de privilèges Linux ;
+- documentation technique orientée CTF.
 
-Site principal :
-
-https://writeups.hackethical.be/
-
-------
+---
 
 ## Usage éthique
 
-Ces scripts sont fournis dans un cadre strictement éducatif et légal.
+**Ces scripts sont fournis dans un cadre strictement éducatif, légal et autorisé.**
 
-Ils sont destinés aux plateformes de laboratoire telles que :
+Ils sont destinés à des plateformes de laboratoire telles que :
 
 - Hack The Box ;
 - TryHackMe ;
 - environnements CTF ;
 - systèmes explicitement autorisés.
 
-Toute utilisation sur des systèmes tiers sans autorisation est interdite.
+**Toute utilisation sur des systèmes tiers sans autorisation explicite est interdite.**
 
-------
+---
 
 ## Auteur
 
-Noël — HackEthical
+NoelNac — HackEthical
 
-Linux • Bash • Hack The Box • CTF • automation • writeups
+Linux • Bash • Hack The Box • CTF • writeups • walkthroughs
