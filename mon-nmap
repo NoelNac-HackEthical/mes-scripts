@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # NAME=mon-nmap
-# VERSION=2.1.1
+# VERSION=2.1.2
 # DESCRIPTION=Automatise une série de scans Nmap (TCP complet, agressif, CMS, UDP, FTP/SMB) pour une cible CTF donnée.
 #
 # PRESENTATION_START
@@ -22,7 +22,7 @@
 #   5) Scan UDP (top 20 ports)
 #
 # Sortie
-#   Les résultats sont stockés dans le répertoire : scans_nmap/
+#   Les résultats sont stockés dans le répertoire : scans_nmap/<cible>/
 #     - full_tcp_scan.txt
 #     - enum_ftp_smb_scan.txt
 #     - aggressive_vuln_scan.txt
@@ -80,7 +80,7 @@ usage(){
 Usage: ${_self_base} [OPTIONS] <IP_OU_DOMAINE>
 
 Lance une série de scans Nmap sur une cible (IP ou domaine) et enregistre
-les résultats dans le répertoire scans_nmap/ :
+les résultats dans le répertoire scans_nmap/<cible>/ :
 
   1) Scan complet des ports TCP
   2) Enumération ciblée FTP / SMB (si services détectés)
@@ -89,12 +89,12 @@ les résultats dans le répertoire scans_nmap/ :
   5) Scan UDP (top 20 ports)
 
 Fichiers produits :
-  scans_nmap/full_tcp_scan.txt
-  scans_nmap/enum_ftp_smb_scan.txt
-  scans_nmap/aggressive_vuln_scan.txt
-  scans_nmap/cms_vuln_scan.txt
-  scans_nmap/udp_vuln_scan.txt
-
+  scans_nmap/<cible>/full_tcp_scan.txt
+  scans_nmap/<cible>/enum_ftp_smb_scan.txt
+  scans_nmap/<cible>/aggressive_vuln_scan.txt
+  scans_nmap/<cible>/cms_vuln_scan.txt
+  scans_nmap/<cible>/udp_vuln_scan.txt
+  
 Options:
   -h, --help       Affiche cette aide
   -V, --version    Affiche la version
@@ -123,8 +123,23 @@ EXAMPLES
 
 # ---------------------------------------------------------------------------
 run_scans() {
-  local target="$1"
-  local output_dir="scans_nmap"
+local target="$1"
+local target_dir
+local output_dir
+
+# Construction du nom de dossier cible
+if [[ "$target" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+  # Cas IPv4 : 10.129.237.241 -> 10_129_237_241
+  target_dir="${target//./_}"
+else
+  # Cas hostname : planning.htb -> planning
+  target_dir="${target%%.*}"
+
+  # Sécurisation éventuelle
+  target_dir="${target_dir//[^a-zA-Z0-9_-]/_}"
+fi
+
+output_dir="scans_nmap/$target_dir"
 
   # ---------- Pré-check canonique HTB : validation IP sans ICMP ----------
   if nc -z -w2 "$target" 80 2>/dev/null \
@@ -267,7 +282,8 @@ run_scans() {
   echo "[5/5] Scan UDP (top 20 ports)..."
   nmap -n -Pn -sU --top-ports 20 -T4 -oN "$output_dir/udp_vuln_scan.txt" "$target"
 
-  echo "✅ Scans terminés. Résultats du scan agressif dans $output_dir/aggressive_vuln_scan.txt"
+  echo "✅ Scans terminés. Résultats disponibles dans $output_dir/"
+  echo "   Scan agressif : $output_dir/aggressive_vuln_scan.txt"
 }
 # ---------------------------------------------------------------------------
 
