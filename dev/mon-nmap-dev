@@ -283,7 +283,7 @@ output_dir="scans_nmap/$target_dir"
   nmap -n -Pn -sU --top-ports 20 -T4 -oN "$output_dir/udp_vuln_scan.txt" "$target"
 
   echo "✅ Scans terminés. Résultats disponibles dans $output_dir/"
-  echo "   Scan agressif : $output_dir/aggressive_vuln_scan.txt"txt"
+  echo "   Scan agressif : $output_dir/aggressive_vuln_scan.txt"
 }
 # ---------------------------------------------------------------------------
 
