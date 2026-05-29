@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # NAME=mon-nmap-dev
-# VERSION=2.1.2
+# VERSION=2.1.3
 # DESCRIPTION=Automatise une série de scans Nmap (TCP complet, agressif, CMS, UDP, FTP/SMB) pour une cible CTF donnée.
 #
 # PRESENTATION_START
@@ -232,7 +232,7 @@ output_dir="scans_nmap/$target_dir"
 
     # Variante LEGACY : scripts utiles en CTF + vieux SSL/TLS
     local vuln_scripts
-    vuln_scripts="(http-vuln-* or http-shellshock or ssl-heartbleed) and not (http-vuln-cve2017-1001000 or http-sql-injection or ssl-cert or sslv2 or ssl-dh-params)"
+    vuln_scripts="(http-vuln-* or http-shellshock or ssl-heartbleed or ssl-cert) and not (http-vuln-cve2017-1001000 or http-sql-injection or sslv2 or ssl-dh-params)"
 
     # Commande nmap (pour rappel dans l'en-tête)
     local scan_cmd
