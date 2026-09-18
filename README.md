@@ -175,9 +175,9 @@ mon-nmap target.htb
 Résultats typiques :
 
 ```
-scans_nmap/full_tcp_scan.txt
-scans_nmap/aggressive_vuln_scan.txt
-scans_nmap/cms_vuln_scan.txt
+scans_nmap/target/full_tcp_scan.txt
+scans_nmap/target/aggressive_vuln_scan.txt
+scans_nmap/target/cms_vuln_scan.txt
 ```
 
 ### Reconnaissance web
