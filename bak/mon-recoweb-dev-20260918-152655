@@ -594,12 +594,10 @@ _main(){
     echo "[*] ffuf fs explicite : $FFUF_FS"
   fi
 
+  local LOG_DIRB="$OUTDIR/dirb.log"
   local LOG_FFUF_DIRS="$OUTDIR/ffuf_dirs.log"
   local LOG_FFUF_FILES="$OUTDIR/ffuf_files.log"
-  local LOG_DIRB HITS_DIRB
-
-  LOG_DIRB="$(mktemp)"
-  HITS_DIRB="$(mktemp)"
+  local HITS_DIRB="$OUTDIR/dirb_hits.txt"
 
   local JSON_DIRS="$OUTDIR/ffuf_dirs.json"
   local JSON_FILES="$OUTDIR/ffuf_files.json"
@@ -610,13 +608,6 @@ _main(){
   local HITS_FILES="$OUTDIR/ffuf_files_hits.txt"
 
   local SUMMARY_FILE="$OUTDIR/RESULTS_SUMMARY.txt"
-  
-  local PREV_SUMMARY=""
-
-  if [[ -f "$SUMMARY_FILE" ]]; then
-    PREV_SUMMARY="$(mktemp)"
-    cp -- "$SUMMARY_FILE" "$PREV_SUMMARY"
-  fi
 
   # Phase 1: dirb
   if $DO_DIRB; then
@@ -634,6 +625,8 @@ _main(){
   else
     echo
     echo "[!] Phase 1/3: dirb skipped (--no-dirb)"
+    : > "$LOG_DIRB"
+    : > "$HITS_DIRB"
   fi
 
   # Phase 2: ffuf dirs
@@ -773,33 +766,24 @@ _main(){
     echo
 
     {
-      # --- DIRB : résultats courants ou résultats conservés ---
-      if $DO_DIRB; then
-        if [[ -s "$LOG_DIRB" ]]; then
-          tr -d '\r' < "$LOG_DIRB" \
-          | sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' \
-          | awk '
-              match($0, /\+ (https?:\/\/[^ ]+) \(CODE:([0-9]+)\|SIZE:([0-9]+)\)/, m) {
-                print m[1] " (CODE:" m[2] "|SIZE:" m[3] ")"
-                next
-              }
-              match($0, /==> DIRECTORY: (https?:\/\/[^ ]+)/, m) {
-                print m[1]
-                next
-              }
-            ' \
-          | sort -u
-        fi
-      else
-        if [[ -n "$PREV_SUMMARY" && -s "$PREV_SUMMARY" ]]; then
-          awk '
-            /^\[DIRB\]$/ { capture=1; next }
-            /^\[FFUF — DIRECTORIES\]$/ { capture=0 }
-            capture && $0 != "(aucun résultat)" { print }
-          ' "$PREV_SUMMARY" \
-          | sed '/^[[:space:]]*$/d'
-        fi
+      # --- DIRB : relire le log pour récupérer CODE/SIZE quand présent ---
+      if [[ -s "$LOG_DIRB" ]]; then
+        tr -d '\r' < "$LOG_DIRB" \
+        | sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' \
+        | awk '
+            match($0, /\+ (https?:\/\/[^ ]+) \(CODE:([0-9]+)\|SIZE:([0-9]+)\)/, m) {
+              print m[1] " (CODE:" m[2] "|SIZE:" m[3] ")"
+              next
+            }
+            match($0, /==> DIRECTORY: (https?:\/\/[^ ]+)/, m) {
+              # Dirb ne donne pas CODE/SIZE ici → on garde l’URL brute
+              print m[1]
+              next
+            }
+          ' \
+        | sort -u
       fi
+
       # --- FFUF DIRECTORIES : JSON → URL + CODE/SIZE ---
       if [[ -s "$JSON_DIRS" ]] && command -v jq >/dev/null 2>&1; then
         jq -r --arg base "${BASE_URL%/}/" '
@@ -807,7 +791,6 @@ _main(){
           | "\($base)\(.input.FUZZ)/ (CODE:\(.status)|SIZE:\(.length))"
         ' "$JSON_DIRS" 2>/dev/null || true
       fi
-
 
       # --- FFUF FILES : JSON → URL + CODE/SIZE ---
       if [[ -s "$JSON_FILES" ]] && command -v jq >/dev/null 2>&1; then
@@ -824,35 +807,19 @@ _main(){
     echo
 
     echo "[DIRB]"
-    if $DO_DIRB; then
-      if [[ -s "$LOG_DIRB" ]]; then
-        tr -d '\r' < "$LOG_DIRB" \
-        | sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' \
-        | awk '
-            match($0, /\+ (https?:\/\/[^ ]+) \(CODE:([0-9]+)\|SIZE:([0-9]+)\)/, m) {
-              print m[1] " (CODE:" m[2] "|SIZE:" m[3] ")"
-              next
-            }
-            match($0, /==> DIRECTORY: (https?:\/\/[^ ]+)/, m) {
-              print m[1]
-              next
-            }
-          ' \
-        | sort -u
-      else
-        echo "(aucun résultat)"
-      fi
+    if [[ -s "$LOG_DIRB" ]]; then
+      tr -d '\r' < "$LOG_DIRB" \
+      | sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' \
+      | awk '
+          match($0, /\+ (https?:\/\/[^ ]+) \(CODE:([0-9]+)\|SIZE:([0-9]+)\)/, m) {
+            print m[1] " (CODE:" m[2] "|SIZE:" m[3] ")"
+            next
+          }
+          match($0, /==> DIRECTORY: (https?:\/\/[^ ]+)/, m) { print m[1]; next }
+        ' \
+      | sort -u
     else
-      if [[ -n "$PREV_SUMMARY" && -s "$PREV_SUMMARY" ]]; then
-        awk '
-          /^\[DIRB\]$/ { capture=1; next }
-          /^\[FFUF — DIRECTORIES\]$/ { capture=0 }
-          capture { print }
-        ' "$PREV_SUMMARY" \
-        | sed '/^[[:space:]]*$/d'
-      else
-        echo "(aucun résultat)"
-      fi
+      echo "(aucun résultat)"
     fi
 
     echo
@@ -879,9 +846,10 @@ _main(){
 
   } >> "$SUMMARY_FILE"
 
-  rm -f -- "$LOG_DIRB" "$HITS_DIRB"
   echo
   echo "[+] Outputs:"
+  echo "    - $LOG_DIRB"
+  echo "    - $HITS_DIRB"
   echo "    - $JSON_DIRS"
   echo "    - $TXT_DIRS"
   echo "    - $HITS_DIRS"
