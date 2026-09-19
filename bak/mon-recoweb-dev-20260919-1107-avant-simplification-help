@@ -89,115 +89,37 @@ _print_version_and_exit(){
 
 usage(){
   cat <<USAGE
-Usage:
-  ${_self_base} <cible>
-  ${_self_base} <cible>/<répertoire>/
-  ${_self_base} <cible>/<répertoire>/ --ext <extensions>
+Usage: ${_self_base} [OPTIONS] <target>
+       ${_self_base} [OPTIONS] -t <target>
 
-Exemples:
-  ${_self_base} cible.htb
-  ${_self_base} cible.htb/cgi-bin/
-  ${_self_base} cible.htb/cgi-bin/ --ext sh,cgi,pl
+Description:
+  Recon web KISS en 3 phases (dirb + ffuf dirs + ffuf files), avec résumé global persistant.
 
-Par défaut, ${_self_base} lance automatiquement :
-  1. dirb
-  2. ffuf directories
-  3. ffuf files
+Target:
+  <target>                  Host (ex: dog.htb) OU URL complète (ex: http://10.10.10.10)
+                            Supporte aussi host/path (ex: cible.htb/cgi-bin/)
+  -t, --target <target>     (Optionnel) même chose, pour compatibilité
 
-Les résultats sont regroupés dans :
-  RESULTS_SUMMARY.txt
-
-Options courantes:
-  --ext <liste>          Extensions à tester avec ffuf-files
-                        Exemple : --ext php,txt,bak
-
-  -h, --help             Afficher cette aide
-  --help-advanced        Afficher les options avancées
-  -V, --version          Afficher la version
-
-Pour les filtres, les wordlists, le lancement séparé des phases
-et les autres réglages :
-  ${_self_base} --help-advanced
-USAGE
-}
-
-usage_advanced(){
-  cat <<USAGE
-Usage avancé:
-  ${_self_base} [OPTIONS] <cible>
-  ${_self_base} [OPTIONS] -t <cible>
-
-Cible:
-  cible.htb
-  http://10.10.10.10
-  cible.htb/cgi-bin/
-
-Phases:
-  --no-dirb              Ne pas lancer dirb
-  --no-ffuf-dirs         Ne pas lancer ffuf directories
-  --no-ffuf-files        Ne pas lancer ffuf files
-
-  Les phases peuvent être lancées séparément.
-  Les résultats sont fusionnés dans RESULTS_SUMMARY.txt.
-
-Ciblage:
-  -s, --scheme <http|https>
-                         Schéma utilisé si la cible est un host
-                         Défaut : http
-
-  --base <path>          Définir un chemin de base
-                         Exemple : --base /app
-
-  --ext <liste>          Extensions testées par ffuf-files
-                         Exemple : --ext php,txt,bak
-
-Filtres ffuf:
-  --fc <codes>           Codes HTTP à filtrer
-                         Défaut : 404
-
-  --fs <size>            Taille de réponse à filtrer
-                         Prioritaire sur la détection automatique
-
-  --ffuf-extra <opts>    Options supplémentaires transmises à ffuf
-
-Performance:
-  -T, --threads <n>      Nombre de threads ffuf
-                         Défaut : 30
-
-  --rate <n>             Limite de requêtes par seconde
-
-  --timeout <sec>        Timeout ffuf
-                         Défaut : 10
-
-Wordlists:
-  --dirb-wordlist <path> Wordlist utilisée par dirb
-  --raft-dirs <path>     Wordlist utilisée par ffuf directories
-  --raft-files <path>    Wordlist utilisée par ffuf files
-
-Sortie:
-  -o, --outdir <dir>     Dossier de sortie
-
-Autres options:
-  -t, --target <cible>   Définir explicitement la cible
-  --debug                Activer le mode debug
-  -h, --help             Aide simplifiée
-  --help-advanced        Aide avancée
-  -V, --version          Version
-
-Exemple — ffuf-files seul:
-  ${_self_base} cible.htb \\
-    --no-dirb \\
-    --no-ffuf-dirs \\
-    --ffuf-extra "-fc 302,401 -fs 97,49,125 -fmode and"
-
-Exemple — ffuf-dirs seul:
-  ${_self_base} cible.htb \\
-    --no-dirb \\
-    --no-ffuf-files \\
-    --ffuf-extra "-fc 302 -fs 97 -fmode and"
-
-Les différentes phases peuvent être lancées dans plusieurs terminaux.
-Leur écriture dans RESULTS_SUMMARY.txt est synchronisée.
+Options:
+  -s, --scheme <http|https> Scheme si target est un host (défaut: http)
+  --base <path>             Base path prefix (défaut: /) ex: /app => http://t/app/FUZZ
+  --ext <list>              Extensions pour ffuf files (ex: ".sh,.cgi,.pl" ou "sh,cgi,pl")
+  -T, --threads <n>         Threads ffuf (défaut: 30)
+  --rate <n>                Limite le débit ffuf (req/s). Ex: 40, 100, 200
+  --timeout <sec>           Timeout ffuf en secondes (défaut: 10)
+  --fc <codes>              Filtre codes status ffuf (défaut: 404)
+  --fs <size>               Filtre size ffuf explicite. Prioritaire sur auto-détection soft-404
+  --ffuf-extra <opts>       Options supplémentaires passées telles quelles à ffuf (dirs ET files)
+  --dirb-wordlist <path>    Wordlist dirb (défaut: /usr/share/wordlists/dirb/common.txt)
+  --raft-dirs <path>        Wordlist ffuf dirs
+  --raft-files <path>       Wordlist ffuf files
+  -o, --outdir <dir>        Dossier de sortie (défaut: scans_recoweb)
+  --no-dirb                 Skip dirb
+  --no-ffuf-dirs            Skip ffuf directories
+  --no-ffuf-files           Skip ffuf files
+  --debug                   Debug (set -x)
+  -h, --help                Help
+  -V, --version             Version
 USAGE
 }
 
@@ -212,12 +134,6 @@ fi
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   _version_str
   usage
-  exit 0
-fi
-
-if [[ "${1:-}" == "--help-advanced" ]]; then
-  _version_str
-  usage_advanced
   exit 0
 fi
 
@@ -261,12 +177,6 @@ while [[ $# -gt 0 ]]; do
       usage
       exit 0
       ;;
-      
-    --help-advanced)
-      _version_str
-      usage_advanced
-      exit 0
-      ;;      
 
     -t|--target)
       TARGET="${2:-}"
