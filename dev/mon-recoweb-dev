@@ -3,58 +3,86 @@
 # VERSION=2.2.3
 # DESCRIPTION=Reconnaissance web automatisée avec dirb et ffuf, détection des soft-404 et scans ciblés de répertoires avec extensions personnalisées.
 # PRESENTATION_START
-# **mon-recoweb — Recon web en 3 phases (dirb + ffuf dirs + ffuf files)**
+# **mon-recoweb — Reconnaissance web automatisée**
 #
-# Objectif :
-# - Obtenir une cartographie exploitable des répertoires et fichiers HTTP d’une cible CTF.
+# `mon-recoweb` automatise plusieurs étapes de reconnaissance web et regroupe
+# les résultats dans un seul fichier de synthèse.
 #
-# Validation de l’accessibilité de la cible (sans ICMP) :
-# - Si la cible est une URL complète : test HTTP(S) HEAD via curl
-# - Si la cible est un host : test HTTP(S) sur la base URL via curl
-# - Fallback TCP via nc sur les ports 80 et 443
+# Il combine trois phases basées sur des outils bien connus : `dirb` et `ffuf`.
+# Leur utilisation complémentaire permet d’obtenir une reconnaissance web
+# plus approfondie, avec une couverture optimisée des répertoires et fichiers.
 #
-# Phases d’énumération :
-# 1) dirb (wordlist courte) → cartographie initiale + extraction des hits
-# 2) ffuf directories (raft-medium-directories)
-# 3) ffuf files (raft-medium-files) + option --ext
+# Dans le cas le plus simple :
 #
-# Scan ciblé d’un répertoire :
-# - La cible peut inclure un chemin : <host>/<path>/ (ex: cible.htb/cgi-bin/)
-# - Le script ne scanne alors QUE ce répertoire (BASE=/path)
-# - Les sorties sont écrites dans scans_recoweb/<vhost>/<dernier-segment>/ (ex: scans_recoweb/cible.htb/cgi-bin/)
+# ```bash
+# mon-recoweb cible.htb
+# ```
 #
-# Organisation des sorties par vhost :
-# - Si la cible est un host (non-IP), les sorties sont placées dans : scans_recoweb/<vhost>/
+# Le script lance successivement :
 #
-# Wordlist "files" par défaut en scan de répertoire :
-# - Si BASE != "/" ET que l’utilisateur n’a pas fourni --raft-files,
-#   alors la phase ffuf files utilise par défaut : /usr/share/wordlists/dirb/common.txt
+# 1. `dirb` pour une première découverte ;
+# 2. `ffuf` pour les répertoires ;
+# 3. `ffuf` pour les fichiers.
 #
-# Gestion des soft-404 :
-# - Détection automatique d’un HTTP 200 sur ressource inexistante
-# - Calcul de la taille de réponse et application de -fs <size> à ffuf
+# Les résultats sont regroupés dans :
 #
-# Sortie permanente :
-# - RESULTS_SUMMARY.txt : résumé global (URLs complètes + CODE/SIZE quand possible)
+# ```text
+# RESULTS_SUMMARY.txt
+# ```
 #
-# Fichiers temporaires :
-# - dirb, ffuf directories et ffuf files utilisent des fichiers temporaires
-#   supprimés après génération de RESULTS_SUMMARY.txt.
+# ## Scanner un répertoire précis
 #
-# Persistance des résultats :
-# - Une phase exécutée remplace les résultats précédents de cette phase.
-# - Une phase désactivée avec --no-* conserve les résultats précédemment
-#   présents dans RESULTS_SUMMARY.txt.
+# ```bash
+# mon-recoweb cible.htb/cgi-bin/
+# ```
 #
-# Alertes (si `jq` est disponible) :
-# - ffuf directories = 0 résultat
-# - ffuf files = 0 résultat
-# - dirb a trouvé des fichiers mais ffuf files = 0
+# Le scan reste alors limité à ce chemin.
 #
-# Usage typique :
-# - Scan de base : ${_self_base} cible.htb
-# - Scan ciblé répertoire + extensions : ${_self_base} cible.htb/chemin/ --ext ".sh,.cgi,.pl"
+# ## Tester des extensions
+#
+# ```bash
+# mon-recoweb cible.htb/cgi-bin/ --ext sh,cgi,pl
+# ```
+#
+# ## Filtrer les résultats parasites des ffuf
+#
+# Certaines applications renvoient beaucoup de réponses parasites.
+# Un filtre simple peut suffire, par exemple sur la taille :
+#
+# ```bash
+# mon-recoweb cible.htb \
+#   --ffuf-extra "-fs 1234"
+# ```
+#
+# ou sur le code HTTP :
+#
+# ```bash
+# mon-recoweb cible.htb \
+#   --ffuf-extra "-fc 302"
+# ```
+#
+# Pour un filtrage plus précis, tu peux combiner code HTTP et taille :
+#
+# ```bash
+# mon-recoweb cible.htb \
+#   --no-dirb \
+#   --no-ffuf-dirs \
+#   --ffuf-extra "-fc 302,401 -fs 97,49,125 -fmode and"
+# ```
+#
+# Avec `-fmode and`, les critères sont combinés.
+#
+# Si `ffuf-files` et `ffuf-dirs` nécessitent des filtres différents, lance-les
+# séparément ou en parallèle. Les résultats sont fusionnés dans
+# `RESULTS_SUMMARY.txt`.
+#
+# ## Pour aller plus loin
+#
+# ```bash
+# mon-recoweb --help-advanced
+# ```
 # PRESENTATION_END
+#
 # HOMEPAGE=https://github.com/NoelNac-HackEthical/mes-scripts
 #____________________________________________________________________________
 #
