@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # NAME=mon-recoweb-dev
-# VERSION=2.2.3
+# VERSION=3.0.0
 # DESCRIPTION=Reconnaissance web automatisée avec dirb et ffuf, détection des soft-404 et scans ciblés de répertoires avec extensions personnalisées.
 # PRESENTATION_START
 # **mon-recoweb — Reconnaissance web automatisée**
@@ -272,6 +272,9 @@ OUTDIR="scans_recoweb"
 DO_DIRB=true
 DO_FFUF_DIRS=true
 DO_FFUF_FILES=true
+
+ORIGINAL_CMDLINE="$(printf '%q ' "$0" "$@")"
+ORIGINAL_CMDLINE="${ORIGINAL_CMDLINE% }"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -1042,8 +1045,8 @@ _main(){
 
   NOW="$(date '+%Y-%m-%d %H:%M:%S')"
 
-  CMDLINE="$(printf '%q ' "$0" "$@")"
-  CMDLINE="${CMDLINE% }"
+  CMDLINE="$ORIGINAL_CMDLINE"
+
 
   NAME="$(awk -F= '
     /^# *NAME *=/ {
@@ -1087,7 +1090,7 @@ _main(){
 
     _dirb_core="${_dirb_core% }"
 
-    DIRB_CMD="${_dirb_core} | tee $(printf '%q' "$LOG_DIRB")"
+    DIRB_CMD="${_dirb_core}"
   else
     DIRB_CMD="(dirb skipped --no-dirb)"
   fi
