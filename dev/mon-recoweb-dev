@@ -719,17 +719,6 @@ write_results_header(){
     echo "Périmètre    : ${TARGET_SCOPE_HDR}"
     echo "Date début   : ${NOW}"
     echo
-    echo "Commandes exécutées (exactes) :"
-    echo
-    echo "[dirb — découverte initiale]"
-    echo "${DIRB_CMD:-n/a}"
-    echo
-    echo "[ffuf — énumération des répertoires]"
-    echo "${FFUF_DIRS_CMD:-n/a}"
-    echo
-    echo "[ffuf — énumération des fichiers]"
-    echo "${FFUF_FILES_CMD:-n/a}"
-    echo
     echo "Processus de génération des résultats :"
     echo "- Les sorties JSON temporaires produites par ffuf constituent la source de vérité pendant l'exécution."
     echo "- Les entrées pertinentes sont extraites via jq (URL, code HTTP, taille de réponse)."
@@ -1252,7 +1241,26 @@ _main(){
         fi
       fi
 
-    } | sed '/^$/d' | sort -u
+    } | sed '/^$/d' \
+      | sort -u \
+      | awk '
+          {
+            key=$0
+
+            if (match(key, / \(CODE:[0-9]+\|SIZE:[0-9]+\)$/)) {
+              meta=substr(key, RSTART)
+              url=substr(key, 1, RSTART-1)
+
+              sub(/\/$/, "", url)
+
+              key=url meta
+            }
+
+            if (!seen[key]++) {
+              print
+            }
+          }
+        '
 
     echo
     echo "=== Détails par outil ==="
