@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # NAME=mon-recoweb
 # VERSION=3.0.0
-# DESCRIPTION=Reconnaissance web automatisée avec dirb et ffuf, détection des soft-404 et scans ciblés de répertoires avec extensions personnalisées.
+# DESCRIPTION=Reconnaissance web automatisée avec dirb et ffuf, avec scans ciblés de répertoires et fichiers.
 # PRESENTATION_START
 # **mon-recoweb — Reconnaissance web automatisée**
 #
