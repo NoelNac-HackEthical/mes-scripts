@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # NAME=mon-subdomains-dev
-# VERSION=2.0.1
+# VERSION=2.1.0
 # DESCRIPTION=Découverte automatisée de vhosts et sous-domaines avec ffuf, avec détection des hôtes valides et réduction des faux positifs.
 # PRESENTATION_START
 # **mon-subdomains — Découverte de vhosts et sous-domaines pour CTF / pentest**
