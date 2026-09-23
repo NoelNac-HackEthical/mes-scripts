@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # NAME=mon-subdomains-dev
 # VERSION=2.0.1
-# DESCRIPTION=Découverte de vhosts et sous-domaines avec ffuf, modes fast/medium/large ou wordlist personnalisée, baselines robustes, contrôle anti-wildcard et filtres HTTP.
+# DESCRIPTION=Découverte automatisée de vhosts et sous-domaines avec ffuf, avec détection des hôtes valides et réduction des faux positifs.
 # PRESENTATION_START
-# **mon-subdomains — Découverte de vhosts pour CTF / pentest**
+# **mon-subdomains — Découverte de vhosts et sous-domaines pour CTF / pentest**
 #
 # Ce script automatise la recherche de vhosts (Host: FUZZ.domaine) en interrogeant
 # l'IP cible et en extrayant les hôtes valides (ex. api.domaine.htb, admin.domaine.htb).
 #
-# Fonctionnement (résumé fidèle au code) :
+# Fonctionnement :
 # - Résout l'IP de la cible (getent, puis fallback dig).
-# - Pré-check canonique HTB : validation TCP rapide sur 80/443 (sans ICMP).
+# - Effectue un pré-check TCP rapide sur les ports 80/443, sans dépendre de l'ICMP.
 # - Scan Nmap interne (-Pn -sV -p-) pour détecter les ports HTTP/HTTPS exposés.
 # - Pour chaque port web :
 #   - Calcule 3 baselines (code/size/words) avec un Host aléatoire.
@@ -21,10 +21,12 @@
 #   scans_subdomains/scan_vhosts.txt
 #
 # Wordlists :
-# - Master par défaut : /usr/share/wordlists/htb-dns-vh-5000.txt
+# - Par défaut, le script utilise :
+#   /usr/share/wordlists/htb-dns-vh-5000.txt
+# - Cette wordlist est installée par le script make-htb-wordlist, qu'il faut exécuter
+#   au préalable.
 # - Modes : fast (1000), medium (2000), large (5000)
 # - --custom FILE : utilise une wordlist personnalisée.
-# - Si la master est absente : installe/régénère via ton script make-htb-wordlist.
 #
 # Options utiles :
 # - --save-hosts / --dry-run-hosts : ajout contrôlé des vhosts trouvés dans /etc/hosts.
@@ -67,34 +69,53 @@ Usage:
   mon-subdomains <domaine.htb> [mode] [options]
 
 Modes :
-  -f, --fast      1000 premières lignes de la master
-  -m, --medium    2000 premières lignes
-  -l, --large     5000 (entière)
-  --custom FILE   Wordlist personnalisée (ignore la master)
+  -f, --fast      1000 premières lignes de la wordlist master
+  -m, --medium    2000 premières lignes de la wordlist master
+  -l, --large     5000 lignes, wordlist complète (mode par défaut)
+  --custom FILE   Utilise une wordlist personnalisée à la place de la master
 
 Options :
-  --master FILE     Chemin de la master 5000 (défaut: /usr/share/wordlists/htb-dns-vh-5000.txt)
+  --master FILE     Chemin de la wordlist master
+                    (défaut: /usr/share/wordlists/htb-dns-vh-5000.txt)
   -t N              Threads ffuf (défaut: 50)
-  --timeout S       Timeout curl (défaut: 8)
-  --strict          Codes restreints utiles (équiv. à --codes 200,401,403)
-  --codes LIST      Liste pour ffuf -mc (ex: "200,401,403"; prend le dessus sur --strict)
-  --save-hosts      Ajoute les vhosts trouvés dans /etc/hosts (backup, sans doublon)
-  --dry-run-hosts   Simule l’ajout dans /etc/hosts (n’écrit rien)
-  --debug           Affiche la commande ffuf et garde la sortie brute (fichiers /tmp)
-  -V, --version     Afficher la version et quitter
-  -h, --help        Aide
+  --timeout S       Timeout curl en secondes (défaut: 8)
+  --strict          Restreint les codes HTTP à 200,401,403
+  --codes LIST      Codes HTTP transmis à ffuf -mc
+                    (ex: "200,401,403"; prioritaire sur --strict)
+  --save-hosts      Ajoute les vhosts trouvés dans /etc/hosts
+                    (backup, sans doublon)
+  --dry-run-hosts   Simule l’ajout dans /etc/hosts sans écrire le fichier
+  --debug           Affiche la commande ffuf et conserve les fichiers /tmp
+  -V, --version     Affiche la version et quitte
+  -h, --help        Affiche cette aide
 USAGE
 }
 
-# ---------- Nmap helper (style mon-scan, sans emojis/symboles) ----------
 _run_nmap_scan() {
   # args: target_ip nmap_outfile
   local ip="$1" out="$2"
+  local rc
 
-  info "Nmap : détection des services web (HTTP/HTTPS)"
+  info "Recherche des services web..."
 
-  if ! nmap -Pn -sV -p- --min-rate 5000 -T4 --max-retries 3 --stats-every 2s \
-           -oN "$out" "$ip"; then
+  set +e
+  nmap -Pn -sV -p- --min-rate 5000 -T4 --max-retries 3 --stats-every 2s \
+       -oN "$out" "$ip" 2>&1 |
+    awk '
+      /SYN Stealth Scan Timing: About [0-9.]+% done/ {
+        if (match($0, /About [0-9.]+% done/)) {
+          p = substr($0, RSTART + 6, RLENGTH - 12)
+          printf "\r    Progression : %s%%", p
+          fflush()
+        }
+      }
+    '
+  rc=${PIPESTATUS[0]}
+  set -e
+
+  printf '\r%-40s\r' ""
+
+  if [[ $rc -ne 0 ]]; then
     warn "Échec du scan Nmap interne sur ${ip}."
   fi
 }
@@ -196,6 +217,7 @@ detect_web_endpoints_from_nmap() {
       svc="${BASH_REMATCH[2]}"
       rest="${BASH_REMATCH[3]}"
       text="${svc} ${rest}"
+
       if grep -qi 'http' <<<"$text"; then
         scheme="http"
         if grep -qiE 'https|ssl/http|tls' <<<"$text"; then
@@ -215,6 +237,7 @@ detect_web_endpoints_from_nmap() {
 if [[ "${1-}" == "-V" || "${1-}" == "--version" ]]; then
   _print_version_and_exit
 fi
+
 if [[ "${1-}" == "-h" || "${1-}" == "--help" || -z "${1-}" ]]; then
   usage
   exit 0
@@ -285,11 +308,13 @@ else
     _hint_wordlist_install
     exit 1
   }
+
   case "$MODE" in
     fast)   N=1000;;
     medium) N=2000;;
     large)  N=5000;;
   esac
+
   WL_EFFECTIVE="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_wl.XXXXXX")"
   head -n "$N" "$MASTER" > "$WL_EFFECTIVE"
   ok "Mode : $(echo "$MODE" | tr a-z A-Z)  (wordlist: $WL_EFFECTIVE)"
@@ -320,14 +345,13 @@ else
   warn "Le service HTTP est peut-être exposé sur un autre port (ex: 8080)."
   warn "Si c'est le cas tu peux continuer le scan."
   echo
+
   read -r -p "Continuer quand même le scan ? [o/N] " rep
   case "$rep" in
     [oOyY]) info "Poursuite du scan malgré l'absence de réponse TCP (80/443).";;
     *) warn "Scan interrompu."; exit 1 ;;
   esac
 fi
-
-
 
 # ---------- Scan Nmap interne ----------
 NMAP_FILE="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_nmap.XXXXXX")"
@@ -348,7 +372,7 @@ if ((${#WEB_ENDPOINTS[@]} == 0)); then
   warn "Aucun service HTTP/HTTPS détecté par Nmap sur ${TARGET_IP}."
   echo "Aucun port HTTP/HTTPS détecté." >> "$DETAILS_TXT"
 else
-  info "Ports HTTP/HTTPS détectés : ${WEB_ENDPOINTS[*]}"
+  info "Services web détectés : ${WEB_ENDPOINTS[*]}"
 
   for ep in "${WEB_ENDPOINTS[@]}"; do
     PORT="${ep%%:*}"
@@ -358,7 +382,7 @@ else
     CURL_TLS=(); FFUF_TLS=()
     [[ "$SCHEME" == "https" ]] && CURL_TLS+=(--insecure) && FFUF_TLS+=(-k)
 
-    info "Port ${PORT} (${SCHEME}) : baselines…"
+    info "Analyse du service ${SCHEME^^} sur le port ${PORT}..."
 
     read -r BH1 BC1 BS1 BW1 < <(_fetch_baseline_metrics "$SCHEME" "$TARGET_IP" "$PORT" "$DOMAIN" "$TIMEOUT" 0)
     read -r BH2 BC2 BS2 BW2 < <(_fetch_baseline_metrics "$SCHEME" "$TARGET_IP" "$PORT" "$DOMAIN" "$TIMEOUT" 0)
@@ -384,17 +408,21 @@ else
     # Si 3xx stable : on suit les redirects (curl -L) et on fera ffuf -r
     FOLLOW_REDIRECTS=0
     REF_CODE="$BC1"; REF_SIZE="$BS1"; REF_WORDS="$BW1"
+
     if [[ "$BC1" =~ ^3 && "$BC2" =~ ^3 && "$BC3" =~ ^3 ]]; then
       FOLLOW_REDIRECTS=1
-      info "Baseline 3xx détectée → baselines après redirection (curl -L) + ffuf -r"
+      info "Redirections détectées : suivi automatique activé."
+
       read -r _ LBC1 LBS1 LBW1 < <(_fetch_baseline_metrics "$SCHEME" "$TARGET_IP" "$PORT" "$DOMAIN" "$TIMEOUT" 1)
       read -r _ LBC2 LBS2 LBW2 < <(_fetch_baseline_metrics "$SCHEME" "$TARGET_IP" "$PORT" "$DOMAIN" "$TIMEOUT" 1)
       read -r _ LBC3 LBS3 LBW3 < <(_fetch_baseline_metrics "$SCHEME" "$TARGET_IP" "$PORT" "$DOMAIN" "$TIMEOUT" 1)
+
       {
         echo "  After-redirect#1: code=${LBC1} size=${LBS1} words=${LBW1}"
         echo "  After-redirect#2: code=${LBC2} size=${LBS2} words=${LBW2}"
         echo "  After-redirect#3: code=${LBC3} size=${LBS3} words=${LBW3}"
       } >> "$DETAILS_TXT"
+
       REF_CODE="$LBC1"; REF_SIZE="$LBS1"; REF_WORDS="$LBW1"
     fi
 
@@ -402,6 +430,7 @@ else
     if _is_wildcard_likely "$BC1" "$BS1" "$BW1" "$BC2" "$BS2" "$BW2" "$BC3" "$BS3" "$BW3"; then
       warn "Wildcard vhost probable sur ${PORT} (${SCHEME}) → fuzzing sauté pour éviter les faux positifs."
       info "Explication : la réponse semble identique quel que soit l’en-tête Host → vhost-fuzzing non discriminant sur ce port."
+
       {
         echo "  VHOST (0)"
         echo "    - (fuzzing sauté : wildcard probable)"
@@ -429,7 +458,7 @@ else
     VHOST_TXT_PORT="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_vhosts_${PORT}.XXXXXX")"
     : > "$VHOST_TXT_PORT"
 
-    info "VHOST fuzzing via ffuf sur ${SCHEME}://${TARGET_IP}:${PORT}/ ..."
+    info "Recherche de sous-domaines virtuels avec ffuf..."
 
     CMD=(ffuf -u "${SCHEME}://${TARGET_IP}:${PORT}/" "${FFUF_TLS[@]}" "${FFUF_R[@]}"
               -H "Host: FUZZ.${DOMAIN}"
@@ -450,7 +479,10 @@ else
     VHOST_COUNT_PORT="${VHOST_COUNT_PORT:-0}"
 
     {
+      echo
+      echo "  Résultat :"
       echo "  VHOST (${VHOST_COUNT_PORT})"
+      
       if [[ "$VHOST_COUNT_PORT" -gt 0 ]]; then
         sed 's/^/    - /' "$VHOST_TXT_PORT"
       else
@@ -490,14 +522,17 @@ if [[ $SAVE_HOSTS -eq 1 || $DRY_RUN_HOSTS -eq 1 ]]; then
       TS="$(date +%Y%m%d-%H%M%S)"
       BACKUP="/etc/hosts.bak.${TS}"
       info "Sauvegarde: ${BACKUP}"
+
       if sudo cp /etc/hosts "$BACKUP"; then
         ADDED=0
+
         while IFS= read -r host; do
           if ! grep -qw "$host" /etc/hosts; then
             echo "${TARGET_IP} ${host}" | sudo tee -a /etc/hosts >/dev/null
             ((ADDED++))
           fi
         done < "$UNION_VHOSTS"
+
         [[ $ADDED -gt 0 ]] && ok "--save-hosts : ${ADDED} entrées ajoutées" || info "Aucun ajout (déjà présent)."
       else
         warn "Backup /etc/hosts échoué → abandon de --save-hosts."
@@ -519,27 +554,33 @@ TMP_BLOCK="$(mktemp "/tmp/mon-subdomains_${DOMAIN}_block.XXXXXX")"
   echo "Domaine      : ${DOMAIN}"
   echo "IP           : ${TARGET_IP}"
   echo "Mode         : ${MODE}"
+
   if [[ $DEBUG -eq 1 ]]; then
     echo "Wordlist eff.: $WL_EFFECTIVE"
   fi
+
   echo "Master       : ${MASTER}"
   echo "Codes        : ${MATCH_CODES}  (strict=${STRICT})"
   echo
   echo "VHOST totaux : ${VHOST_COUNT_TOTAL}"
+
   if [[ -s "$UNION_VHOSTS" ]]; then
     sed 's/^/  - /' "$UNION_VHOSTS"
   else
     echo "  - (aucun)"
   fi
+
   echo
   echo "--- Détails par port ---"
   cat "$DETAILS_TXT"
   echo
+
   if [[ $DEBUG -eq 1 ]]; then
     echo "--- Nmap interne ---"
     echo "  Fichier : $NMAP_FILE"
     echo
   fi
+
   echo
   echo "$BLOCK_END"
   echo
@@ -557,6 +598,7 @@ if [[ -f "$SCAN_FILE" ]]; then
     "$SCAN_FILE" > "${SCAN_FILE}.tmp" || true
   mv "${SCAN_FILE}.tmp" "$SCAN_FILE"
 fi
+
 cat "$TMP_BLOCK" >> "$SCAN_FILE"
 ok "Bloc mis à jour dans ${SCAN_FILE} pour le domaine ${DOMAIN}"
 
@@ -568,4 +610,6 @@ if [[ $DEBUG -eq 1 ]]; then
 else
   rm -f /tmp/mon-subdomains_"${DOMAIN}"_* 2>/dev/null || true
 fi
+
 exit 0
+
